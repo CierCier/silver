@@ -401,23 +401,17 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             let target_data =
                 TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
             for (index, param_ty) in sig.params.iter().enumerate() {
-                let lowered = self.lower_basic_type(param_ty)?;
-                if let BasicTypeEnum::StructType(struct_ty) = lowered {
-                    if self
-                        .abi_handler
-                        .struct_needs_byval(self.context, &target_data, struct_ty)
-                    {
-                        let byval_kind = Attribute::get_named_enum_kind_id("byval");
-                        let attr = self
-                            .context
-                            .create_type_attribute(byval_kind, struct_ty.as_any_type_enum());
-                        call.add_attribute(AttributeLoc::Param(index as u32), attr);
+                if let Some(struct_ty) = self.c_byval_param_struct(param_ty, &target_data)? {
+                    let byval_kind = Attribute::get_named_enum_kind_id("byval");
+                    let attr = self
+                        .context
+                        .create_type_attribute(byval_kind, struct_ty.as_any_type_enum());
+                    call.add_attribute(AttributeLoc::Param(index as u32), attr);
 
-                        let align = self.abi_handler.byval_alignment(struct_ty, &target_data);
-                        let align_kind = Attribute::get_named_enum_kind_id("align");
-                        let align_attr = self.context.create_enum_attribute(align_kind, align);
-                        call.add_attribute(AttributeLoc::Param(index as u32), align_attr);
-                    }
+                    let align = self.abi_handler.byval_alignment(struct_ty, &target_data);
+                    let align_kind = Attribute::get_named_enum_kind_id("align");
+                    let align_attr = self.context.create_enum_attribute(align_kind, align);
+                    call.add_attribute(AttributeLoc::Param(index as u32), align_attr);
                 }
             }
         }
@@ -1442,23 +1436,17 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             let target_data =
                 TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
             for (index, param_ty) in sig.params.iter().enumerate() {
-                let lowered = self.lower_basic_type(param_ty)?;
-                if let BasicTypeEnum::StructType(struct_ty) = lowered {
-                    if self
-                        .abi_handler
-                        .struct_needs_byval(self.context, &target_data, struct_ty)
-                    {
-                        let byval_kind = Attribute::get_named_enum_kind_id("byval");
-                        let attr = self
-                            .context
-                            .create_type_attribute(byval_kind, struct_ty.as_any_type_enum());
-                        call.add_attribute(AttributeLoc::Param(index as u32), attr);
+                if let Some(struct_ty) = self.c_byval_param_struct(param_ty, &target_data)? {
+                    let byval_kind = Attribute::get_named_enum_kind_id("byval");
+                    let attr = self
+                        .context
+                        .create_type_attribute(byval_kind, struct_ty.as_any_type_enum());
+                    call.add_attribute(AttributeLoc::Param(index as u32), attr);
 
-                        let align = self.abi_handler.byval_alignment(struct_ty, &target_data);
-                        let align_kind = Attribute::get_named_enum_kind_id("align");
-                        let align_attr = self.context.create_enum_attribute(align_kind, align);
-                        call.add_attribute(AttributeLoc::Param(index as u32), align_attr);
-                    }
+                    let align = self.abi_handler.byval_alignment(struct_ty, &target_data);
+                    let align_kind = Attribute::get_named_enum_kind_id("align");
+                    let align_attr = self.context.create_enum_attribute(align_kind, align);
+                    call.add_attribute(AttributeLoc::Param(index as u32), align_attr);
                 }
             }
         }

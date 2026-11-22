@@ -1,15 +1,18 @@
-// std/sys/socket.ag — typed Linux socket syscalls and socket value types.
+// std/sys/socket.ag — typed socket syscalls and socket value types.
 //
 // Socket domains, kinds, option names, and shutdown modes are enums because
 // each is a closed set of kernel-defined values. Bit flags remain integer
-// constants so callers can combine them with `|`.
+// constants so callers can combine them with `|`. Values are Linux's on every
+// platform: the Windows OS seam (std/sys/os_windows.ag) translates them at
+// the winsock boundary, so this layer and std.net are platform-neutral.
 
 import std.error;
+import std.sys.os;
 import std.sys.raw.poll;
 import std.sys.raw.socket;
 import std.sys.result;
 
-if (@cfg(os.linux)) {
+if (!@cfg(os.wasi)) {
 /// Socket address families (`AF_*`).
 enum AddressFamily {
     UNIX = 1;
@@ -58,6 +61,10 @@ enum ShutdownHow {
 const i64 SOCK_CLOEXEC = 524288;
 /// Socket type flag: non-blocking I/O.
 const i64 SOCK_NONBLOCK = 2048; // == O_NONBLOCK on Linux
+
+/// send flag: report EPIPE instead of raising SIGPIPE on a closed peer.
+/// Windows never raises SIGPIPE; the seam accepts and drops it.
+const i64 MSG_NOSIGNAL = 0x4000;
 
 /// socket(2): creates a socket and returns its fd. The caller owns the fd.
 Result<i64, Error> try_socket(AddressFamily domain, SocketType ty, i64 flags, i64 protocol) {

@@ -3,6 +3,7 @@
 // Tests: TCP echo (bind, connect, accept, send, recv) and connection refused.
 
 import std.error;
+import std.fs;
 import std.net.tcp;
 import std.net.inet;
 import std.sys.result;
@@ -52,9 +53,15 @@ i32 main() {
     Result<TcpStream, Error> refused = TcpStream.connect(&refused_addr);
     assert_true(refused.failed(), "connect refused returns error");
     Error refused_err = refused.get_error();
-    // Test C: Unix domain socket TCP stream/listener (abstract namespace)
+    // Test C: Unix domain socket TCP stream/listener. The abstract namespace
+    // is Linux-only; Windows AF_UNIX binds filesystem paths.
     test_start("unix domain socket echo");
-    Result<SocketAddr, AddrError> u_bind_r = SocketAddr.unix("@test_silver_tcp_sock");
+    str u_path = "@test_silver_tcp_sock";
+    if (@cfg(os.windows)) {
+        u_path = "test_silver_tcp.sock";
+        remove_file(u_path);
+    }
+    Result<SocketAddr, AddrError> u_bind_r = SocketAddr.unix(u_path);
     assert_true(u_bind_r.success(), "unix bind address valid");
     SocketAddr u_bind_addr = u_bind_r.unwrap();
     TcpListener u_listener = TcpListener.bind(&u_bind_addr, 1);
@@ -76,6 +83,9 @@ i32 main() {
     u_msg[ur.value()] = (u8)0;
     assert_eq_str("ping", (str)u_msg, "unix echo message matches");
     free(u_msg);
+    if (@cfg(os.windows)) {
+        assert_true(remove_file(u_path), "unix socket path removed");
+    }
 
     return done();
 }

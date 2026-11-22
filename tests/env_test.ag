@@ -26,6 +26,10 @@ i32 main() {
     // WASI has no getcwd: the seam reports "." (the preopened working dir).
     if (@cfg(os.wasi)) {
         assert_true(cwd.equals("."), "current_dir is . on wasm");
+    } else if (@cfg(os.windows)) {
+        // Drive-absolute ("C:\...") or UNC ("\\server\...").
+        bool drive = cwd.len() >= 3 && cwd.data[1] == (u8)':' && cwd.data[2] == (u8)'\\';
+        assert_true(drive || cwd.starts_with("\\\\"), "current_dir is absolute");
     } else {
         assert_true(cwd.starts_with("/"), "current_dir starts with /");
     }
@@ -44,6 +48,15 @@ i32 main() {
         String s = dyn_val.unwrap();
         assert_true(s.equals("dynamic_value_123"), "dynamic var matches set value");
         s.drop();
+    }
+    if (@cfg(os.windows)) {
+        // Windows variable names are case-insensitive, as in the OS.
+        Optional<String> folded = var("__silver_dynamic_test_var__");
+        assert_true(folded.is_some(), "var lookup folds case on windows");
+        set_var("__Silver_Dynamic_Test_Var__", "replaced");
+        Optional<String> replaced = var("__SILVER_DYNAMIC_TEST_VAR__");
+        assert_true(replaced.is_some() && replaced.unwrap().equals("replaced"),
+            "set_var replaces a differently-cased name on windows");
     }
     remove_var("__SILVER_DYNAMIC_TEST_VAR__");
     Optional<String> rem_val = var("__SILVER_DYNAMIC_TEST_VAR__");

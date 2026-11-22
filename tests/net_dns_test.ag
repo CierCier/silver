@@ -9,6 +9,11 @@ import std.net.dns;
 import std.test;
 
 i32 main() {
+    test_start("dns address formatting");
+    // Octets 100-109 keep their tens digit.
+    assert_eq_str("104.16.0.229", ip_to_str((u32)0x681000E5), "three-digit octet with zero tens");
+    assert_eq_str("1.10.100.255", ip_to_str((u32)0x010A64FF), "one-, two-, and three-digit octets");
+
     test_start("dns resolve");
 
     // Resolve a well-known hostname.

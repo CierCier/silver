@@ -9,6 +9,10 @@ pub fn reference_carrier_expected() -> &'static str {
     "internal reference requires a data pointer and initialization-state capability"
 }
 
+pub fn memory_intrinsic_pointer_expected(intrinsic: &str) -> String {
+    format!("@{intrinsic} expects pointer or reference operands")
+}
+
 pub fn reference_state_unavailable() -> &'static str {
     "cannot borrow owned storage without its initialization-state capability"
 }

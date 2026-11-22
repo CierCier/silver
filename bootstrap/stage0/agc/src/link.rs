@@ -212,7 +212,11 @@ fn msvc_library_dirs() -> Vec<PathBuf> {
 
 /// The CRT + OS import libraries every console executable needs. The static
 /// set (/MT) makes the exe self-contained; the dynamic set (/MD) is the
-/// default and defers to the installed UCRT.
+/// default and defers to the installed UCRT. `ws2_32` and `iphlpapi`
+/// (DNS server discovery) back std.net;
+/// `userenv` and `dbghelp` complete the native set Rust staticlibs (the
+/// silver_ffi bridge) declare. Import libraries only contribute what a link
+/// references, so unused entries cost nothing.
 fn msvc_default_libs(static_crt: bool) -> &'static [&'static str] {
     if static_crt {
         &[
@@ -224,6 +228,10 @@ fn msvc_default_libs(static_crt: bool) -> &'static [&'static str] {
             "shell32.lib",
             "bcrypt.lib",
             "synchronization.lib",
+            "ws2_32.lib",
+            "iphlpapi.lib",
+            "userenv.lib",
+            "dbghelp.lib",
         ]
     } else {
         &[
@@ -235,13 +243,50 @@ fn msvc_default_libs(static_crt: bool) -> &'static [&'static str] {
             "shell32.lib",
             "bcrypt.lib",
             "synchronization.lib",
+            "ws2_32.lib",
+            "iphlpapi.lib",
+            "userenv.lib",
+            "dbghelp.lib",
         ]
     }
 }
 
+/// User and dependency library dirs searched for `<name>.dll.lib` import
+/// libraries; SDK dirs hold only system libraries and are skipped.
+fn native_search_dirs_win(plan: &CompilePlan, dependency_paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut dirs = plan.lib_dirs.clone();
+    dirs.extend(dependency_library_dirs(dependency_paths));
+    dirs
+}
+
+/// MSVC stand-ins for POSIX libc component libraries, so `-lc`/`-lm` stay
+/// portable instead of failing on a missing `c.lib`. The default UCRT set
+/// already provides libm/pthread/dl/rt equivalents; `printf`-family entry
+/// points are header inlines in the UCRT, and `legacy_stdio_definitions`
+/// exports them as real symbols for C-ABI callers.
+fn posix_library_win(library: &str) -> Option<&'static [&'static str]> {
+    match library {
+        "c" => Some(&["legacy_stdio_definitions.lib"]),
+        "m" | "pthread" | "dl" | "rt" => Some(&[]),
+        _ => None,
+    }
+}
+
 /// Appends a `#[link(name)]` dependency in the flavor's syntax: bare names
-/// resolve as `<name>.lib` on the MSVC side.
-fn add_native_library_win(command: &mut Command, library: &str) {
+/// resolve as `<name>.lib` on the MSVC side. Like `ld` preferring `lib<name>.so`
+/// over `lib<name>.a`, a dynamic link prefers the `<name>.dll.lib` import
+/// library (Rust's and CMake's naming, distinct from a same-named static
+/// library) when one exists in `search_dirs`.
+fn add_native_library_win(
+    command: &mut Command,
+    library: &str,
+    search_dirs: &[PathBuf],
+    static_link: bool,
+) {
+    if let Some(replacements) = posix_library_win(library) {
+        command.args(replacements);
+        return;
+    }
     let path = Path::new(library);
     if path.is_absolute() {
         command.arg(library);
@@ -251,7 +296,12 @@ fn add_native_library_win(command: &mut Command, library: &str) {
     {
         command.arg(library);
     } else {
-        command.arg(format!("{library}.lib"));
+        let import_lib = format!("{library}.dll.lib");
+        if !static_link && search_dirs.iter().any(|dir| dir.join(&import_lib).is_file()) {
+            command.arg(import_lib);
+        } else {
+            command.arg(format!("{library}.lib"));
+        }
     }
 }
 
@@ -520,8 +570,9 @@ pub(crate) fn link_exe_with_lld_link(
         link.arg(lib);
     }
     // `#[link(name = "foo")]` native deps resolve against the SDK/libpath as foo.lib.
+    let search_dirs = native_search_dirs_win(plan, dependency_paths);
     for lib in native_libs {
-        add_native_library_win(&mut link, lib);
+        add_native_library_win(&mut link, lib, &search_dirs, plan.static_link);
     }
 
     run_tool(link, tool_name)
@@ -763,8 +814,9 @@ pub(crate) fn link_shared_module(
         for lib in msvc_default_libs(plan.static_link) {
             link.arg(lib);
         }
+        let search_dirs = native_search_dirs_win(plan, dependency_paths);
         for lib in native_libs {
-            add_native_library_win(&mut link, lib);
+            add_native_library_win(&mut link, lib, &search_dirs, plan.static_link);
         }
         return run_tool(link, "COFF shared linker");
     }

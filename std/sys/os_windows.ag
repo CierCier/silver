@@ -141,8 +141,9 @@ const u32 WIN_PAGE_READWRITE = 4;
 const u32 WIN_GENERIC_READ = 0x80000000;
 /// File access right: write.
 const u32 WIN_GENERIC_WRITE = 0x40000000;
-/// File share mode: allow other readers and writers.
-const u32 WIN_FILE_SHARE_RW = 3;
+/// File share mode: allow other readers, writers, and deleters, so an open
+/// file can be unlinked or renamed as on Linux.
+const u32 WIN_FILE_SHARE_ALL = 7;
 /// CreateFileW disposition: create, failing if the file exists.
 const u32 WIN_CREATE_NEW = 1;
 /// CreateFileW disposition: create or truncate.
@@ -155,6 +156,18 @@ const u32 WIN_TRUNCATE_EXISTING = 5;
 const u32 WIN_OPEN_ALWAYS = 4;
 /// File attribute: normal file.
 const u32 WIN_FILE_ATTRIBUTE_NORMAL = 0x80;
+/// File attribute: read-only.
+const i64 WIN_FILE_ATTRIBUTE_READONLY = 0x1;
+/// File attribute: directory.
+const i64 WIN_FILE_ATTRIBUTE_DIRECTORY = 0x10;
+/// CreateFileW flag: required to open a directory handle.
+const u32 WIN_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+/// Linux `st_mode` file-type bits for a regular file.
+const i64 WIN_S_IFREG = 0x8000;
+/// Linux `st_mode` file-type bits for a directory.
+const i64 WIN_S_IFDIR = 0x4000;
+/// FILETIME value of the Unix epoch (100 ns ticks from 1601 to 1970).
+const i64 WIN_FILETIME_UNIX_EPOCH = 116444736000000000;
 /// SetFilePointer origin: start of file.
 const u32 WIN_FILE_BEGIN = 0;
 /// SetFilePointer origin: current position.
@@ -315,13 +328,76 @@ i64 sys_munmap(i64 addr, i64 len) {
 // File I/O. See the fd semantics note in the header.
 // ---------------------------------------------------------------------------
 
-/// Approximate errno from a failed Win32 call: invalid-handle errors map to
-/// EBADF (the errno_test failure paths expect it), everything else EIO.
-i64 win_errno_or_io() {
-    if (win_GetLastError() == 6) { // ERROR_INVALID_HANDLE
-        return 9; // EBADF
-    }
-    return 5; // EIO
+/// Linux errno (positive) for a Win32 or Winsock error code, so seam callers
+/// see the same codes on every platform. Unlisted codes report EIO.
+i64 win_errno(u32 err) {
+    return match err {
+        2: ENOENT,            // ERROR_FILE_NOT_FOUND
+        3: ENOENT,            // ERROR_PATH_NOT_FOUND
+        4: EMFILE,            // ERROR_TOO_MANY_OPEN_FILES
+        5: EACCES,            // ERROR_ACCESS_DENIED
+        6: EBADF,             // ERROR_INVALID_HANDLE
+        8: ENOMEM,            // ERROR_NOT_ENOUGH_MEMORY
+        14: ENOMEM,           // ERROR_OUTOFMEMORY
+        15: ENOENT,           // ERROR_INVALID_DRIVE
+        17: EXDEV,            // ERROR_NOT_SAME_DEVICE
+        19: EROFS,            // ERROR_WRITE_PROTECT
+        32: EBUSY,            // ERROR_SHARING_VIOLATION
+        33: EBUSY,            // ERROR_LOCK_VIOLATION
+        39: ENOSPC,           // ERROR_HANDLE_DISK_FULL
+        80: EEXIST,           // ERROR_FILE_EXISTS
+        87: EINVAL,           // ERROR_INVALID_PARAMETER
+        109: EPIPE,           // ERROR_BROKEN_PIPE
+        112: ENOSPC,          // ERROR_DISK_FULL
+        122: ERANGE,          // ERROR_INSUFFICIENT_BUFFER
+        123: ENOENT,          // ERROR_INVALID_NAME
+        145: ENOTEMPTY,       // ERROR_DIR_NOT_EMPTY
+        183: EEXIST,          // ERROR_ALREADY_EXISTS
+        206: ENAMETOOLONG,    // ERROR_FILENAME_EXCED_RANGE
+        232: EPIPE,           // ERROR_NO_DATA (pipe closing)
+        267: ENOTDIR,         // ERROR_DIRECTORY
+        10004: EINTR,         // WSAEINTR
+        10009: EBADF,         // WSAEBADF
+        10013: EACCES,        // WSAEACCES
+        10014: EFAULT,        // WSAEFAULT
+        10022: EINVAL,        // WSAEINVAL
+        10024: EMFILE,        // WSAEMFILE
+        10035: EAGAIN,        // WSAEWOULDBLOCK
+        10036: EINPROGRESS,   // WSAEINPROGRESS
+        10037: EALREADY,      // WSAEALREADY
+        10038: 88,            // WSAENOTSOCK -> ENOTSOCK
+        10039: 89,            // WSAEDESTADDRREQ -> EDESTADDRREQ
+        10040: 90,            // WSAEMSGSIZE -> EMSGSIZE
+        10041: 91,            // WSAEPROTOTYPE -> EPROTOTYPE
+        10042: 92,            // WSAENOPROTOOPT -> ENOPROTOOPT
+        10043: 93,            // WSAEPROTONOSUPPORT -> EPROTONOSUPPORT
+        10044: 94,            // WSAESOCKTNOSUPPORT -> ESOCKTNOSUPPORT
+        10045: 95,            // WSAEOPNOTSUPP -> EOPNOTSUPP
+        10046: 96,            // WSAEPFNOSUPPORT -> EPFNOSUPPORT
+        10047: 97,            // WSAEAFNOSUPPORT -> EAFNOSUPPORT
+        10048: EADDRINUSE,    // WSAEADDRINUSE
+        10049: EADDRNOTAVAIL, // WSAEADDRNOTAVAIL
+        10050: 100,           // WSAENETDOWN -> ENETDOWN
+        10051: ENETUNREACH,   // WSAENETUNREACH
+        10052: 102,           // WSAENETRESET -> ENETRESET
+        10053: 103,           // WSAECONNABORTED -> ECONNABORTED
+        10054: ECONNRESET,    // WSAECONNRESET
+        10055: 105,           // WSAENOBUFS -> ENOBUFS
+        10056: 106,           // WSAEISCONN -> EISCONN
+        10057: ENOTCONN,      // WSAENOTCONN
+        10058: EPIPE,         // WSAESHUTDOWN: send after shutdown(WR)
+        10060: ETIMEDOUT,     // WSAETIMEDOUT
+        10061: ECONNREFUSED,  // WSAECONNREFUSED
+        10063: ENAMETOOLONG,  // WSAENAMETOOLONG
+        10064: 112,           // WSAEHOSTDOWN -> EHOSTDOWN
+        10065: EHOSTUNREACH,  // WSAEHOSTUNREACH
+        _: EIO
+    };
+}
+
+/// Linux errno (positive) for the calling thread's last Win32 error.
+i64 win_last_errno() {
+    return win_errno(win_GetLastError());
 }
 
 /// Resolve fd 0/1/2 to the standard handles; pass everything through as a
@@ -333,23 +409,29 @@ i64 win_fd_handle(i64 fd) {
     return fd;
 }
 
-/// Seam: one WriteFile call; fds 0-2 map to the standard handles. Returns
-/// the count written or -errno (approximated from the Win32 error).
+/// Seam: one WriteFile call (one send on a socket fd); fds 0-2 map to the
+/// standard handles. Returns the count written or the mapped -errno.
 i64 sys_write(i64 fd, i64 buf, i64 len) {
+    if (win_fd_is_socket(fd)) {
+        return win_sock_send(fd, buf, len, 0);
+    }
     if (len == 0) {
         return 0;
     }
     u32 written = 0;
     i64 h = win_fd_handle(fd);
     if (win_WriteFile(h, (u8*)buf, (u32)len, &written, (u8*)0) == 0) {
-        return -win_errno_or_io();
+        return -win_last_errno();
     }
     return (i64)written;
 }
 
-/// Seam: one ReadFile call. A closed pipe reports 0 (EOF) rather than an
-/// error. Returns the count or -errno.
+/// Seam: one ReadFile call (one recv on a socket fd). A closed pipe reports
+/// 0 (EOF) rather than an error. Returns the count or -errno.
 i64 sys_read(i64 fd, i64 buf, i64 len) {
+    if (win_fd_is_socket(fd)) {
+        return win_sock_recv(fd, buf, len, 0);
+    }
     u32 nread = 0;
     i64 h = win_fd_handle(fd);
     if (win_ReadFile(h, (u8*)buf, (u32)len, &nread, (u8*)0) == 0) {
@@ -361,7 +443,7 @@ i64 sys_read(i64 fd, i64 buf, i64 len) {
         if (err == 109 || err == 38) {
             return 0;
         }
-        return -win_errno_or_io();
+        return -win_last_errno();
     }
     return (i64)nread;
 }
@@ -398,9 +480,9 @@ i64 sys_open(i64 path, i64 flags, i64 mode) {
         disp = WIN_TRUNCATE_EXISTING;
     }
 
-    i64 h = win_CreateFileW(&wpath[0], access, WIN_FILE_SHARE_RW, (u8*)0, disp, WIN_FILE_ATTRIBUTE_NORMAL, 0);
+    i64 h = win_CreateFileW(&wpath[0], access, WIN_FILE_SHARE_ALL, (u8*)0, disp, WIN_FILE_ATTRIBUTE_NORMAL, 0);
     if (h == -1) {
-        return -2; // ENOENT (approximate; detailed mapping not needed by std)
+        return -win_last_errno();
     }
     if ((flags & O_APPEND) == O_APPEND) {
         win_SetFilePointer(h, 0, (i32*)0, WIN_FILE_END);
@@ -418,14 +500,18 @@ i64 sys_openat(i64 dirfd, i64 path, i64 flags, i64 mode) {
     return sys_open(path, flags, mode);
 }
 
-/// Only F_GETFL/F_SETFL (O_NONBLOCK toggling) are consumed; regular files on
-/// Windows have no non-blocking mode, so report read/write capability and
-/// accept any set. Socket fcntl goes through the winsock layer.
+/// Only F_GETFL/F_SETFL (O_NONBLOCK toggling) are consumed. F_GETFL reports
+/// O_RDWR: winsock cannot query FIONBIO, and regular files have no
+/// non-blocking mode. F_SETFL on a socket applies the O_NONBLOCK bit through
+/// FIONBIO, so the get-modify-set idiom works; on files it is accepted.
 i64 sys_fcntl(i64 fd, i64 cmd, i64 arg) {
-    if (cmd == 3) { // F_GETFL
-        return 2;   // O_RDWR
+    if (cmd == F_GETFL) {
+        return O_RDWR;
     }
-    return 0;       // F_SETFL: accepted
+    if (cmd == F_SETFL && win_fd_is_socket(fd)) {
+        return win_sock_set_nonblocking(fd, (arg & O_NONBLOCK) != 0);
+    }
+    return 0;
 }
 
 /// mremap via allocate-copy-free. The page allocator's reallocations stay
@@ -470,6 +556,12 @@ i64 sys_close(i64 fd) {
     if (fd >= 0 && fd <= 2) {
         return 0; // standard handles are not ours to close
     }
+    if (win_fd_is_socket(fd)) {
+        if (win_closesocket(win_fd_socket(fd)) != 0) {
+            return -win_wsa_errno();
+        }
+        return 0;
+    }
     if (fd == -1 || fd == -2) {
         // Current-process/thread pseudo handles: CloseHandle on them
         // succeeds silently on some Windows builds, but they are never
@@ -492,13 +584,13 @@ i64 sys_lseek(i64 fd, i64 off, i64 whence) {
     else if (whence == 2) { method = WIN_FILE_END; }
     i32 res = win_SetFilePointer(h, low, &high, method);
     if (res == -1 && win_GetLastError() != 0) {
-        return -win_errno_or_io();
+        return -win_last_errno();
     }
     return ((i64)(u32)high << 32) | (i64)(u32)res;
 }
 
-/// Seam: DeleteFileW. Any failure reports -ENOENT; paths of 1000 or more
-/// UTF-16 units report -ENAMETOOLONG.
+/// Seam: DeleteFileW. Failures report the mapped errno; paths of 1000 or
+/// more UTF-16 units report -ENAMETOOLONG.
 i64 sys_unlink(i64 path) {
     u16 wpath[1024];
     if (win_utf16_len((u8*)path) >= 1000) {
@@ -506,13 +598,13 @@ i64 sys_unlink(i64 path) {
     }
     win_utf8_to_utf16((u8*)path, &wpath[0]);
     if (win_DeleteFileW(&wpath[0]) == 0) {
-        return -2;
+        return -win_last_errno();
     }
     return 0;
 }
 
 /// Seam: MoveFileExW, replacing the target and allowing cross-volume moves.
-/// Any failure reports -ENOENT.
+/// Failures report the mapped errno.
 i64 sys_rename(i64 from, i64 to) {
     u16 wfrom[1024];
     u16 wto[1024];
@@ -522,54 +614,75 @@ i64 sys_rename(i64 from, i64 to) {
     win_utf8_to_utf16((u8*)from, &wfrom[0]);
     win_utf8_to_utf16((u8*)to, &wto[0]);
     if (win_MoveFileExW(&wfrom[0], &wto[0], WIN_MOVE_REPLACE | WIN_MOVE_COPY_ALLOWED) == 0) {
-        return -2;
+        return -win_last_errno();
     }
     return 0;
 }
 
-/// Writes the Linux x86_64 `struct stat` layout consumed by std/io/file.ag:
-/// st_size at offset 48, st_mtim sec at 88, nsec at 96. Everything else is
-/// left as the caller's zeroed buffer.
+/// Fills the Linux x86_64 `struct stat` layout in the caller's 144-byte
+/// buffer: st_dev 0, st_ino 8, st_nlink 16, st_mode 24, st_size 48,
+/// st_blksize 56, st_blocks 64, st_atim 72/80, st_mtim 88/96, st_ctim
+/// 104/112. Windows has no status-change time, so st_ctim is the last write
+/// time. Directories open only with FILE_FLAG_BACKUP_SEMANTICS; no access
+/// rights are requested, so files locked for reading still stat.
 i64 sys_stat(i64 path, i64 buf) {
     u16 wpath[1024];
     if (win_utf16_len((u8*)path) >= 1000) {
         return -36;
     }
     win_utf8_to_utf16((u8*)path, &wpath[0]);
-    i64 h = win_CreateFileW(&wpath[0], WIN_GENERIC_READ, WIN_FILE_SHARE_RW, (u8*)0, WIN_OPEN_EXISTING, WIN_FILE_ATTRIBUTE_NORMAL, 0);
+    i64 h = win_CreateFileW(&wpath[0], 0, WIN_FILE_SHARE_ALL, (u8*)0, WIN_OPEN_EXISTING, WIN_FILE_FLAG_BACKUP_SEMANTICS, 0);
     if (h == -1) {
-        return -2;
+        return -win_last_errno();
     }
-    // BY_HANDLE_FILE_INFORMATION (52 bytes): ftLastWriteTime (u64) at 20,
-    // nFileSizeHigh at 32, nFileSizeLow at 36. A short buffer would let
-    // the write run off the stack slot.
-    u8 info[52];
+    // BY_HANDLE_FILE_INFORMATION is 52 bytes; the slack keeps 8-byte reads
+    // of the trailing u32 fields inside the buffer.
+    u8 info[56];
     i64 i = 0;
-    while (i < 52) {
+    while (i < 56) {
         info[i] = 0;
         i += 1;
     }
     i32 ok = win_GetFileInformationByHandle(h, &info[0]);
+    i64 err = win_last_errno();
     win_CloseHandle(h);
     if (ok == 0) {
-        return -5;
+        return -err;
     }
-    i64 size = ((i64)(u32)win_le_i64(&info[0], 32) << 32) | (i64)(u32)win_le_i64(&info[0], 36);
-    i64 ft = win_le_i64(&info[0], 20);
-    // FILETIME (1601) -> Unix epoch (1970).
-    i64 unix100 = ft - 116444736000000000;
-    i64 sec = unix100 / 10000000;
-    i64 nsec = (unix100 % 10000000) * 100;
-    i64 attr = win_le_i64(&info[0], 0);
-    i64 mode = 33188;
-    if ((attr & 16) != 0) {
-        mode = 16877;
+    i64 attr = win_le_u32(&info[0], 0);
+    i64 size = (win_le_u32(&info[0], 32) << 32) | win_le_u32(&info[0], 36);
+    i64 mode = WIN_S_IFREG | 420; // 0644
+    if ((attr & WIN_FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        mode = WIN_S_IFDIR | 493; // 0755
     }
-    win_store_le_i64((u8*)buf, 24, mode);
-    win_store_le_i64((u8*)buf, 48, size);
-    win_store_le_i64((u8*)buf, 88, sec);
-    win_store_le_i64((u8*)buf, 96, nsec);
+    if ((attr & WIN_FILE_ATTRIBUTE_READONLY) != 0) {
+        mode = mode & ~146; // clear the 0222 write bits
+    }
+    u8* out = (u8*)buf;
+    win_store_le_i64(out, 0, win_le_u32(&info[0], 28));
+    win_store_le_i64(out, 8, (win_le_u32(&info[0], 44) << 32) | win_le_u32(&info[0], 48));
+    win_store_le_i64(out, 16, win_le_u32(&info[0], 40));
+    win_store_le_i64(out, 24, mode);
+    win_store_le_i64(out, 48, size);
+    win_store_le_i64(out, 56, 4096);
+    win_store_le_i64(out, 64, (size + 511) / 512);
+    win_store_filetime(out, 72, win_le_i64(&info[0], 12));
+    win_store_filetime(out, 88, win_le_i64(&info[0], 20));
+    win_store_filetime(out, 104, win_le_i64(&info[0], 20));
     return 0;
+}
+
+/// Internal: stores FILETIME `ft` (100 ns ticks since 1601) as a Unix
+/// timespec {sec, nsec} at `buf[off]`.
+void win_store_filetime(u8* buf, i64 off, i64 ft) {
+    i64 unix100 = ft - WIN_FILETIME_UNIX_EPOCH;
+    win_store_le_i64(buf, off, unix100 / 10000000);
+    win_store_le_i64(buf, off + 8, (unix100 % 10000000) * 100);
+}
+
+/// Internal: reads a little-endian u32 at `buf[off]`, zero-extended.
+i64 win_le_u32(u8* buf, i64 off) {
+    return (i64)buf[off] | ((i64)buf[off + 1] << 8) | ((i64)buf[off + 2] << 16) | ((i64)buf[off + 3] << 24);
 }
 
 /// Internal: reads a little-endian i64 at `buf[off]`.
@@ -772,7 +885,7 @@ i64 sys_clock_gettime(i64 clk, i64 ts) {    u8* p = (u8*)ts;
     }
     u64 ft = 0;
     win_GetSystemTimePreciseAsFileTime(&ft);
-    i64 unix100 = (i64)ft - 116444736000000000;
+    i64 unix100 = (i64)ft - WIN_FILETIME_UNIX_EPOCH;
     win_store_le_i64(p, 0, unix100 / 10000000);
     win_store_le_i64(p, 8, (unix100 % 10000000) * 100);
     return 0;
@@ -823,6 +936,12 @@ extern "C" {
     /// Win32 `FindClose`.
     #[link_name("FindClose")]
     i32 win_FindClose(i64 handle);
+    /// Win32 `GetCurrentDirectoryW`.
+    #[link_name("GetCurrentDirectoryW")]
+    u32 win_GetCurrentDirectoryW(u32 len, u16* buf);
+    /// Win32 `SetCurrentDirectoryW`.
+    #[link_name("SetCurrentDirectoryW")]
+    i32 win_SetCurrentDirectoryW(u16* path);
 }
 
 /// Convert a NUL-terminated UTF-8 path into `wpath` (capacity units).
@@ -835,14 +954,15 @@ bool win_path_to_wide(u8* path, u16* wpath, i64 cap) {
     return true;
 }
 
-/// Seam: CreateDirectoryW (`mode` is ignored). Failures report -ENOENT.
+/// Seam: CreateDirectoryW (`mode` is ignored). Failures report the mapped
+/// errno (EEXIST, ENOENT, ...).
 i64 sys_mkdir(i64 path, i64 mode) {
     u16 wpath[1024];
     if (!win_path_to_wide((u8*)path, &wpath[0], 1024)) {
         return -36; // ENAMETOOLONG
     }
     if (win_CreateDirectoryW(&wpath[0], (u8*)0) == 0) {
-        return -2; // ENOENT (approximate; std needs only failure)
+        return -win_last_errno();
     }
     return 0;
 }
@@ -854,19 +974,65 @@ i64 sys_access(i64 path, i64 mode) {
         return -36;
     }
     if (win_GetFileAttributesW(&wpath[0]) == (u32)0xFFFFFFFF) {
-        return -2; // ENOENT
+        return -win_last_errno();
     }
     return 0;
 }
 
-/// Seam: RemoveDirectoryW. Failures report -ENOENT.
+/// Seam: RemoveDirectoryW. Failures report the mapped errno (ENOTEMPTY,
+/// ENOENT, ...).
 i64 sys_rmdir(i64 path) {
     u16 wpath[1024];
     if (!win_path_to_wide((u8*)path, &wpath[0], 1024)) {
         return -36;
     }
     if (win_RemoveDirectoryW(&wpath[0]) == 0) {
-        return -2;
+        return -win_last_errno();
+    }
+    return 0;
+}
+
+/// Seam: getcwd(2) semantics. Writes the NUL-terminated UTF-8 working
+/// directory into `buf` (capacity `cap` bytes) and returns its length
+/// including the terminator; -ERANGE when `cap` is too small.
+i64 sys_getcwd(i64 buf, i64 cap) {
+    u16 wbuf[1024];
+    u32 units = win_GetCurrentDirectoryW(1024, &wbuf[0]);
+    if (units == 0) {
+        return -win_last_errno();
+    }
+    if (units >= 1024) {
+        return -36; // ENAMETOOLONG: beyond the seam's path buffer
+    }
+    // Worst case 3 UTF-8 bytes per unit (surrogate pairs: 4 per 2 units);
+    // win_utf16_to_utf8 stops 4 bytes short of its capacity, hence the slack.
+    i64 need = (i64)units * 3 + 5;
+    if (cap < need) {
+        // Measure exactly before reporting ERANGE: most paths are ASCII.
+        u8 tmp[3077];
+        i64 exact = win_utf16_to_utf8(&wbuf[0], &tmp[0], 3077) + 1;
+        if (cap < exact) {
+            return -34;
+        }
+        u8* out = (u8*)buf;
+        i64 i = 0;
+        while (i < exact) {
+            out[i] = tmp[i];
+            i += 1;
+        }
+        return exact;
+    }
+    return win_utf16_to_utf8(&wbuf[0], (u8*)buf, cap) + 1;
+}
+
+/// Seam: chdir(2). Returns 0 or the mapped -errno.
+i64 sys_chdir(i64 path) {
+    u16 wpath[1024];
+    if (!win_path_to_wide((u8*)path, &wpath[0], 1024)) {
+        return -36;
+    }
+    if (win_SetCurrentDirectoryW(&wpath[0]) == 0) {
+        return -win_last_errno();
     }
     return 0;
 }
@@ -902,7 +1068,7 @@ i64 sys_list_dir(i64 path, u8* buf, i64 cap) {
     u8 data[592];
     i64 h = win_FindFirstFileW(&wpat[0], &data[0]);
     if (h == -1) {
-        return -2; // ENOENT
+        return -win_last_errno();
     }
     i64 off = 0;
     i64 count = 0;
@@ -930,6 +1096,742 @@ i64 sys_list_dir(i64 path, u8* buf, i64 cap) {
     }
     win_FindClose(h);
     return count;
+}
+
+// ---------------------------------------------------------------------------
+// Socket seam: the Linux socket syscalls over winsock (ws2_32).
+//
+// Callers pass Linux values throughout: AF_INET6 = 10 in sockaddrs, SOL_SOCKET
+// = 1 and the Linux SO_* numbers, SOCK_NONBLOCK/SOCK_CLOEXEC type flags, the
+// 8-byte Linux pollfd, and -errno results. Each call translates at this
+// boundary, so std.sys.socket and std.net stay platform-neutral.
+//
+// Socket fds are the SOCKET handle with bit 0 set. Win32 handles are
+// multiples of 4 (the low two bits are reserved for application tags), so the
+// tag lets read/write/close/fcntl route sockets to winsock (recv/send/
+// closesocket/FIONBIO), as Linux fds do. Winsock calls get the untagged handle.
+// ---------------------------------------------------------------------------
+
+extern "C" {
+    /// Winsock `WSAStartup`.
+    #[link_name("WSAStartup")]
+    i32 win_WSAStartup(u16 version, u8* data);
+    /// Winsock `WSAGetLastError`.
+    #[link_name("WSAGetLastError")]
+    i32 win_WSAGetLastError();
+    /// Winsock `WSASocketW`.
+    #[link_name("WSASocketW")]
+    u64 win_WSASocketW(i32 af, i32 kind, i32 protocol, u8* info, u32 group, u32 flags);
+    /// Winsock `closesocket`.
+    #[link_name("closesocket")]
+    i32 win_closesocket(u64 s);
+    /// Winsock `bind`.
+    #[link_name("bind")]
+    i32 win_bind(u64 s, u8* addr, i32 len);
+    /// Winsock `listen`.
+    #[link_name("listen")]
+    i32 win_listen(u64 s, i32 backlog);
+    /// Winsock `accept`.
+    #[link_name("accept")]
+    u64 win_accept(u64 s, u8* addr, i32* len);
+    /// Winsock `connect`.
+    #[link_name("connect")]
+    i32 win_connect(u64 s, u8* addr, i32 len);
+    /// Winsock `shutdown`.
+    #[link_name("shutdown")]
+    i32 win_shutdown(u64 s, i32 how);
+    /// Winsock `setsockopt`.
+    #[link_name("setsockopt")]
+    i32 win_setsockopt(u64 s, i32 level, i32 name, u8* value, i32 len);
+    /// Winsock `getsockopt`.
+    #[link_name("getsockopt")]
+    i32 win_getsockopt(u64 s, i32 level, i32 name, u8* value, i32* len);
+    /// Winsock `getsockname`.
+    #[link_name("getsockname")]
+    i32 win_getsockname(u64 s, u8* addr, i32* len);
+    /// Winsock `getpeername`.
+    #[link_name("getpeername")]
+    i32 win_getpeername(u64 s, u8* addr, i32* len);
+    /// Winsock `send`.
+    #[link_name("send")]
+    i32 win_send(u64 s, u8* buf, i32 len, i32 flags);
+    /// Winsock `recv`.
+    #[link_name("recv")]
+    i32 win_recv(u64 s, u8* buf, i32 len, i32 flags);
+    /// Winsock `sendto`.
+    #[link_name("sendto")]
+    i32 win_sendto(u64 s, u8* buf, i32 len, i32 flags, u8* addr, i32 addr_len);
+    /// Winsock `recvfrom`.
+    #[link_name("recvfrom")]
+    i32 win_recvfrom(u64 s, u8* buf, i32 len, i32 flags, u8* addr, i32* addr_len);
+    /// Winsock `ioctlsocket`.
+    #[link_name("ioctlsocket")]
+    i32 win_ioctlsocket(u64 s, u32 cmd, u32* arg);
+    /// Winsock `WSAIoctl`.
+    #[link_name("WSAIoctl")]
+    i32 win_WSAIoctl(u64 s, u32 code, u8* in_buf, u32 in_len, u8* out_buf, u32 out_len, u32* returned, u8* overlapped, u8* routine);
+    /// Winsock `WSAPoll`.
+    #[link_name("WSAPoll")]
+    i32 win_WSAPoll(u8* fds, u32 count, i32 timeout);
+    /// Winsock `WSASend`.
+    #[link_name("WSASend")]
+    i32 win_WSASend(u64 s, u8* bufs, u32 count, u32* sent, u32 flags, u8* overlapped, u8* routine);
+    /// Winsock `WSARecv`.
+    #[link_name("WSARecv")]
+    i32 win_WSARecv(u64 s, u8* bufs, u32 count, u32* received, u32* flags, u8* overlapped, u8* routine);
+}
+
+/// Linux `AF_INET6`; winsock's value is 23. AF_UNIX (1) and AF_INET (2) agree.
+const i64 WIN_LINUX_AF_INET6 = 10;
+/// Winsock `AF_INET6`.
+const i64 WIN_AF_INET6 = 23;
+/// Linux `SOCK_NONBLOCK` socket type flag.
+const i64 WIN_LINUX_SOCK_NONBLOCK = 2048;
+/// Linux `SOCK_CLOEXEC` socket type flag.
+const i64 WIN_LINUX_SOCK_CLOEXEC = 524288;
+/// Linux `MSG_NOSIGNAL`: winsock never raises SIGPIPE, so it is dropped.
+const i64 WIN_LINUX_MSG_NOSIGNAL = 0x4000;
+/// Linux `MSG_WAITALL`; winsock's value is 8.
+const i64 WIN_LINUX_MSG_WAITALL = 0x100;
+/// Winsock `SOCK_DGRAM`.
+const i64 WIN_SOCK_DGRAM = 2;
+/// `WSASocketW` flag: overlapped-capable socket, as `socket()` creates.
+/// Blocking calls still complete synchronously; without it winsock ignores
+/// SO_RCVTIMEO/SO_SNDTIMEO.
+const u32 WIN_WSA_FLAG_OVERLAPPED = 0x01;
+/// `WSASocketW` flag: the handle is not inherited by child processes.
+const u32 WIN_WSA_FLAG_NO_HANDLE_INHERIT = 0x80;
+/// `ioctlsocket` command: set (non-zero) or clear non-blocking mode.
+const u32 WIN_FIONBIO = 0x8004667E;
+/// `WSAIoctl` code: report (or not) ICMP port-unreachable as recv errors.
+const u32 WIN_SIO_UDP_CONNRESET = 0x9800000C;
+/// `WSAIoctl` code: initial RTO and SYN retransmission count for connect.
+const u32 WIN_SIO_TCP_INITIAL_RTO = 0x98000011;
+/// Winsock `SOL_SOCKET` level.
+const i32 WIN_SOL_SOCKET = 0xFFFF;
+/// Winsock `SO_RCVTIMEO` (DWORD milliseconds, not a timeval).
+const i32 WIN_SO_RCVTIMEO = 0x1006;
+/// Winsock `SO_SNDTIMEO` (DWORD milliseconds, not a timeval).
+const i32 WIN_SO_SNDTIMEO = 0x1005;
+/// Winsock `SO_ERROR` (reports a WSA error code).
+const i32 WIN_SO_ERROR = 0x1007;
+/// Linux `ENOPROTOOPT`: the option has no winsock equivalent.
+const i64 WIN_ENOPROTOOPT = 92;
+/// Largest byte count one winsock call accepts (an `int`).
+const i64 WIN_SOCK_IO_MAX = 0x7FFFFFFF;
+/// WSABUF/WSAPOLLFD entries converted on the stack per call.
+const i64 WIN_SOCK_BATCH = 64;
+
+/// Internal: true once WSAStartup has run. A race only calls it twice, which
+/// winsock reference-counts harmlessly; it is never balanced by WSACleanup.
+bool g_win_wsa_started = false;
+
+/// Internal: initializes winsock 2.2 on first use.
+void win_wsa_init() {
+    if (!g_win_wsa_started) {
+        u8 data[512]; // WSADATA is 408 bytes on x64
+        win_WSAStartup((u16)0x0202, &data[0]);
+        g_win_wsa_started = true;
+    }
+}
+
+/// True when `fd` is a tagged socket fd (see the section header).
+bool win_fd_is_socket(i64 fd) {
+    return fd > 2 && (fd & 1) != 0;
+}
+
+/// The SOCKET handle behind tagged socket fd `fd`.
+u64 win_fd_socket(i64 fd) {
+    return (u64)(fd & ~(i64)1);
+}
+
+/// Tags a fresh SOCKET as an fd. Handles beyond the i32 fd range or without
+/// the reserved low bits clear (non-kernel provider handles) are closed and
+/// reported as EMFILE.
+i64 win_socket_fd(u64 s) {
+    if ((s & 3) != 0 || s > (u64)0x7FFFFFFE) {
+        win_closesocket(s);
+        return -EMFILE;
+    }
+    return (i64)(s | 1);
+}
+
+/// Linux errno for the calling thread's last winsock error.
+i64 win_wsa_errno() {
+    return win_errno((u32)win_WSAGetLastError());
+}
+
+/// Linux errno for a failed send/recv: an SO_RCVTIMEO/SO_SNDTIMEO expiry is
+/// EAGAIN on Linux, where winsock reports WSAETIMEDOUT.
+i64 win_wsa_io_errno() {
+    i32 err = win_WSAGetLastError();
+    if (err == 10060) { // WSAETIMEDOUT
+        return EAGAIN;
+    }
+    return win_errno((u32)err);
+}
+
+/// Internal: reads a little-endian u16 at `buf[off]`, zero-extended.
+i64 win_le_u16(u8* buf, i64 off) {
+    return (i64)buf[off] | ((i64)buf[off + 1] << 8);
+}
+
+/// Copies Linux sockaddr `addr` (`len` bytes) into `out` (128 bytes) with the
+/// winsock family value. Returns the length, or -EINVAL when it does not fit.
+i64 win_sockaddr_to_win(i64 addr, i64 len, u8* out) {
+    if (len < 2 || len > 128) {
+        return -EINVAL;
+    }
+    u8* src = (u8*)addr;
+    i64 i = 0;
+    while (i < len) {
+        out[i] = src[i];
+        i += 1;
+    }
+    if (win_le_u16(out, 0) == WIN_LINUX_AF_INET6) {
+        out[0] = (u8)WIN_AF_INET6;
+        out[1] = (u8)0;
+    }
+    return len;
+}
+
+/// Rewrites the family of a winsock-filled sockaddr at `addr` (`len` valid
+/// bytes) to the Linux value.
+void win_sockaddr_to_linux(i64 addr, i64 len) {
+    u8* p = (u8*)addr;
+    if (addr != 0 && len >= 2 && win_le_u16(p, 0) == WIN_AF_INET6) {
+        p[0] = (u8)WIN_LINUX_AF_INET6;
+        p[1] = (u8)0;
+    }
+}
+
+/// Sets or clears non-blocking mode on socket fd `fd`. 0 or -errno.
+i64 win_sock_set_nonblocking(i64 fd, bool on) {
+    u32 mode = on ? (u32)1 : (u32)0;
+    if (win_ioctlsocket(win_fd_socket(fd), WIN_FIONBIO, &mode) != 0) {
+        return -win_wsa_errno();
+    }
+    return 0;
+}
+
+/// Winsock send/recv flags for Linux `flags`. MSG_OOB/PEEK/DONTROUTE share
+/// values; MSG_NOSIGNAL is dropped and MSG_WAITALL renumbered.
+i32 win_sock_flags(i64 flags) {
+    i64 out = flags & ~(WIN_LINUX_MSG_NOSIGNAL | WIN_LINUX_MSG_WAITALL);
+    if ((flags & WIN_LINUX_MSG_WAITALL) != 0) {
+        out = out | 8;
+    }
+    return (i32)out;
+}
+
+/// Socket write(2)/send(2): one send call. Count or -errno.
+i64 win_sock_send(i64 fd, i64 buf, i64 len, i64 flags) {
+    i64 n = len > WIN_SOCK_IO_MAX ? WIN_SOCK_IO_MAX : len;
+    i32 r = win_send(win_fd_socket(fd), (u8*)buf, (i32)n, win_sock_flags(flags));
+    if (r < 0) {
+        return -win_wsa_io_errno();
+    }
+    return (i64)r;
+}
+
+/// Socket read(2)/recv(2): one recv call. Count (0 = peer closed) or -errno.
+/// A truncated datagram returns the filled length, as Linux does.
+i64 win_sock_recv(i64 fd, i64 buf, i64 len, i64 flags) {
+    i64 n = len > WIN_SOCK_IO_MAX ? WIN_SOCK_IO_MAX : len;
+    i32 r = win_recv(win_fd_socket(fd), (u8*)buf, (i32)n, win_sock_flags(flags));
+    if (r < 0) {
+        if (win_WSAGetLastError() == 10040) { // WSAEMSGSIZE
+            return n;
+        }
+        return -win_wsa_io_errno();
+    }
+    return (i64)r;
+}
+
+/// Seam: socket(2). `kind` may carry SOCK_NONBLOCK/SOCK_CLOEXEC. Datagram
+/// sockets ignore ICMP port-unreachable reports, as unconnected Linux UDP
+/// sockets do. Returns the tagged fd or -errno.
+i64 sys_socket(i64 domain, i64 kind, i64 protocol) {
+    win_wsa_init();
+    i64 af = domain == WIN_LINUX_AF_INET6 ? WIN_AF_INET6 : domain;
+    i64 base = kind & ~(WIN_LINUX_SOCK_NONBLOCK | WIN_LINUX_SOCK_CLOEXEC);
+    u32 flags = WIN_WSA_FLAG_OVERLAPPED;
+    if ((kind & WIN_LINUX_SOCK_CLOEXEC) != 0) {
+        flags = flags | WIN_WSA_FLAG_NO_HANDLE_INHERIT;
+    }
+    u64 s = win_WSASocketW((i32)af, (i32)base, (i32)protocol, (u8*)0, 0, flags);
+    if (s == ~(u64)0) {
+        return -win_wsa_errno();
+    }
+    i64 fd = win_socket_fd(s);
+    if (fd < 0) {
+        return fd;
+    }
+    if (base == WIN_SOCK_DGRAM) {
+        u32 off = 0;
+        u32 returned = 0;
+        win_WSAIoctl(s, WIN_SIO_UDP_CONNRESET, (u8*)&off, 4, (u8*)0, 0, &returned, (u8*)0, (u8*)0);
+    }
+    if ((kind & WIN_LINUX_SOCK_NONBLOCK) != 0) {
+        i64 r = win_sock_set_nonblocking(fd, true);
+        if (r < 0) {
+            win_closesocket(s);
+            return r;
+        }
+    }
+    return fd;
+}
+
+/// Seam: bind(2) with a Linux sockaddr. 0 or -errno.
+i64 sys_bind(i64 fd, i64 addr, i64 len) {
+    u8 wa[128];
+    i64 n = win_sockaddr_to_win(addr, len, &wa[0]);
+    if (n < 0) {
+        return n;
+    }
+    if (win_bind(win_fd_socket(fd), &wa[0], (i32)n) != 0) {
+        return -win_wsa_errno();
+    }
+    return 0;
+}
+
+/// Seam: listen(2). 0 or -errno.
+i64 sys_listen(i64 fd, i64 backlog) {
+    if (win_listen(win_fd_socket(fd), (i32)backlog) != 0) {
+        return -win_wsa_errno();
+    }
+    return 0;
+}
+
+/// Seam: accept4(2). Winsock accepted sockets inherit the listener's
+/// blocking mode; this applies SOCK_NONBLOCK explicitly so the result is
+/// blocking unless asked, as on Linux. `addr`/`len_ptr` may be null.
+i64 sys_accept4(i64 fd, i64 addr, i64 len_ptr, i64 flags) {
+    u64 s = win_accept(win_fd_socket(fd), (u8*)addr, (i32*)len_ptr);
+    if (s == ~(u64)0) {
+        return -win_wsa_errno();
+    }
+    if (len_ptr != 0) {
+        i32* lenp = (i32*)len_ptr;
+        win_sockaddr_to_linux(addr, (i64)lenp[0]);
+    }
+    i64 cfd = win_socket_fd(s);
+    if (cfd < 0) {
+        return cfd;
+    }
+    i64 r = win_sock_set_nonblocking(cfd, (flags & WIN_LINUX_SOCK_NONBLOCK) != 0);
+    if (r < 0) {
+        win_closesocket(s);
+        return r;
+    }
+    return cfd;
+}
+
+/// Seam: accept(2): accept4 with no flags.
+i64 sys_accept(i64 fd, i64 addr, i64 len_ptr) {
+    return sys_accept4(fd, addr, len_ptr, 0);
+}
+
+/// True when winsock sockaddr `wa` (`len` bytes) is 127.0.0.0/8 or ::1.
+bool win_sockaddr_is_loopback(u8* wa, i64 len) {
+    i64 family = win_le_u16(wa, 0);
+    if (family == 2 && len >= 8) {
+        return wa[4] == (u8)127;
+    }
+    if (family == WIN_AF_INET6 && len >= 24) {
+        i64 i = 8;
+        while (i < 23) {
+            if (wa[i] != (u8)0) {
+                return false;
+            }
+            i += 1;
+        }
+        return wa[23] == (u8)1;
+    }
+    return false;
+}
+
+/// Seam: connect(2) with a Linux sockaddr. A non-blocking connect in
+/// progress reports EINPROGRESS (winsock says WSAEWOULDBLOCK).
+///
+/// Windows answers a RST to its SYN by retransmitting the SYN for about two
+/// seconds before reporting ECONNREFUSED; Linux fails at once. On loopback,
+/// where a SYN cannot be lost, SYN retransmission is disabled so a refused
+/// connection fails immediately there too.
+i64 sys_connect(i64 fd, i64 addr, i64 len) {
+    u8 wa[128];
+    i64 n = win_sockaddr_to_win(addr, len, &wa[0]);
+    if (n < 0) {
+        return n;
+    }
+    if (win_sockaddr_is_loopback(&wa[0], n)) {
+        // TCP_INITIAL_RTO_PARAMETERS { u16 Rtt; u8 MaxSynRetransmissions; }:
+        // unspecified RTT (0xFFFF), TCP_INITIAL_RTO_NO_SYN_RETRANSMISSIONS
+        // (0xFE). Fails harmlessly on non-TCP sockets.
+        u8 rto[4] = { (u8)0xFF, (u8)0xFF, (u8)0xFE, (u8)0 };
+        u32 returned = 0;
+        win_WSAIoctl(win_fd_socket(fd), WIN_SIO_TCP_INITIAL_RTO, &rto[0], 4, (u8*)0, 0, &returned, (u8*)0, (u8*)0);
+    }
+    if (win_connect(win_fd_socket(fd), &wa[0], (i32)n) != 0) {
+        i32 err = win_WSAGetLastError();
+        if (err == 10035) { // WSAEWOULDBLOCK
+            return -EINPROGRESS;
+        }
+        return -win_errno((u32)err);
+    }
+    return 0;
+}
+
+/// Seam: shutdown(2); SHUT_RD/WR/RDWR share winsock's SD_* values.
+i64 sys_shutdown(i64 fd, i64 how) {
+    if (win_shutdown(win_fd_socket(fd), (i32)how) != 0) {
+        return -win_wsa_errno();
+    }
+    return 0;
+}
+
+/// Winsock (level, name) for a Linux socket option, packed as
+/// level << 32 | name. 0 means "accept as a no-op"; -1 means unsupported.
+/// SO_REUSEADDR is a no-op: winsock already rebinds ports held only by
+/// TIME_WAIT connections, and its own SO_REUSEADDR would allow two live
+/// listeners on one port. SO_REUSEPORT load balancing has no equivalent.
+i64 win_sockopt(i64 level, i64 name) {
+    if (level == 1) { // SOL_SOCKET
+        i64 wname = match name {
+            2: 0,         // SO_REUSEADDR: no-op
+            3: 0x1008,    // SO_TYPE
+            4: 0x1007,    // SO_ERROR
+            6: 0x0020,    // SO_BROADCAST
+            7: 0x1001,    // SO_SNDBUF
+            8: 0x1002,    // SO_RCVBUF
+            9: 0x0008,    // SO_KEEPALIVE
+            20: 0x1006,   // SO_RCVTIMEO
+            21: 0x1005,   // SO_SNDTIMEO
+            _: -1
+        };
+        if (wname <= 0) {
+            return wname;
+        }
+        return ((i64)WIN_SOL_SOCKET << 32) | wname;
+    }
+    if (level == 6 && name == 1) { // IPPROTO_TCP, TCP_NODELAY
+        return ((i64)6 << 32) | 1;
+    }
+    return -1;
+}
+
+/// Seam: setsockopt(2) with Linux level/option values. SO_RCVTIMEO and
+/// SO_SNDTIMEO take a Linux timeval and become winsock DWORD milliseconds.
+i64 sys_setsockopt(i64 fd, i64 level, i64 name, i64 value, i64 len) {
+    i64 opt = win_sockopt(level, name);
+    if (opt == 0) {
+        return 0;
+    }
+    if (opt < 0) {
+        return -WIN_ENOPROTOOPT;
+    }
+    i32 wlevel = (i32)(opt >> 32);
+    i32 wname = (i32)(opt & 0xFFFFFFFF);
+    u64 s = win_fd_socket(fd);
+    i32 r = 0;
+    if (wlevel == WIN_SOL_SOCKET && (wname == WIN_SO_RCVTIMEO || wname == WIN_SO_SNDTIMEO)) {
+        if (len < 16) {
+            return -EINVAL;
+        }
+        i64* tv = (i64*)value;
+        i64 ms = tv[0] * 1000 + (tv[1] + 999) / 1000;
+        if (ms < 0 || ms > 0xFFFFFFFE) {
+            ms = 0; // beyond a DWORD: wait forever, like a huge Linux timeout
+        }
+        u32 dw = (u32)ms;
+        r = win_setsockopt(s, wlevel, wname, (u8*)&dw, 4);
+    } else {
+        r = win_setsockopt(s, wlevel, wname, (u8*)value, (i32)len);
+    }
+    if (r != 0) {
+        return -win_wsa_errno();
+    }
+    return 0;
+}
+
+/// Seam: getsockopt(2) with Linux level/option values. SO_ERROR reports a
+/// Linux errno; the timeouts report a Linux timeval.
+i64 sys_getsockopt(i64 fd, i64 level, i64 name, i64 value, i64 len_ptr) {
+    i64 opt = win_sockopt(level, name);
+    if (opt <= 0) {
+        return -WIN_ENOPROTOOPT;
+    }
+    i32 wlevel = (i32)(opt >> 32);
+    i32 wname = (i32)(opt & 0xFFFFFFFF);
+    u64 s = win_fd_socket(fd);
+    i32* lenp = (i32*)len_ptr;
+    if (wlevel == WIN_SOL_SOCKET && (wname == WIN_SO_RCVTIMEO || wname == WIN_SO_SNDTIMEO)) {
+        if (lenp[0] < 16) {
+            return -EINVAL;
+        }
+        u32 dw = 0;
+        i32 dlen = 4;
+        if (win_getsockopt(s, wlevel, wname, (u8*)&dw, &dlen) != 0) {
+            return -win_wsa_errno();
+        }
+        i64* tv = (i64*)value;
+        tv[0] = (i64)dw / 1000;
+        tv[1] = ((i64)dw % 1000) * 1000;
+        lenp[0] = 16;
+        return 0;
+    }
+    if (win_getsockopt(s, wlevel, wname, (u8*)value, lenp) != 0) {
+        return -win_wsa_errno();
+    }
+    if (wlevel == WIN_SOL_SOCKET && wname == WIN_SO_ERROR) {
+        i32* err = (i32*)value;
+        if (err[0] != 0) {
+            err[0] = (i32)win_errno((u32)err[0]);
+        }
+    }
+    return 0;
+}
+
+/// Seam: getsockname(2); the result carries the Linux family value.
+i64 sys_getsockname(i64 fd, i64 addr, i64 len_ptr) {
+    i32* lenp = (i32*)len_ptr;
+    if (win_getsockname(win_fd_socket(fd), (u8*)addr, lenp) != 0) {
+        return -win_wsa_errno();
+    }
+    win_sockaddr_to_linux(addr, (i64)lenp[0]);
+    return 0;
+}
+
+/// Seam: getpeername(2); the result carries the Linux family value.
+i64 sys_getpeername(i64 fd, i64 addr, i64 len_ptr) {
+    i32* lenp = (i32*)len_ptr;
+    if (win_getpeername(win_fd_socket(fd), (u8*)addr, lenp) != 0) {
+        return -win_wsa_errno();
+    }
+    win_sockaddr_to_linux(addr, (i64)lenp[0]);
+    return 0;
+}
+
+/// Seam: sendto(2); a null `addr` sends on the connected peer. Count or
+/// -errno.
+i64 sys_sendto(i64 fd, i64 buf, i64 len, i64 flags, i64 addr, i64 addr_len) {
+    if (addr == 0) {
+        return win_sock_send(fd, buf, len, flags);
+    }
+    u8 wa[128];
+    i64 n = win_sockaddr_to_win(addr, addr_len, &wa[0]);
+    if (n < 0) {
+        return n;
+    }
+    i64 count = len > WIN_SOCK_IO_MAX ? WIN_SOCK_IO_MAX : len;
+    i32 r = win_sendto(win_fd_socket(fd), (u8*)buf, (i32)count, win_sock_flags(flags), &wa[0], (i32)n);
+    if (r < 0) {
+        return -win_wsa_io_errno();
+    }
+    return (i64)r;
+}
+
+/// Seam: recvfrom(2); `addr`/`len_ptr` may be null, and a filled address
+/// carries the Linux family value. Count (0 = stream peer closed) or -errno.
+i64 sys_recvfrom(i64 fd, i64 buf, i64 len, i64 flags, i64 addr, i64 len_ptr) {
+    if (addr == 0 || len_ptr == 0) {
+        return win_sock_recv(fd, buf, len, flags);
+    }
+    i64 count = len > WIN_SOCK_IO_MAX ? WIN_SOCK_IO_MAX : len;
+    i32* lenp = (i32*)len_ptr;
+    i32 r = win_recvfrom(win_fd_socket(fd), (u8*)buf, (i32)count, win_sock_flags(flags), (u8*)addr, lenp);
+    if (r < 0) {
+        if (win_WSAGetLastError() != 10040) { // WSAEMSGSIZE: truncated datagram
+            return -win_wsa_io_errno();
+        }
+        r = (i32)count;
+    }
+    win_sockaddr_to_linux(addr, (i64)lenp[0]);
+    return (i64)r;
+}
+
+/// Seam: poll(2) over socket fds with the Linux 8-byte pollfd and POLL*
+/// bits, through WSAPoll (16-byte WSAPOLLFD). Negative fds are ignored, as
+/// on Linux; non-socket fds fail with ENOTSOCK. A hang-up also reports
+/// POLLIN when it was requested, so readers see EOF as on Linux.
+i64 sys_poll(i64 fds, i64 nfds, i64 timeout_ms) {
+    if (nfds <= 0) {
+        if (timeout_ms > 0) {
+            win_Sleep((u32)timeout_ms);
+        }
+        return 0;
+    }
+    u8 stack_buf[1024]; // WIN_SOCK_BATCH * 16
+    u8* wfds = &stack_buf[0];
+    i64 bytes = nfds * 16;
+    bool mapped = nfds > WIN_SOCK_BATCH;
+    if (mapped) {
+        i64 m = sys_mmap(0, bytes, 3, 34, -1, 0);
+        if (m < 0) {
+            return m;
+        }
+        wfds = (u8*)m;
+    }
+    u8* lfds = (u8*)fds;
+    i64 i = 0;
+    while (i < nfds) {
+        i32* fdp = (i32*)&lfds[i * 8];
+        i64 fd = (i64)fdp[0];
+        i64 ev = win_le_u16(lfds, i * 8 + 4);
+        u64 s = fd < 0 ? ~(u64)0 : win_fd_socket(fd);
+        i64 wev = 0;
+        if ((ev & 1) != 0) { wev = wev | 0x100; } // POLLIN  -> POLLRDNORM
+        if ((ev & 2) != 0) { wev = wev | 0x200; } // POLLPRI -> POLLRDBAND
+        if ((ev & 4) != 0) { wev = wev | 0x10; }  // POLLOUT -> POLLWRNORM
+        win_store_le_i64(wfds, i * 16, (i64)s);
+        win_store_le_i64(wfds, i * 16 + 8, wev); // events; revents = 0
+        i += 1;
+    }
+    i32 ms = -1;
+    if (timeout_ms >= 0) {
+        ms = timeout_ms > 0x7FFFFFFF ? (i32)0x7FFFFFFF : (i32)timeout_ms;
+    }
+    i32 r = win_WSAPoll(wfds, (u32)nfds, ms);
+    i64 result = (i64)r;
+    if (r < 0) {
+        result = -win_wsa_errno();
+    } else {
+        i = 0;
+        while (i < nfds) {
+            i64 wrev = win_le_u16(wfds, i * 16 + 10);
+            i64 ev = win_le_u16(lfds, i * 8 + 4);
+            i64 rev = 0;
+            if ((wrev & 0x100) != 0) { rev = rev | 1; }  // POLLRDNORM -> POLLIN
+            if ((wrev & 0x200) != 0) { rev = rev | 2; }  // POLLRDBAND -> POLLPRI
+            if ((wrev & 0x10) != 0) { rev = rev | 4; }   // POLLWRNORM -> POLLOUT
+            if ((wrev & 1) != 0) { rev = rev | 8; }      // POLLERR
+            if ((wrev & 2) != 0) {                       // POLLHUP
+                rev = rev | 16 | (ev & 1);
+            }
+            if ((wrev & 4) != 0) { rev = rev | 32; }     // POLLNVAL
+            lfds[i * 8 + 6] = (u8)(rev & 0xFF);
+            lfds[i * 8 + 7] = (u8)0;
+            i += 1;
+        }
+    }
+    if (mapped) {
+        sys_munmap((i64)wfds, bytes);
+    }
+    return result;
+}
+
+/// Seam: writev(2). Sockets send up to 64 buffers in one WSASend; other fds
+/// write each buffer in turn, stopping at the first short write. Returns the
+/// byte count (possibly short, as writev may be) or -errno.
+i64 sys_writev(i64 fd, i64 iov, i64 count) {
+    return win_vectored_io(fd, iov, count, true);
+}
+
+/// Seam: readv(2). Sockets fill up to 64 buffers in one WSARecv; other fds
+/// read each buffer in turn, stopping at the first short read.
+i64 sys_readv(i64 fd, i64 iov, i64 count) {
+    return win_vectored_io(fd, iov, count, false);
+}
+
+/// Internal: shared writev/readv over Linux iovecs ({void* base, i64 len}).
+i64 win_vectored_io(i64 fd, i64 iov, i64 count, bool write) {
+    if (count < 0) {
+        return -EINVAL;
+    }
+    i64* vec = (i64*)iov;
+    if (win_fd_is_socket(fd)) {
+        // WSABUF is {u32 len; (pad) u8* buf}: 16 bytes.
+        u8 bufs[1024]; // WIN_SOCK_BATCH * 16
+        i64 n = count > WIN_SOCK_BATCH ? WIN_SOCK_BATCH : count;
+        i64 i = 0;
+        while (i < n) {
+            i64 len = vec[i * 2 + 1];
+            if (len > WIN_SOCK_IO_MAX) { len = WIN_SOCK_IO_MAX; }
+            win_store_le_i64(&bufs[0], i * 16, len);
+            win_store_le_i64(&bufs[0], i * 16 + 8, vec[i * 2]);
+            i += 1;
+        }
+        u32 done = 0;
+        u32 flags = 0;
+        i32 r = 0;
+        if (write) {
+            r = win_WSASend(win_fd_socket(fd), &bufs[0], (u32)n, &done, 0, (u8*)0, (u8*)0);
+        } else {
+            r = win_WSARecv(win_fd_socket(fd), &bufs[0], (u32)n, &done, &flags, (u8*)0, (u8*)0);
+        }
+        if (r != 0) {
+            return -win_wsa_io_errno();
+        }
+        return (i64)done;
+    }
+    i64 total = 0;
+    i64 i = 0;
+    while (i < count) {
+        i64 base = vec[i * 2];
+        i64 len = vec[i * 2 + 1];
+        i64 r = write ? sys_write(fd, base, len) : sys_read(fd, base, len);
+        if (r < 0) {
+            return total > 0 ? total : r;
+        }
+        total += r;
+        if (r < len) {
+            break;
+        }
+        i += 1;
+    }
+    return total;
+}
+
+/// Seam: sendfile(2) as a read/write copy loop through a 16 KiB buffer.
+/// With a non-null `offset_ptr`, reads start at *offset_ptr, the file
+/// position is left unchanged, and *offset_ptr advances by the bytes sent,
+/// as on Linux. Returns the bytes sent (possibly short) or -errno.
+i64 sys_sendfile(i64 out_fd, i64 in_fd, i64 offset_ptr, i64 count) {
+    i64 saved = 0;
+    i64* offset = (i64*)offset_ptr;
+    if (offset_ptr != 0) {
+        saved = sys_lseek(in_fd, 0, 1); // SEEK_CUR
+        if (saved < 0) {
+            return saved;
+        }
+        i64 at = sys_lseek(in_fd, offset[0], 0); // SEEK_SET
+        if (at < 0) {
+            return at;
+        }
+    }
+    u8 chunk[16384];
+    i64 sent = 0;
+    i64 err = 0;
+    while (sent < count) {
+        i64 want = count - sent;
+        if (want > 16384) { want = 16384; }
+        i64 got = sys_read(in_fd, (i64)&chunk[0], want);
+        if (got <= 0) {
+            err = got;
+            break;
+        }
+        i64 put = 0;
+        while (put < got) {
+            i64 w = sys_write(out_fd, (i64)&chunk[put], got - put);
+            if (w <= 0) {
+                err = w < 0 ? w : -EIO;
+                break;
+            }
+            put += w;
+        }
+        sent += put;
+        if (put < got) {
+            break;
+        }
+    }
+    if (offset_ptr != 0) {
+        offset[0] = offset[0] + sent;
+        sys_lseek(in_fd, saved, 0);
+    }
+    if (sent == 0 && err < 0) {
+        return err;
+    }
+    return sent;
 }
 
 // ---------------------------------------------------------------------------

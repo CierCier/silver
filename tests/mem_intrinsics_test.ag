@@ -72,6 +72,19 @@ i32 main() {
     String t = String.from_str("aaaaab");
     @assert(!(t.find("b") != 5), "check");
 
+    // @memcpy/@memmove/@memset take borrow references (`&buf[i]`) as well
+    // as raw pointers; the reference's address is used.
+    u8 ref_src[4] = { (u8)1, (u8)2, (u8)3, (u8)4 };
+    u8 ref_dst[4] = { (u8)0, (u8)0, (u8)0, (u8)0 };
+    @memcpy(&ref_dst[0], &ref_src[0], 4);
+    @assert(ref_dst[0] == (u8)1 && ref_dst[3] == (u8)4, "@memcpy through references");
+    @memmove(&ref_dst[1], &ref_dst[0], 3);
+    @assert(ref_dst[0] == (u8)1 && ref_dst[1] == (u8)1 && ref_dst[2] == (u8)2 && ref_dst[3] == (u8)3,
+        "@memmove overlapping references");
+    @memset(&ref_src[1], 9, 2);
+    @assert(ref_src[0] == (u8)1 && ref_src[1] == (u8)9 && ref_src[2] == (u8)9 && ref_src[3] == (u8)4,
+        "@memset through a reference");
+
     STDOUT.write_str("all intrinsics ok\n");
     return 0;
 }

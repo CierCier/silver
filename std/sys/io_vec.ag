@@ -6,11 +6,14 @@
 // - sendfile: transfer file data directly from the kernel page cache to a socket.
 
 import std.error;
+import std.sys.os;
 import std.sys.raw.fs;
 import std.sys.result;
 
-if (@cfg(os.linux)) {
+if (!@cfg(os.wasi)) {
 /// Linux struct iovec (void* iov_base, size_t iov_len) — 16 bytes on x86_64.
+/// The Windows seam translates it (WSABUF for sockets, a write loop
+/// otherwise).
 struct IoVec {
     void* base;
     i64   len;

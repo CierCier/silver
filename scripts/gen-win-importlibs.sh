@@ -27,14 +27,27 @@ cat > kernel32.def <<'EOF'
 LIBRARY kernel32.dll
 EXPORTS
   CloseHandle
+  CreateDirectoryW
   CreateFileW
+  CreateProcessW
   CreateThread
   DeleteFileW
   ExitProcess
   ExitThread
+  FindClose
+  FindFirstFileW
+  FindNextFileW
+  FreeEnvironmentStringsW
+  GetCommandLineW
+  GetConsoleMode
+  GetConsoleScreenBufferInfo
+  GetCurrentDirectoryW
   GetCurrentProcess
   GetCurrentProcessId
-  GetCommandLineW
+  GetCurrentThreadId
+  GetEnvironmentStringsW
+  GetExitCodeProcess
+  GetFileAttributesW
   GetFileInformationByHandle
   GetLastError
   GetStdHandle
@@ -45,14 +58,18 @@ EXPORTS
   QueryPerformanceCounter
   QueryPerformanceFrequency
   ReadFile
+  RemoveDirectoryW
   SetConsoleCP
+  SetConsoleMode
   SetConsoleOutputCP
+  SetCurrentDirectoryW
   SetFilePointer
   Sleep
   SwitchToThread
   TerminateProcess
   VirtualAlloc
   VirtualFree
+  WaitForSingleObject
   WriteFile
 EOF
 
@@ -65,9 +82,11 @@ EOF
 # The OS unwinder + leak-check attribution live in ntdll (backtrace.ag,
 # mem/alloc.ag). RtlCaptureStackBackTrace is also forwarded by kernel32,
 # but the unwind trio is ntdll-only, so bind all four to ntdll.dll.
+# std.process reads the parent pid through NtQueryInformationProcess.
 cat > ntdll.def <<'EOF'
 LIBRARY ntdll.dll
 EXPORTS
+  NtQueryInformationProcess
   RtlCaptureContext
   RtlCaptureStackBackTrace
   RtlLookupFunctionEntry
@@ -90,6 +109,57 @@ EXPORTS
   WakeByAddressSingle
   WakeByAddressAll
 EOF
+
+# std.sys.os_windows emulates the Linux socket syscalls over winsock.
+cat > ws2_32.def <<'EOF'
+LIBRARY ws2_32.dll
+EXPORTS
+  WSAGetLastError
+  WSAIoctl
+  WSAPoll
+  WSARecv
+  WSASend
+  WSASocketW
+  WSAStartup
+  accept
+  bind
+  closesocket
+  connect
+  getpeername
+  getsockname
+  getsockopt
+  ioctlsocket
+  listen
+  recv
+  recvfrom
+  send
+  sendto
+  setsockopt
+  shutdown
+EOF
+
+# std.net.dns discovers the system's DNS servers.
+cat > iphlpapi.def <<'EOF'
+LIBRARY iphlpapi.dll
+EXPORTS
+  GetNetworkParams
+EOF
+
+# `-lc` maps to legacy_stdio_definitions (the printf family as real
+# symbols); here it binds the C entry points runtime_test calls to msvcrt.
+cat > legacy_stdio_definitions.def <<'EOF'
+LIBRARY msvcrt.dll
+EXPORTS
+  qsort
+  sprintf
+  strtod
+EOF
+
+# Rust staticlibs (silver_ffi) also name userenv and dbghelp; the default
+# set lists them, so the link needs the (symbol-less here) libraries.
+for name in userenv dbghelp; do
+    printf 'LIBRARY %s.dll\nEXPORTS\n' "$name" > "$name.def"
+done
 
 for name in msvcrt ucrt vcruntime; do
     case "$name" in

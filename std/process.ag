@@ -51,6 +51,9 @@ impl Display for ExitStatus {
 /// A running child process.
 struct Child {
     i64 pid;
+    /// Windows process handle owned by this Child (0 when unknown: waiting
+    /// then opens the process by pid). Unused on Linux.
+    i64 handle;
 }
 
 impl Child {
@@ -85,9 +88,47 @@ impl Child {
         return st;
     }
 
-    /// Send SIGKILL to the child process.
+    /// Wait for the child to exit and return its ExitStatus. Windows has no
+    /// signals: every termination reports `exited` with the process exit
+    /// code (`kill` uses 137, the shell's 128 + SIGKILL).
+#[cfg(os.windows)]
+    ExitStatus wait_status(&mut self) {
+        ExitStatus st;
+        st.code = -1;
+        st.exited = false;
+        st.signal = 0;
+        if (self.pid <= 0) {
+            return st;
+        }
+        i64 h = self.handle;
+        if (h <= 0) {
+            h = win_OpenProcess(WIN_PROCESS_WAIT_ACCESS, 0, (u32)self.pid);
+            if (h == 0) {
+                return st;
+            }
+        }
+        u32 code = 0;
+        if (win_WaitForSingleObject(h, WIN_INFINITE) == 0 && win_GetExitCodeProcess(h, &code) != 0) {
+            st.exited = true;
+            st.code = (i32)code;
+        }
+        win_CloseHandle(h);
+        self.handle = 0;
+        self.pid = 0;
+        return st;
+    }
+
+    /// Send SIGKILL to the child process (TerminateProcess with exit code
+    /// 137 on Windows).
     void kill(&self) {
-        if (self.pid > 0) {
+        if (self.pid <= 0) {
+            return;
+        }
+        if (@cfg(os.windows)) {
+            if (self.handle > 0) {
+                win_TerminateProcess(self.handle, 137);
+            }
+        } else {
             sys_kill(self.pid, 9); // SIGKILL
         }
     }
@@ -166,19 +207,124 @@ impl Command {
         }
         Child c;
         c.pid = pid;
+        c.handle = 0;
         return Result<Child, i64>.Ok(c);
     }
 
-    /// Spawn the command and wait for it to complete.
-#[cfg(os.linux)]
-    Result<ExitStatus, i64> status(&self) {
-        Result<Child, i64> res = self.spawn();
-        if (res.is_err()) {
-            return Result<ExitStatus, i64>.Err(res.unwrap_err());
+    /// Spawn the command as a child process (CreateProcessW). The program is
+    /// found as Windows does (the PATH search appends `.exe`); arguments are
+    /// quoted so the child's CommandLineToArgvW sees them unchanged. The
+    /// child inherits the standard handles and the environment from
+    /// `std.env` (including `set_var` changes) plus this command's `env`
+    /// entries, which override same-named (case-insensitive) variables.
+    /// Unlike Linux, where exec runs after fork and a missing program exits
+    /// 127, a program that cannot start is an Err(-errno) here.
+#[cfg(os.windows)]
+    Result<Child, i64> spawn(&self) {
+        String line = String.new();
+        win_append_quoted_arg(&mut line, self.program.to_str());
+        for (i64 i = 0; i < self.args.len(); i = i + 1) {
+            line.push((u8)' ');
+            win_append_quoted_arg(&mut line, self.args.get_ptr(i).to_str());
         }
-        Child c = res.unwrap();
-        ExitStatus st = c.wait_status();
-        return Result<ExitStatus, i64>.Ok(st);
+        u16* wline = win_wide_dup(line.to_str());
+        u16* wenv = self.win_env_block();
+
+        u64 si[13]; // STARTUPINFOW (104 bytes)
+        for (i64 i = 0; i < 13; i = i + 1) { si[i] = 0; }
+        si[0] = 104;                                    // cb
+        si[7] = (u64)WIN_STARTF_USESTDHANDLES << 32;    // dwFlags at 60
+        si[10] = (u64)win_GetStdHandle(WIN_STD_INPUT);  // hStdInput at 80
+        si[11] = (u64)win_GetStdHandle(WIN_STD_OUTPUT); // hStdOutput at 88
+        si[12] = (u64)win_GetStdHandle(WIN_STD_ERROR);  // hStdError at 96
+        u64 pi[3]; // PROCESS_INFORMATION
+        pi[0] = 0;
+        pi[1] = 0;
+        pi[2] = 0;
+
+        i32 ok = win_CreateProcessW((u16*)0, wline, (u8*)0, (u8*)0, 1,
+            WIN_CREATE_UNICODE_ENVIRONMENT, wenv, (u16*)0, (u8*)&si[0], (u8*)&pi[0]);
+        i64 err = win_last_errno();
+        free((void*)wline);
+        free((void*)wenv);
+        if (ok == 0) {
+            return Result<Child, i64>.Err(-err);
+        }
+        win_CloseHandle((i64)pi[1]); // primary thread handle
+        Child c;
+        c.pid = (i64)(pi[2] & 0xFFFFFFFF);
+        c.handle = (i64)pi[0];
+        return Result<Child, i64>.Ok(c);
+    }
+
+    /// Internal: the UTF-16 environment block ("K=V", NUL-separated, double
+    /// NUL-terminated) for spawn: the current `std.env` entries unless
+    /// cleared, minus names this command overrides, then this command's
+    /// entries. The caller frees it.
+#[cfg(os.windows)]
+    u16* win_env_block(&self) {
+        Vec<String> entries = Vec<String>.new();
+        i8** env = silver_envp();
+        if (!self.clear_env && env != (i8**)0) {
+            for (i64 i = 0; env[i] != (i8*)0; i = i + 1) {
+                str entry = (str)env[i];
+                if (!self.win_env_overrides(entry)) {
+                    entries.push(String.from_str(entry));
+                }
+            }
+        }
+        for (i64 i = 0; i < self.env_vars.len(); i = i + 1) {
+            entries.push(String.from_str(self.env_vars.get_ptr(i).to_str()));
+        }
+        i64 units = 2;
+        for (i64 i = 0; i < entries.len(); i = i + 1) {
+            units += win_utf16_len((u8*)entries.get_ptr(i).to_str()) + 1;
+        }
+        u16* block = alloc<u16>(units);
+        i64 off = 0;
+        for (i64 i = 0; i < entries.len(); i = i + 1) {
+            off += win_utf8_to_utf16((u8*)entries.get_ptr(i).to_str(), &block[off]) + 1;
+        }
+        // Final terminator; an empty block needs two.
+        block[off] = (u16)0;
+        block[off + 1] = (u16)0;
+        return block;
+    }
+
+    /// Internal: true when one of this command's `env` entries names the
+    /// variable of `entry` ("KEY=value"), compared case-insensitively.
+#[cfg(os.windows)]
+    bool win_env_overrides(&self, str entry) {
+        for (i64 i = 0; i < self.env_vars.len(); i = i + 1) {
+            str mine = self.env_vars.get_ptr(i).to_str();
+            i64 k = 0;
+            while (true) {
+                u8 a = (u8)entry[k];
+                u8 b = (u8)mine[k];
+                if (a >= (u8)'a' && a <= (u8)'z') { a = a - 32; }
+                if (b >= (u8)'a' && b <= (u8)'z') { b = b - 32; }
+                if (a != b || a == (u8)0) { break; }
+                if (a == (u8)'=') { return true; }
+                k += 1;
+            }
+        }
+        return false;
+    }
+
+    /// Spawn the command and wait for it to complete.
+    /// Err(-ENOSYS) on WASI, which cannot spawn processes.
+    Result<ExitStatus, i64> status(&self) {
+        if (@cfg(os.wasi)) {
+            return Result<ExitStatus, i64>.Err(-38); // ENOSYS
+        } else {
+            Result<Child, i64> res = self.spawn();
+            if (res.is_err()) {
+                return Result<ExitStatus, i64>.Err(res.unwrap_err());
+            }
+            Child c = res.unwrap();
+            ExitStatus st = c.wait_status();
+            return Result<ExitStatus, i64>.Ok(st);
+        }
     }
 }
 
@@ -196,4 +342,86 @@ i64 getpid() {
 #[cfg(os.linux)]
 i64 getppid() {
     return sys_getppid();
+}
+
+/// Return the process ID of the parent process: the creator's id, which
+/// Windows does not reparent (the creator may have exited since).
+#[cfg(os.windows)]
+i64 getppid() {
+    // PROCESS_BASIC_INFORMATION (48 bytes): InheritedFromUniqueProcessId at 40.
+    u64 info[6];
+    for (i64 i = 0; i < 6; i = i + 1) { info[i] = 0; }
+    u32 returned = 0;
+    if (win_NtQueryInformationProcess(win_GetCurrentProcess(), 0, (u8*)&info[0], 48, &returned) != 0) {
+        return -1;
+    }
+    return (i64)info[5];
+}
+
+if (@cfg(os.windows)) {
+extern "C" {
+    /// Win32 `CreateProcessW`.
+    #[link_name("CreateProcessW")]
+    i32 win_CreateProcessW(u16* app, u16* cmdline, u8* process_attrs, u8* thread_attrs,
+        i32 inherit, u32 flags, u16* env, u16* cwd, u8* startup, u8* info);
+    /// Win32 `GetExitCodeProcess`.
+    #[link_name("GetExitCodeProcess")]
+    i32 win_GetExitCodeProcess(i64 process, u32* code);
+    /// ntdll `NtQueryInformationProcess`.
+    #[link_name("NtQueryInformationProcess")]
+    i32 win_NtQueryInformationProcess(i64 process, i32 class, u8* info, u32 len, u32* returned);
+}
+
+/// CreateProcessW flag: `env` is a UTF-16 block.
+const u32 WIN_CREATE_UNICODE_ENVIRONMENT = 0x400;
+/// STARTUPINFOW flag: use the hStd* handles.
+const u32 WIN_STARTF_USESTDHANDLES = 0x100;
+/// OpenProcess rights for waiting: SYNCHRONIZE | QUERY_LIMITED_INFORMATION.
+const u32 WIN_PROCESS_WAIT_ACCESS = 0x00101000;
+
+/// Appends `arg` to a command line, quoted by the MSVC argv rules: quotes
+/// only when needed; backslashes double only before a quote.
+void win_append_quoted_arg(String* line, str arg) {
+    i64 len = strlen(arg);
+    bool quote = len == 0;
+    for (i64 i = 0; i < len; i = i + 1) {
+        u8 c = (u8)arg[i];
+        if (c == (u8)' ' || c == (u8)9 || c == (u8)10 || c == (u8)11 || c == (u8)'"') {
+            quote = true;
+        }
+    }
+    if (!quote) {
+        line.push_str(arg);
+        return;
+    }
+    line.push((u8)'"');
+    i64 i = 0;
+    while (i < len) {
+        i64 slashes = 0;
+        while (i < len && (u8)arg[i] == (u8)92) { // backslash
+            slashes += 1;
+            i += 1;
+        }
+        if (i == len) {
+            // Before the closing quote: double them.
+            for (i64 k = 0; k < slashes * 2; k = k + 1) { line.push((u8)92); }
+        } else if ((u8)arg[i] == (u8)'"') {
+            for (i64 k = 0; k < slashes * 2 + 1; k = k + 1) { line.push((u8)92); }
+            line.push((u8)'"');
+            i += 1;
+        } else {
+            for (i64 k = 0; k < slashes; k = k + 1) { line.push((u8)92); }
+            line.push((u8)arg[i]);
+            i += 1;
+        }
+    }
+    line.push((u8)'"');
+}
+
+/// Heap UTF-16 copy of NUL-terminated UTF-8 `text`. The caller frees it.
+u16* win_wide_dup(str text) {
+    u16* out = alloc<u16>(win_utf16_len((u8*)text) + 1);
+    win_utf8_to_utf16((u8*)text, out);
+    return out;
+}
 }
