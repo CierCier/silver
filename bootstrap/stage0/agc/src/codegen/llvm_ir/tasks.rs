@@ -491,6 +491,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             CodegenError::with_span("launch: no active insert block for trampoline", *span)
         })?;
         self.builder.position_at_end(entry);
+        // C ABI conversion inserts blocks into `current_fn`; point it at the
+        // trampoline while emitting its body.
+        let saved_fn = self.current_fn.replace(tramp);
 
         let pack_arg = tramp.get_nth_param(0).ok_or_else(|| {
             CodegenError::with_span("launch: trampoline missing pack parameter", *span)
@@ -565,7 +568,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             CodegenError::with_span(format!("launch: trampoline return failed: {e}"), *span)
         })?;
 
-        // Restore the parent function's builder position.
+        // Restore the parent function and its builder position.
+        self.current_fn = saved_fn;
         self.builder.position_at_end(saved_block);
         Ok(tramp.as_global_value().as_pointer_value().into())
     }
