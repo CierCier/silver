@@ -27,6 +27,7 @@ cat > kernel32.def <<'EOF'
 LIBRARY kernel32.dll
 EXPORTS
   CloseHandle
+  CompareStringOrdinal
   CreateDirectoryW
   CreateFileW
   CreateProcessW
@@ -49,6 +50,7 @@ EXPORTS
   GetExitCodeProcess
   GetFileAttributesW
   GetFileInformationByHandle
+  GetFileInformationByHandleEx
   GetLastError
   GetStdHandle
   GetSystemTimePreciseAsFileTime
@@ -63,6 +65,7 @@ EXPORTS
   SetConsoleMode
   SetConsoleOutputCP
   SetCurrentDirectoryW
+  SetFileInformationByHandle
   SetFilePointer
   Sleep
   SwitchToThread
@@ -145,8 +148,9 @@ EXPORTS
   GetNetworkParams
 EOF
 
-# `-lc` maps to legacy_stdio_definitions (the printf family as real
-# symbols); here it binds the C entry points runtime_test calls to msvcrt.
+# `-lc` maps to legacy_stdio_definitions. This stand-in exports only the C
+# entry points the suite calls (runtime_test), bound to msvcrt; add any
+# other libc function a cross-tested program needs here.
 cat > legacy_stdio_definitions.def <<'EOF'
 LIBRARY msvcrt.dll
 EXPORTS

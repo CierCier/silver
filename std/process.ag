@@ -3,6 +3,7 @@
 import std.display;
 import std.error;
 import std.mem.alloc;
+import std.mem.drop;
 import std.mem.vec;
 import std.result;
 import std.string;
@@ -54,6 +55,19 @@ struct Child {
     /// Windows process handle owned by this Child (0 when unknown: waiting
     /// then opens the process by pid). Unused on Linux.
     i64 handle;
+}
+
+/// A Windows Child owns its process handle until `wait_status`; dropping it
+/// first closes the handle without waiting for or stopping the child.
+impl Drop for Child {
+    void drop(*self) {
+        if (@cfg(os.windows)) {
+            if (self.handle > 0) {
+                win_CloseHandle(self.handle);
+                self.handle = 0;
+            }
+        }
+    }
 }
 
 impl Child {
@@ -208,7 +222,7 @@ impl Command {
         Child c;
         c.pid = pid;
         c.handle = 0;
-        return Result<Child, i64>.Ok(c);
+        return Result<Child, i64>.Ok(move c);
     }
 
     /// Spawn the command as a child process (CreateProcessW). The program is
@@ -228,7 +242,7 @@ impl Command {
             win_append_quoted_arg(&mut line, self.args.get_ptr(i).to_str());
         }
         u16* wline = win_wide_dup(line.to_str());
-        u16* wenv = self.win_env_block();
+        u16* wenv = win_env_block(self);
 
         u64 si[13]; // STARTUPINFOW (104 bytes)
         for (i64 i = 0; i < 13; i = i + 1) { si[i] = 0; }
@@ -254,61 +268,7 @@ impl Command {
         Child c;
         c.pid = (i64)(pi[2] & 0xFFFFFFFF);
         c.handle = (i64)pi[0];
-        return Result<Child, i64>.Ok(c);
-    }
-
-    /// Internal: the UTF-16 environment block ("K=V", NUL-separated, double
-    /// NUL-terminated) for spawn: the current `std.env` entries unless
-    /// cleared, minus names this command overrides, then this command's
-    /// entries. The caller frees it.
-#[cfg(os.windows)]
-    u16* win_env_block(&self) {
-        Vec<String> entries = Vec<String>.new();
-        i8** env = silver_envp();
-        if (!self.clear_env && env != (i8**)0) {
-            for (i64 i = 0; env[i] != (i8*)0; i = i + 1) {
-                str entry = (str)env[i];
-                if (!self.win_env_overrides(entry)) {
-                    entries.push(String.from_str(entry));
-                }
-            }
-        }
-        for (i64 i = 0; i < self.env_vars.len(); i = i + 1) {
-            entries.push(String.from_str(self.env_vars.get_ptr(i).to_str()));
-        }
-        i64 units = 2;
-        for (i64 i = 0; i < entries.len(); i = i + 1) {
-            units += win_utf16_len((u8*)entries.get_ptr(i).to_str()) + 1;
-        }
-        u16* block = alloc<u16>(units);
-        i64 off = 0;
-        for (i64 i = 0; i < entries.len(); i = i + 1) {
-            off += win_utf8_to_utf16((u8*)entries.get_ptr(i).to_str(), &block[off]) + 1;
-        }
-        // Final terminator; an empty block needs two.
-        block[off] = (u16)0;
-        block[off + 1] = (u16)0;
-        return block;
-    }
-
-    /// Internal: true when one of this command's `env` entries names the
-    /// variable of `entry` ("KEY=value"), compared case-insensitively.
-#[cfg(os.windows)]
-    bool win_env_overrides(&self, str entry) {
-        for (i64 i = 0; i < self.env_vars.len(); i = i + 1) {
-            str mine = self.env_vars.get_ptr(i).to_str();
-            i64 k = 0;
-            while (true) {
-                u8 a = (u8)entry[k];
-                u8 b = (u8)mine[k];
-                if (a >= (u8)'a' && a <= (u8)'z') { a = a - 32; }
-                if (b >= (u8)'a' && b <= (u8)'z') { b = b - 32; }
-                if (a != b || a == (u8)0) { break; }
-                if (a == (u8)'=') { return true; }
-                k += 1;
-            }
-        }
-        return false;
+        return Result<Child, i64>.Ok(move c);
     }
 
     /// Spawn the command and wait for it to complete.
@@ -416,6 +376,75 @@ void win_append_quoted_arg(String* line, str arg) {
         }
     }
     line.push((u8)'"');
+}
+
+/// The UTF-16 environment block ("K=V", NUL-separated, double
+/// NUL-terminated) for spawning `cmd`: the current `std.env` entries unless
+/// cleared, minus names `cmd` overrides, then `cmd`'s entries, sorted by name
+/// case-insensitively as Windows expects. Free functions in this block rather
+/// than `Command` methods, so no compiler sees them off Windows. The caller
+/// frees the block.
+u16* win_env_block(Command* cmd) {
+    Vec<String> entries = Vec<String>.new();
+    i8** env = silver_envp();
+    if (!cmd.clear_env && env != (i8**)0) {
+        for (i64 i = 0; env[i] != (i8*)0; i = i + 1) {
+            str entry = (str)env[i];
+            if (!win_env_overrides(cmd, entry)) {
+                entries.push(String.from_str(entry));
+            }
+        }
+    }
+    for (i64 i = 0; i < cmd.env_vars.len(); i = i + 1) {
+        entries.push(String.from_str(cmd.env_vars.get_ptr(i).to_str()));
+    }
+    // Insertion sort: environment blocks are small.
+    for (i64 i = 1; i < entries.len(); i = i + 1) {
+        i64 j = i;
+        while (j > 0 && win_env_name_compare(entries.get_ptr(j - 1).to_str(), entries.get_ptr(j).to_str()) > 0) {
+            entries.swap(j - 1, j);
+            j -= 1;
+        }
+    }
+    i64 units = 2;
+    for (i64 i = 0; i < entries.len(); i = i + 1) {
+        units += win_utf16_len((u8*)entries.get_ptr(i).to_str()) + 1;
+    }
+    u16* block = alloc<u16>(units);
+    i64 off = 0;
+    for (i64 i = 0; i < entries.len(); i = i + 1) {
+        off += win_utf8_to_utf16((u8*)entries.get_ptr(i).to_str(), &block[off]) + 1;
+    }
+    // Final terminator; an empty block needs two.
+    block[off] = (u16)0;
+    block[off + 1] = (u16)0;
+    return block;
+}
+
+/// Byte length of the name in environment entry `entry` ("KEY=value"):
+/// up to the first '=' after position 0.
+i64 win_env_name_len(str entry) {
+    i64 n = 1;
+    while (entry[n] != 0 && entry[n] != 61) { // '='
+        n += 1;
+    }
+    return n;
+}
+
+/// Orders environment entries by name, case-insensitively: -1, 0, or 1.
+i32 win_env_name_compare(str a, str b) {
+    return win_names_compare_ci((u8*)a, win_env_name_len(a), (u8*)b, win_env_name_len(b));
+}
+
+/// True when one of `cmd`'s `env` entries names the variable of `entry`
+/// ("KEY=value"), compared with Windows' case-insensitive name rules.
+bool win_env_overrides(Command* cmd, str entry) {
+    for (i64 i = 0; i < cmd.env_vars.len(); i = i + 1) {
+        if (win_env_name_compare(cmd.env_vars.get_ptr(i).to_str(), entry) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /// Heap UTF-16 copy of NUL-terminated UTF-8 `text`. The caller frees it.

@@ -54,6 +54,15 @@ extern "C" {
     /// Win32 `MoveFileExW`.
     #[link_name("MoveFileExW")]
     i32 win_MoveFileExW(u16* from, u16* to, u32 flags);
+    /// Win32 `SetFileInformationByHandle`.
+    #[link_name("SetFileInformationByHandle")]
+    i32 win_SetFileInformationByHandle(i64 handle, i32 class, u8* info, u32 len);
+    /// Win32 `GetFileInformationByHandleEx`.
+    #[link_name("GetFileInformationByHandleEx")]
+    i32 win_GetFileInformationByHandleEx(i64 handle, i32 class, u8* info, u32 len);
+    /// Win32 `CompareStringOrdinal`.
+    #[link_name("CompareStringOrdinal")]
+    i32 win_CompareStringOrdinal(u16* a, i32 alen, u16* b, i32 blen, i32 ignore_case);
 
     /// Win32 `WaitOnAddress`.
     #[link_name("WaitOnAddress")]
@@ -162,6 +171,20 @@ const i64 WIN_FILE_ATTRIBUTE_READONLY = 0x1;
 const i64 WIN_FILE_ATTRIBUTE_DIRECTORY = 0x10;
 /// CreateFileW flag: required to open a directory handle.
 const u32 WIN_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+/// CreateFileW flag: open a symlink itself rather than its target.
+const u32 WIN_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+/// Access right: delete the object.
+const u32 WIN_DELETE = 0x00010000;
+/// File information class `FileBasicInfo` (times and attributes).
+const i32 WIN_FILE_BASIC_INFO = 0;
+/// File information class `FileDispositionInfoEx`.
+const i32 WIN_FILE_DISPOSITION_INFO_EX = 21;
+/// FileDispositionInfoEx flag: delete the file.
+const u32 WIN_FILE_DISPOSITION_DELETE = 0x1;
+/// FileDispositionInfoEx flag: unlink the name immediately (POSIX).
+const u32 WIN_FILE_DISPOSITION_POSIX_SEMANTICS = 0x2;
+/// FileDispositionInfoEx flag: delete even when marked read-only.
+const u32 WIN_FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE = 0x10;
 /// Linux `st_mode` file-type bits for a regular file.
 const i64 WIN_S_IFREG = 0x8000;
 /// Linux `st_mode` file-type bits for a directory.
@@ -264,10 +287,14 @@ i64 win_utf16_to_utf8(u16* src, u8* dst, i64 dst_cap) {
     while (src[i] != 0 && out < dst_cap - 4) {
         u32 cp = (u32)src[i];
         i += 1;
-        if (cp >= 0xD800 && cp < 0xDC00) {
+        if (cp >= 0xD800 && cp < 0xDC00 && (u32)src[i] >= 0xDC00 && (u32)src[i] < 0xE000) {
             u32 lo = (u32)src[i];
             i += 1;
             cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+        } else if (cp >= 0xD800 && cp < 0xE000) {
+            // Unpaired surrogate (Windows strings are not always valid
+            // UTF-16): U+FFFD, leaving the next unit (maybe a NUL) unread.
+            cp = 0xFFFD;
         }
         if (cp < 0x80) {
             dst[out] = (u8)cp;
@@ -291,6 +318,47 @@ i64 win_utf16_to_utf8(u16* src, u8* dst, i64 dst_cap) {
     }
     dst[out] = 0;
     return out;
+}
+
+/// True when UTF-8 names `a` (`alen` bytes) and `b` (`blen` bytes) are equal
+/// under Windows' ordinal case-insensitive rules (the OS uppercase table,
+/// as environment variable names compare). Names over 511 UTF-16 units
+/// compare unequal.
+bool win_names_equal_ci(u8* a, i64 alen, u8* b, i64 blen) {
+    return win_names_compare_ci(a, alen, b, blen) == 0;
+}
+
+/// Orders UTF-8 names `a` and `b` like `win_names_equal_ci`: -1, 0, or 1.
+/// Names over 511 UTF-16 units order after every other name (and unequal).
+i32 win_names_compare_ci(u8* a, i64 alen, u8* b, i64 blen) {
+    u16 wa[512];
+    u16 wb[512];
+    i64 na = win_utf8_prefix_to_utf16(a, alen, &wa[0], 512);
+    i64 nb = win_utf8_prefix_to_utf16(b, blen, &wb[0], 512);
+    if (na < 0 || nb < 0) {
+        return nb < 0 ? -1 : 1;
+    }
+    // CSTR_LESS_THAN = 1, CSTR_EQUAL = 2, CSTR_GREATER_THAN = 3.
+    return win_CompareStringOrdinal(&wa[0], (i32)na, &wb[0], (i32)nb, 1) - 2;
+}
+
+/// Internal: converts the first `len` bytes of UTF-8 `s` into `dst`
+/// (`cap` units). Returns the unit count, or -1 when it does not fit.
+i64 win_utf8_prefix_to_utf16(u8* s, i64 len, u16* dst, i64 cap) {
+    u8 tmp[1024];
+    if (len >= 1024) {
+        return -1;
+    }
+    i64 i = 0;
+    while (i < len) {
+        tmp[i] = s[i];
+        i += 1;
+    }
+    tmp[len] = (u8)0;
+    if (win_utf16_len(&tmp[0]) >= cap) {
+        return -1;
+    }
+    return win_utf8_to_utf16(&tmp[0], dst);
 }
 
 /// Anonymous RW pages, zero-initialized. prot/flags/fd/off follow the Linux
@@ -391,6 +459,7 @@ i64 win_errno(u32 err) {
         10063: ENAMETOOLONG,  // WSAENAMETOOLONG
         10064: 112,           // WSAEHOSTDOWN -> EHOSTDOWN
         10065: EHOSTUNREACH,  // WSAEHOSTUNREACH
+        10091: 100,           // WSASYSNOTREADY -> ENETDOWN
         _: EIO
     };
 }
@@ -589,14 +658,31 @@ i64 sys_lseek(i64 fd, i64 off, i64 whence) {
     return ((i64)(u32)high << 32) | (i64)(u32)res;
 }
 
-/// Seam: DeleteFileW. Failures report the mapped errno; paths of 1000 or
-/// more UTF-16 units report -ENAMETOOLONG.
+/// Seam: unlink(2). Deletes with POSIX semantics where the file system
+/// supports them (NTFS, Windows 10 1809+): the name disappears at once even
+/// while the file is open, so it can be reused immediately, and a read-only
+/// attribute does not block deletion. Elsewhere DeleteFileW leaves an open
+/// file's name delete-pending until its last handle closes. Symlinks are
+/// removed, not followed. Paths of 1000 or more UTF-16 units report
+/// -ENAMETOOLONG.
 i64 sys_unlink(i64 path) {
     u16 wpath[1024];
     if (win_utf16_len((u8*)path) >= 1000) {
         return -36;
     }
     win_utf8_to_utf16((u8*)path, &wpath[0]);
+    i64 h = win_CreateFileW(&wpath[0], WIN_DELETE, WIN_FILE_SHARE_ALL, (u8*)0, WIN_OPEN_EXISTING,
+        WIN_FILE_FLAG_OPEN_REPARSE_POINT, 0);
+    if (h == -1) {
+        return -win_last_errno();
+    }
+    u32 disposition = WIN_FILE_DISPOSITION_DELETE | WIN_FILE_DISPOSITION_POSIX_SEMANTICS
+        | WIN_FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE;
+    i32 posix = win_SetFileInformationByHandle(h, WIN_FILE_DISPOSITION_INFO_EX, (u8*)&disposition, 4);
+    win_CloseHandle(h);
+    if (posix != 0) {
+        return 0;
+    }
     if (win_DeleteFileW(&wpath[0]) == 0) {
         return -win_last_errno();
     }
@@ -622,9 +708,10 @@ i64 sys_rename(i64 from, i64 to) {
 /// Fills the Linux x86_64 `struct stat` layout in the caller's 144-byte
 /// buffer: st_dev 0, st_ino 8, st_nlink 16, st_mode 24, st_size 48,
 /// st_blksize 56, st_blocks 64, st_atim 72/80, st_mtim 88/96, st_ctim
-/// 104/112. Windows has no status-change time, so st_ctim is the last write
-/// time. Directories open only with FILE_FLAG_BACKUP_SEMANTICS; no access
-/// rights are requested, so files locked for reading still stat.
+/// 104/112. st_ctim is the NTFS change time (metadata or data), falling back
+/// to the last write time where the file system has none. Directories open
+/// only with FILE_FLAG_BACKUP_SEMANTICS; no access rights are requested, so
+/// files locked for reading still stat.
 i64 sys_stat(i64 path, i64 buf) {
     u16 wpath[1024];
     if (win_utf16_len((u8*)path) >= 1000) {
@@ -645,9 +732,18 @@ i64 sys_stat(i64 path, i64 buf) {
     }
     i32 ok = win_GetFileInformationByHandle(h, &info[0]);
     i64 err = win_last_errno();
+    // FILE_BASIC_INFO (40 bytes): ChangeTime at 24.
+    u64 basic[5];
+    i64 change = 0;
+    if (ok != 0 && win_GetFileInformationByHandleEx(h, WIN_FILE_BASIC_INFO, (u8*)&basic[0], 40) != 0) {
+        change = (i64)basic[3];
+    }
     win_CloseHandle(h);
     if (ok == 0) {
         return -err;
+    }
+    if (change == 0) {
+        change = win_le_i64(&info[0], 20);
     }
     i64 attr = win_le_u32(&info[0], 0);
     i64 size = (win_le_u32(&info[0], 32) << 32) | win_le_u32(&info[0], 36);
@@ -668,16 +764,23 @@ i64 sys_stat(i64 path, i64 buf) {
     win_store_le_i64(out, 64, (size + 511) / 512);
     win_store_filetime(out, 72, win_le_i64(&info[0], 12));
     win_store_filetime(out, 88, win_le_i64(&info[0], 20));
-    win_store_filetime(out, 104, win_le_i64(&info[0], 20));
+    win_store_filetime(out, 104, change);
     return 0;
 }
 
 /// Internal: stores FILETIME `ft` (100 ns ticks since 1601) as a Unix
-/// timespec {sec, nsec} at `buf[off]`.
+/// timespec {sec, nsec} at `buf[off]`. Pre-1970 times keep nsec in
+/// [0, 1e9), as Linux does: one tick before the epoch is {-1, 999999900}.
 void win_store_filetime(u8* buf, i64 off, i64 ft) {
     i64 unix100 = ft - WIN_FILETIME_UNIX_EPOCH;
-    win_store_le_i64(buf, off, unix100 / 10000000);
-    win_store_le_i64(buf, off + 8, (unix100 % 10000000) * 100);
+    i64 sec = unix100 / 10000000;
+    i64 rem = unix100 % 10000000;
+    if (rem < 0) {
+        sec -= 1;
+        rem += 10000000;
+    }
+    win_store_le_i64(buf, off, sec);
+    win_store_le_i64(buf, off + 8, rem * 100);
 }
 
 /// Internal: reads a little-endian u32 at `buf[off]`, zero-extended.
@@ -1222,17 +1325,23 @@ const i64 WIN_SOCK_IO_MAX = 0x7FFFFFFF;
 /// WSABUF/WSAPOLLFD entries converted on the stack per call.
 const i64 WIN_SOCK_BATCH = 64;
 
-/// Internal: true once WSAStartup has run. A race only calls it twice, which
-/// winsock reference-counts harmlessly; it is never balanced by WSACleanup.
+/// Internal: true once WSAStartup has succeeded. Set only on success, so a
+/// failed start (e.g. WSASYSNOTREADY) is retried by the next socket call.
+/// A race only starts winsock twice, which it reference-counts harmlessly;
+/// it is never balanced by WSACleanup.
 bool g_win_wsa_started = false;
 
-/// Internal: initializes winsock 2.2 on first use.
-void win_wsa_init() {
+/// Internal: initializes winsock 2.2 on first use. 0 or -errno.
+i64 win_wsa_init() {
     if (!g_win_wsa_started) {
         u8 data[512]; // WSADATA is 408 bytes on x64
-        win_WSAStartup((u16)0x0202, &data[0]);
+        i32 err = win_WSAStartup((u16)0x0202, &data[0]);
+        if (err != 0) {
+            return -win_errno((u32)err); // WSAStartup returns its error
+        }
         g_win_wsa_started = true;
     }
+    return 0;
 }
 
 /// True when `fd` is a tagged socket fd (see the section header).
@@ -1352,7 +1461,10 @@ i64 win_sock_recv(i64 fd, i64 buf, i64 len, i64 flags) {
 /// sockets ignore ICMP port-unreachable reports, as unconnected Linux UDP
 /// sockets do. Returns the tagged fd or -errno.
 i64 sys_socket(i64 domain, i64 kind, i64 protocol) {
-    win_wsa_init();
+    i64 started = win_wsa_init();
+    if (started < 0) {
+        return started;
+    }
     i64 af = domain == WIN_LINUX_AF_INET6 ? WIN_AF_INET6 : domain;
     i64 base = kind & ~(WIN_LINUX_SOCK_NONBLOCK | WIN_LINUX_SOCK_CLOEXEC);
     u32 flags = WIN_WSA_FLAG_OVERLAPPED;
@@ -1538,10 +1650,23 @@ i64 sys_setsockopt(i64 fd, i64 level, i64 name, i64 value, i64 len) {
         if (len < 16) {
             return -EINVAL;
         }
+        // Linux rules: tv_usec outside [0, 1e6) is EDOM; a negative tv_sec
+        // times out at once (winsock's floor is 1 ms, as 0 means none); a
+        // timeout too large to represent waits forever.
         i64* tv = (i64*)value;
-        i64 ms = tv[0] * 1000 + (tv[1] + 999) / 1000;
-        if (ms < 0 || ms > 0xFFFFFFFE) {
-            ms = 0; // beyond a DWORD: wait forever, like a huge Linux timeout
+        if (tv[1] < 0 || tv[1] >= 1000000) {
+            return -EDOM;
+        }
+        i64 ms = 1;
+        if (tv[0] >= 0) {
+            if (tv[0] > 0xFFFFFFFE / 1000) {
+                ms = 0;
+            } else {
+                ms = tv[0] * 1000 + (tv[1] + 999) / 1000;
+                if (ms > 0xFFFFFFFE) {
+                    ms = 0;
+                }
+            }
         }
         u32 dw = (u32)ms;
         r = win_setsockopt(s, wlevel, wname, (u8*)&dw, 4);
@@ -1651,20 +1776,34 @@ i64 sys_recvfrom(i64 fd, i64 buf, i64 len, i64 flags, i64 addr, i64 len_ptr) {
 }
 
 /// Seam: poll(2) over socket fds with the Linux 8-byte pollfd and POLL*
-/// bits, through WSAPoll (16-byte WSAPOLLFD). Negative fds are ignored, as
-/// on Linux; non-socket fds fail with ENOTSOCK. A hang-up also reports
-/// POLLIN when it was requested, so readers see EOF as on Linux.
+/// bits, through WSAPoll (16-byte WSAPOLLFD). Negative fds are left out of
+/// the winsock set and get zero revents, as on Linux; with no active fds the
+/// call just waits out the timeout (forever when negative). Non-socket fds
+/// fail with ENOTSOCK. A hang-up also reports POLLIN when it was requested,
+/// so readers see EOF as on Linux.
 i64 sys_poll(i64 fds, i64 nfds, i64 timeout_ms) {
-    if (nfds <= 0) {
-        if (timeout_ms > 0) {
-            win_Sleep((u32)timeout_ms);
+    u8* lfds = (u8*)fds;
+    i64 active = 0;
+    i64 i = 0;
+    while (i < nfds) {
+        i32* fdp = (i32*)&lfds[i * 8];
+        lfds[i * 8 + 6] = (u8)0;
+        lfds[i * 8 + 7] = (u8)0;
+        if (fdp[0] >= 0) {
+            active += 1;
+        }
+        i += 1;
+    }
+    if (active == 0) {
+        if (timeout_ms != 0) {
+            win_Sleep(timeout_ms < 0 || timeout_ms > 0xFFFFFFFE ? WIN_INFINITE : (u32)timeout_ms);
         }
         return 0;
     }
-    u8 stack_buf[1024]; // WIN_SOCK_BATCH * 16
-    u8* wfds = &stack_buf[0];
-    i64 bytes = nfds * 16;
-    bool mapped = nfds > WIN_SOCK_BATCH;
+    u64 stack_buf[128]; // WIN_SOCK_BATCH * 16 bytes, pointer-aligned for WSAPOLLFD
+    u8* wfds = (u8*)&stack_buf[0];
+    i64 bytes = active * 16;
+    bool mapped = active > WIN_SOCK_BATCH;
     if (mapped) {
         i64 m = sys_mmap(0, bytes, 3, 34, -1, 0);
         if (m < 0) {
@@ -1672,45 +1811,50 @@ i64 sys_poll(i64 fds, i64 nfds, i64 timeout_ms) {
         }
         wfds = (u8*)m;
     }
-    u8* lfds = (u8*)fds;
-    i64 i = 0;
+    i64 k = 0;
+    i = 0;
     while (i < nfds) {
         i32* fdp = (i32*)&lfds[i * 8];
-        i64 fd = (i64)fdp[0];
-        i64 ev = win_le_u16(lfds, i * 8 + 4);
-        u64 s = fd < 0 ? ~(u64)0 : win_fd_socket(fd);
-        i64 wev = 0;
-        if ((ev & 1) != 0) { wev = wev | 0x100; } // POLLIN  -> POLLRDNORM
-        if ((ev & 2) != 0) { wev = wev | 0x200; } // POLLPRI -> POLLRDBAND
-        if ((ev & 4) != 0) { wev = wev | 0x10; }  // POLLOUT -> POLLWRNORM
-        win_store_le_i64(wfds, i * 16, (i64)s);
-        win_store_le_i64(wfds, i * 16 + 8, wev); // events; revents = 0
+        if (fdp[0] >= 0) {
+            i64 ev = win_le_u16(lfds, i * 8 + 4);
+            i64 wev = 0;
+            if ((ev & 1) != 0) { wev = wev | 0x100; } // POLLIN  -> POLLRDNORM
+            if ((ev & 2) != 0) { wev = wev | 0x200; } // POLLPRI -> POLLRDBAND
+            if ((ev & 4) != 0) { wev = wev | 0x10; }  // POLLOUT -> POLLWRNORM
+            win_store_le_i64(wfds, k * 16, (i64)win_fd_socket((i64)fdp[0]));
+            win_store_le_i64(wfds, k * 16 + 8, wev); // events; revents = 0
+            k += 1;
+        }
         i += 1;
     }
     i32 ms = -1;
     if (timeout_ms >= 0) {
         ms = timeout_ms > 0x7FFFFFFF ? (i32)0x7FFFFFFF : (i32)timeout_ms;
     }
-    i32 r = win_WSAPoll(wfds, (u32)nfds, ms);
+    i32 r = win_WSAPoll(wfds, (u32)active, ms);
     i64 result = (i64)r;
     if (r < 0) {
         result = -win_wsa_errno();
     } else {
+        k = 0;
         i = 0;
         while (i < nfds) {
-            i64 wrev = win_le_u16(wfds, i * 16 + 10);
-            i64 ev = win_le_u16(lfds, i * 8 + 4);
-            i64 rev = 0;
-            if ((wrev & 0x100) != 0) { rev = rev | 1; }  // POLLRDNORM -> POLLIN
-            if ((wrev & 0x200) != 0) { rev = rev | 2; }  // POLLRDBAND -> POLLPRI
-            if ((wrev & 0x10) != 0) { rev = rev | 4; }   // POLLWRNORM -> POLLOUT
-            if ((wrev & 1) != 0) { rev = rev | 8; }      // POLLERR
-            if ((wrev & 2) != 0) {                       // POLLHUP
-                rev = rev | 16 | (ev & 1);
+            i32* fdp = (i32*)&lfds[i * 8];
+            if (fdp[0] >= 0) {
+                i64 wrev = win_le_u16(wfds, k * 16 + 10);
+                i64 ev = win_le_u16(lfds, i * 8 + 4);
+                i64 rev = 0;
+                if ((wrev & 0x100) != 0) { rev = rev | 1; }  // POLLRDNORM -> POLLIN
+                if ((wrev & 0x200) != 0) { rev = rev | 2; }  // POLLRDBAND -> POLLPRI
+                if ((wrev & 0x10) != 0) { rev = rev | 4; }   // POLLWRNORM -> POLLOUT
+                if ((wrev & 1) != 0) { rev = rev | 8; }      // POLLERR
+                if ((wrev & 2) != 0) {                       // POLLHUP
+                    rev = rev | 16 | (ev & 1);
+                }
+                if ((wrev & 4) != 0) { rev = rev | 32; }     // POLLNVAL
+                lfds[i * 8 + 6] = (u8)(rev & 0xFF);
+                k += 1;
             }
-            if ((wrev & 4) != 0) { rev = rev | 32; }     // POLLNVAL
-            lfds[i * 8 + 6] = (u8)(rev & 0xFF);
-            lfds[i * 8 + 7] = (u8)0;
             i += 1;
         }
     }
@@ -1720,83 +1864,173 @@ i64 sys_poll(i64 fds, i64 nfds, i64 timeout_ms) {
     return result;
 }
 
-/// Seam: writev(2). Sockets send up to 64 buffers in one WSASend; other fds
-/// write each buffer in turn, stopping at the first short write. Returns the
-/// byte count (possibly short, as writev may be) or -errno.
+/// Seam: writev(2). Sockets send the whole vector in one WSASend, so a
+/// datagram stays one datagram. Other fds gather it into one buffer and
+/// issue one WriteFile, so concurrent writers cannot interleave inside it.
+/// Returns the byte count (possibly short) or -errno.
 i64 sys_writev(i64 fd, i64 iov, i64 count) {
     return win_vectored_io(fd, iov, count, true);
 }
 
-/// Seam: readv(2). Sockets fill up to 64 buffers in one WSARecv; other fds
-/// read each buffer in turn, stopping at the first short read.
+/// Seam: readv(2). Sockets fill the whole vector in one WSARecv (a
+/// truncated datagram returns the bytes that fit, as Linux does). Other fds
+/// issue one ReadFile and scatter what it returned, so a pipe read returns
+/// the available data instead of blocking for every buffer.
 i64 sys_readv(i64 fd, i64 iov, i64 count) {
     return win_vectored_io(fd, iov, count, false);
 }
 
+/// Linux `IOV_MAX`: the largest iovec count writev/readv accept.
+const i64 WIN_IOV_MAX = 1024;
+
 /// Internal: shared writev/readv over Linux iovecs ({void* base, i64 len}).
 i64 win_vectored_io(i64 fd, i64 iov, i64 count, bool write) {
-    if (count < 0) {
+    if (count < 0 || count > WIN_IOV_MAX) {
         return -EINVAL;
     }
     i64* vec = (i64*)iov;
-    if (win_fd_is_socket(fd)) {
-        // WSABUF is {u32 len; (pad) u8* buf}: 16 bytes.
-        u8 bufs[1024]; // WIN_SOCK_BATCH * 16
-        i64 n = count > WIN_SOCK_BATCH ? WIN_SOCK_BATCH : count;
-        i64 i = 0;
-        while (i < n) {
-            i64 len = vec[i * 2 + 1];
-            if (len > WIN_SOCK_IO_MAX) { len = WIN_SOCK_IO_MAX; }
-            win_store_le_i64(&bufs[0], i * 16, len);
-            win_store_le_i64(&bufs[0], i * 16 + 8, vec[i * 2]);
-            i += 1;
-        }
-        u32 done = 0;
-        u32 flags = 0;
-        i32 r = 0;
-        if (write) {
-            r = win_WSASend(win_fd_socket(fd), &bufs[0], (u32)n, &done, 0, (u8*)0, (u8*)0);
-        } else {
-            r = win_WSARecv(win_fd_socket(fd), &bufs[0], (u32)n, &done, &flags, (u8*)0, (u8*)0);
-        }
-        if (r != 0) {
-            return -win_wsa_io_errno();
-        }
-        return (i64)done;
-    }
     i64 total = 0;
     i64 i = 0;
     while (i < count) {
-        i64 base = vec[i * 2];
-        i64 len = vec[i * 2 + 1];
-        i64 r = write ? sys_write(fd, base, len) : sys_read(fd, base, len);
-        if (r < 0) {
-            return total > 0 ? total : r;
+        if (vec[i * 2 + 1] < 0) {
+            return -EINVAL;
         }
-        total += r;
-        if (r < len) {
-            break;
+        total += vec[i * 2 + 1];
+        if (total > WIN_SOCK_IO_MAX) {
+            return -EINVAL; // Linux rejects a total beyond ssize_t; winsock beyond int
         }
         i += 1;
     }
-    return total;
+    if (win_fd_is_socket(fd)) {
+        return win_sock_vectored_io(fd, vec, count, total, write);
+    }
+    if (total == 0) {
+        return 0;
+    }
+    // One native call through a bounce buffer.
+    u8 stack_buf[16384];
+    u8* bounce = &stack_buf[0];
+    bool mapped = total > 16384;
+    if (mapped) {
+        i64 m = sys_mmap(0, total, 3, 34, -1, 0);
+        if (m < 0) {
+            return m;
+        }
+        bounce = (u8*)m;
+    }
+    i64 r = 0;
+    if (write) {
+        i64 off = 0;
+        i = 0;
+        while (i < count) {
+            u8* base = (u8*)vec[i * 2];
+            i64 j = 0;
+            while (j < vec[i * 2 + 1]) {
+                bounce[off + j] = base[j];
+                j += 1;
+            }
+            off += vec[i * 2 + 1];
+            i += 1;
+        }
+        r = sys_write(fd, (i64)bounce, total);
+    } else {
+        r = sys_read(fd, (i64)bounce, total);
+        i64 off = 0;
+        i = 0;
+        while (i < count && off < r) {
+            u8* base = (u8*)vec[i * 2];
+            i64 j = 0;
+            while (j < vec[i * 2 + 1] && off < r) {
+                base[j] = bounce[off];
+                j += 1;
+                off += 1;
+            }
+            i += 1;
+        }
+    }
+    if (mapped) {
+        sys_munmap((i64)bounce, total);
+    }
+    return r;
 }
 
-/// Seam: sendfile(2) as a read/write copy loop through a 16 KiB buffer.
-/// With a non-null `offset_ptr`, reads start at *offset_ptr, the file
-/// position is left unchanged, and *offset_ptr advances by the bytes sent,
-/// as on Linux. Returns the bytes sent (possibly short) or -errno.
+/// Internal: one WSASend/WSARecv over the whole iovec array (WSABUF is
+/// {u32 len; (pad) u8* buf}: 16 bytes).
+i64 win_sock_vectored_io(i64 fd, i64* vec, i64 count, i64 total, bool write) {
+    u64 stack_bufs[128]; // WIN_SOCK_BATCH * 16 bytes, pointer-aligned for WSABUF
+    u8* bufs = (u8*)&stack_bufs[0];
+    i64 bytes = count * 16;
+    bool mapped = count > WIN_SOCK_BATCH;
+    if (mapped) {
+        i64 m = sys_mmap(0, bytes, 3, 34, -1, 0);
+        if (m < 0) {
+            return m;
+        }
+        bufs = (u8*)m;
+    }
+    i64 i = 0;
+    while (i < count) {
+        win_store_le_i64(bufs, i * 16, vec[i * 2 + 1]);
+        win_store_le_i64(bufs, i * 16 + 8, vec[i * 2]);
+        i += 1;
+    }
+    u32 done = 0;
+    u32 flags = 0;
+    i32 r = 0;
+    if (write) {
+        r = win_WSASend(win_fd_socket(fd), bufs, (u32)count, &done, 0, (u8*)0, (u8*)0);
+    } else {
+        r = win_WSARecv(win_fd_socket(fd), bufs, (u32)count, &done, &flags, (u8*)0, (u8*)0);
+    }
+    i64 result = (i64)done;
+    if (r != 0) {
+        if (!write && win_WSAGetLastError() == 10040) { // WSAEMSGSIZE
+            result = total; // the vector is full; the rest was discarded
+        } else {
+            result = -win_wsa_io_errno();
+        }
+    }
+    if (mapped) {
+        sys_munmap((i64)bufs, bytes);
+    }
+    return result;
+}
+
+/// Internal: ReadFile of up to `len` bytes at file offset `off` (OVERLAPPED
+/// offset, no separate seek). EOF reads 0. Count or -errno.
+i64 win_pread(i64 fd, u8* buf, i64 len, i64 off) {
+    u64 ov[4]; // OVERLAPPED: Internal, InternalHigh, Offset|OffsetHigh, hEvent
+    ov[0] = 0;
+    ov[1] = 0;
+    ov[2] = (u64)off;
+    ov[3] = 0;
+    u32 got = 0;
+    if (win_ReadFile(win_fd_handle(fd), buf, (u32)len, &got, (u8*)&ov[0]) == 0) {
+        if (win_GetLastError() == 38) { // ERROR_HANDLE_EOF
+            return 0;
+        }
+        return -win_last_errno();
+    }
+    return (i64)got;
+}
+
+/// Seam: sendfile(2) as a copy loop through a 16 KiB buffer. Returns the
+/// bytes sent (possibly short) or -errno.
+///
+/// With a null `offset_ptr`, reading starts at the file position, which ends
+/// just past the last byte sent: bytes read but not accepted by `out_fd`
+/// (EAGAIN on a non-blocking socket) are given back, so a retry resumes
+/// there. With `offset_ptr`, reads are positional and *offset_ptr advances
+/// by the bytes sent. Windows positional reads on a synchronous handle still
+/// move its shared position, so the call restores it afterwards; another
+/// thread must not use `in_fd` during the call (as with Rust's `seek_read`).
 i64 sys_sendfile(i64 out_fd, i64 in_fd, i64 offset_ptr, i64 count) {
-    i64 saved = 0;
     i64* offset = (i64*)offset_ptr;
+    i64 saved = 0;
     if (offset_ptr != 0) {
         saved = sys_lseek(in_fd, 0, 1); // SEEK_CUR
         if (saved < 0) {
             return saved;
-        }
-        i64 at = sys_lseek(in_fd, offset[0], 0); // SEEK_SET
-        if (at < 0) {
-            return at;
         }
     }
     u8 chunk[16384];
@@ -1805,7 +2039,12 @@ i64 sys_sendfile(i64 out_fd, i64 in_fd, i64 offset_ptr, i64 count) {
     while (sent < count) {
         i64 want = count - sent;
         if (want > 16384) { want = 16384; }
-        i64 got = sys_read(in_fd, (i64)&chunk[0], want);
+        i64 got = 0;
+        if (offset_ptr != 0) {
+            got = win_pread(in_fd, &chunk[0], want, offset[0] + sent);
+        } else {
+            got = sys_read(in_fd, (i64)&chunk[0], want);
+        }
         if (got <= 0) {
             err = got;
             break;
@@ -1821,12 +2060,15 @@ i64 sys_sendfile(i64 out_fd, i64 in_fd, i64 offset_ptr, i64 count) {
         }
         sent += put;
         if (put < got) {
+            if (offset_ptr == 0) {
+                sys_lseek(in_fd, put - got, 1); // give back the unsent bytes
+            }
             break;
         }
     }
     if (offset_ptr != 0) {
         offset[0] = offset[0] + sent;
-        sys_lseek(in_fd, saved, 0);
+        sys_lseek(in_fd, saved, 0); // SEEK_SET
     }
     if (sent == 0 && err < 0) {
         return err;

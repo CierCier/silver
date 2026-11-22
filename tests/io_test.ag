@@ -1,9 +1,60 @@
 // compile_flags: --leak-check
 import std.test;
+import std.fs;
 import std.io.file;
 import std.io.byte_stream;
 import std.string;
 import std.optional;
+import std.sys.io_vec;
+import std.sys.result;
+
+if (!@cfg(os.wasi)) {
+/// writev/readv/sendfile on files: whole-vector transfers, file positions,
+/// and sendfile's explicit-offset contract (the position stays put).
+void check_vectored_file_io() {
+    test_start("writev, readv, and sendfile on files");
+    str src_path = "silver_iovec_src.bin";
+    str dst_path = "silver_iovec_dst.bin";
+    Result<i64, Error> src_r = try_open(src_path, O_RDWR | O_CREAT | O_TRUNC, 420);
+    Result<i64, Error> dst_r = try_open(dst_path, O_RDWR | O_CREAT | O_TRUNC, 420);
+    assert_true(src_r.is_ok() && dst_r.is_ok(), "opened scratch files");
+    if (src_r.is_err() || dst_r.is_err()) { return; }
+    i32 src = (i32)src_r.value();
+    i32 dst = (i32)dst_r.value();
+
+    IoVec out[2] = { IoVec.new((void*)"hello ", 6), IoVec.new((void*)"world", 5) };
+    assert_eq_i64(11, try_writev(src, &out[0], 2).value(), "writev writes both buffers");
+    assert_eq_i64(11, try_lseek(src, 0, SEEK_CUR).value(), "writev advances the position");
+
+    try_lseek(src, 0, SEEK_SET);
+    u8 head[6];
+    u8 tail[8];
+    IoVec parts[2] = { IoVec.new((void*)&head[0], 6), IoVec.new((void*)&tail[0], 8) };
+    assert_eq_i64(11, try_readv(src, &parts[0], 2).value(), "readv returns the bytes available");
+    tail[5] = (u8)0;
+    assert_true(head[0] == (u8)'h' && head[5] == (u8)' ', "readv fills the first buffer");
+    assert_eq_str("world", (str)&tail[0], "readv scatters the rest into the second");
+
+    i64 offset = 6;
+    assert_eq_i64(5, try_sendfile(dst, src, &offset, 5).value(), "sendfile at an offset");
+    assert_eq_i64(11, offset, "sendfile advances the offset");
+    assert_eq_i64(11, try_lseek(src, 0, SEEK_CUR).value(), "explicit offset leaves the position");
+
+    try_lseek(src, 0, SEEK_SET);
+    assert_eq_i64(11, try_sendfile(dst, src, (i64*)0, 64).value(), "sendfile stops at EOF");
+    assert_eq_i64(11, try_lseek(src, 0, SEEK_CUR).value(), "null offset advances the position");
+
+    try_lseek(dst, 0, SEEK_SET);
+    u8 copied[17];
+    assert_eq_i64(16, try_read(dst, &copied[0], 16).value(), "destination holds both copies");
+    copied[16] = (u8)0;
+    assert_eq_str("worldhello world", (str)&copied[0], "sendfile copied the right bytes");
+
+    try_close(src);
+    try_close(dst);
+    assert_true(remove_file(src_path) && remove_file(dst_path), "removed scratch files");
+}
+}
 
 void check_float_writer_growth() {
     u8 scratch[64];
@@ -138,6 +189,10 @@ i32 main() {
         Optional<String> l3 = in_f.read_line();
         assert_true(l3.is_none(), "read EOF is none");
         in_f.close();
+    }
+
+    if (!@cfg(os.wasi)) {
+        check_vectored_file_io(); // WASI has no vectored I/O seam
     }
 
     // Summary

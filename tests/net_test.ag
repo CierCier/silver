@@ -6,6 +6,7 @@ import std.error;
 import std.fs;
 import std.net.tcp;
 import std.net.inet;
+import std.sys.io_vec;
 import std.sys.result;
 import std.mem;
 import std.test;
@@ -43,6 +44,38 @@ i32 main() {
     msg[r.value()] = (u8)0;
     assert_eq_str("hello", (str)msg, "echo message matches");
     free(msg);
+
+    // Vectored I/O and sendfile on the connected pair.
+    test_start("tcp writev, readv, and sendfile");
+    IoVec out_parts[2] = { IoVec.new((void*)"ab", 2), IoVec.new((void*)"cde", 3) };
+    assert_eq_i64(5, client.writev(&out_parts[0], 2).value(), "writev sends both buffers");
+    u8 first[2];
+    u8 rest[4];
+    IoVec in_parts[2] = { IoVec.new((void*)&first[0], 2), IoVec.new((void*)&rest[0], 3) };
+    assert_eq_i64(5, server.readv(&in_parts[0], 2).value(), "readv receives both buffers");
+    rest[3] = (u8)0;
+    assert_true(first[0] == (u8)'a' && first[1] == (u8)'b', "readv fills the first buffer");
+    assert_eq_str("cde", (str)&rest[0], "readv fills the second buffer");
+
+    str payload_path = "silver_net_sendfile.bin";
+    Result<i64, Error> pf = try_open(payload_path, O_RDWR | O_CREAT | O_TRUNC, 420);
+    assert_true(pf.is_ok(), "opened sendfile payload");
+    i32 payload_fd = (i32)pf.value();
+    try_write(payload_fd, (u8*)"payload", 7);
+    i64 payload_off = 0;
+    assert_eq_i64(7, client.sendfile(payload_fd, &payload_off, 7).value(), "sendfile to a socket");
+    assert_eq_i64(7, payload_off, "sendfile advances the offset");
+    u8 got[8];
+    i64 got_len = 0;
+    while (got_len < 7) {
+        Result<i64, Error> gr = server.read(&got[got_len], 7 - got_len);
+        if (gr.is_err() || gr.value() == 0) { break; }
+        got_len += gr.value();
+    }
+    got[got_len] = (u8)0;
+    assert_eq_str("payload", (str)&got[0], "socket received the file bytes");
+    try_close(payload_fd);
+    assert_true(remove_file(payload_path), "removed sendfile payload");
 
     // Test B: connection refused
     test_start("tcp connect refused");

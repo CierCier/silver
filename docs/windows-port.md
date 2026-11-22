@@ -246,7 +246,7 @@ driver's SDK/MSVC lib paths (§3.3) make these resolvable.
 | `std/sys/epoll.ag`, `std/sys/io_uring.ag`, `std/sys/eventfd.ag` | Linux-only kernel interfaces (io_uring mmaps its SQ/CQ rings — no analogue) | IOCP wrapper later (`CreateIoCompletionPort`); near-term: cfg-gate behind `os.linux`, tests skip |
 | `std/sys/raw/socket.ag` / `std/net/*` | raw socket syscalls, AF_UNIX | **Done**: `os_windows.ag` emulates the Linux socket syscalls over WinSock2 (see "Landed (2026-11-22)"); pathname AF_UNIX works, the abstract namespace is Linux-only |
 | `std/net/tls.ag` (OpenSSL) | `SSL_set_fd(ssl, i32 fd)` takes a Unix fd (`tls.ag:44`) | Windows OpenSSL builds exist (`libssl.lib`/`libcrypto.lib`); declare `SSL_set_fd` taking a `SOCKET` (u64) under a cfg; or Schannel later |
-| `std/sys/io_vec.ag` | `readv/writev/sendfile` | **Done**: `WSASend/WSARecv` with `WSABUF` for sockets, write/read loops otherwise; `sendfile` is a 16 KiB copy loop |
+| `std/sys/io_vec.ag` | `readv/writev/sendfile` | **Done**: one `WSASend/WSARecv` per call for sockets, one `WriteFile`/`ReadFile` through a bounce buffer otherwise; `sendfile` is a 16 KiB copy loop |
 
 ### 4.4 I/O shape
 
@@ -453,11 +453,14 @@ suite is 106 passed, 0 failed, 12 skipped (from 81 / 11 / 26).
 - Win32 and Winsock errors map to Linux errno values (`win_errno`), replacing
   the fixed ENOENT/EIO approximations.
 - `sys_stat` opens directories (`FILE_FLAG_BACKUP_SEMANTICS`) and fills the
-  Linux `struct stat` dev/ino/nlink/mode/size/blocks/atime/mtime/ctime fields;
-  read-only files clear the write bits. Files open with `FILE_SHARE_DELETE`,
-  so an open file can be unlinked or renamed.
+  Linux `struct stat` dev/ino/nlink/mode/size/blocks/atime/mtime/ctime fields
+  (ctime is the NTFS change time); read-only files clear the write bits.
+  Files open with `FILE_SHARE_DELETE`, and `sys_unlink` uses POSIX delete
+  semantics where supported, so an open file can be unlinked and its name
+  reused at once.
 - `sys_getcwd`/`sys_chdir`; the entry fills `envp` from the UTF-16
-  environment block, and `std.env` matches names case-insensitively.
+  environment block, and `std.env` and `std.process` match names with the
+  OS's case-insensitive ordinal rules (`CompareStringOrdinal`).
 - Sockets: `sys_socket`, `bind`, `listen`, `accept4`, `connect`, `shutdown`,
   `setsockopt`/`getsockopt`, `getsockname`/`getpeername`, `sendto`/
   `recvfrom`, `poll` (WSAPoll), `writev`/`readv`, and `sendfile` take Linux
@@ -472,12 +475,17 @@ suite is 106 passed, 0 failed, 12 skipped (from 81 / 11 / 26).
   Sockets are overlapped-capable because winsock ignores SO_RCVTIMEO
   otherwise. SO_REUSEADDR is a no-op (winsock already rebinds TIME_WAIT
   ports, and its own option allows duplicate live binds); SO_REUSEPORT,
-  TCP_CORK, and TCP_QUICKACK report ENOPROTOOPT.
+  TCP_CORK, and TCP_QUICKACK report ENOPROTOOPT. `F_GETFL` cannot report
+  O_NONBLOCK (winsock has no FIONBIO query); `F_SETFL` applies it.
+  `writev`/`readv` move a whole vector in one call, so a datagram stays one
+  datagram; `sendfile` leaves a null-offset input at the first unsent byte,
+  and an explicit-offset call must not share `in_fd` with another thread.
 - `std.net.dns` uses the system's DNS servers (`GetNetworkParams`) instead of
   the systemd-resolved stub and `/etc/resolv.conf`.
 - `std.process`: `Command.spawn` (CreateProcessW, MSVC argument quoting,
-  inherited standard handles, env = `std.env` + overrides), `wait_status`,
-  `kill` (exit code 137), and `getppid`. A program that cannot start is
+  inherited standard handles, env = `std.env` + overrides, sorted), `wait_status`,
+  `kill` (exit code 137), and `getppid`; dropping an unwaited `Child` closes
+  its handle. A program that cannot start is
   `Err(-errno)` at spawn rather than exit status 127.
 
 **Still Linux-only** (skipped in `WINDOWS_SKIP`): raw syscall and `clone(2)`
