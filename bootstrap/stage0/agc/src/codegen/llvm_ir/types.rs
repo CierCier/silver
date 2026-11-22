@@ -403,11 +403,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(matches!(self.c_struct_pass(ty, slot)?, Some((_, StructPass::ByVal | StructPass::Indirect))))
     }
 
-    /// The function that receives C ABI conversion code.
-    fn c_abi_function(&self) -> CodegenResult<FunctionValue<'ctx>> {
-        self.current_fn.ok_or_else(|| CodegenError::new(messages::c_abi_conversion_outside_function()))
-    }
-
     /// Reinterprets the bytes of `value` as `to` through a stack slot large
     /// and aligned enough for both types. A C struct and the type that
     /// carries it in registers may differ in size (a 3-byte struct passes as
@@ -417,7 +412,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         value: BasicValueEnum<'ctx>,
         to: BasicTypeEnum<'ctx>,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
-        let function = self.c_abi_function()?;
+        let function = self.insertion_function()?;
         let from = value.get_type();
         let target_data = self.target_data();
         let slot_ty = if target_data.get_abi_size(&to) > target_data.get_abi_size(&from) { to } else { from };
@@ -518,7 +513,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
 
         if self.c_struct_passes_by_reference(ty, slot)? {
-            let copy = self.create_entry_alloca(self.c_abi_function()?, "abi.copy", value.get_type())?;
+            let copy = self.create_entry_alloca(self.insertion_function()?, "abi.copy", value.get_type())?;
             self.builder
                 .build_store(copy, value)
                 .map_err(|e| CodegenError::new(messages::c_abi_conversion_failed(e)))?;
