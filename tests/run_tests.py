@@ -164,7 +164,8 @@ WINDOWS_SKIP = {
 
 # Tests that cannot run on a foreign-architecture Linux target under qemu
 # user mode: they link host-architecture native libraries (no target sysroot
-# in the dev shell) or use ioctls qemu does not translate.
+# in the dev shell), use ioctls qemu does not translate, or exec a
+# foreign-architecture binary, which needs binfmt_misc on the host.
 CROSS_ARCH_SKIP = {
     'tls_test': 'links host-architecture OpenSSL',
     'http2_tls_test': 'links host-architecture OpenSSL',
@@ -172,6 +173,7 @@ CROSS_ARCH_SKIP = {
     'rust_ffi_test': 'links a host-architecture Rust staticlib',
     'runtime_test': 'links host-architecture libc (sprintf, qsort)',
     'dma_test': 'udmabuf ioctls are not translated by qemu user mode',
+    'process_test': 're-executes its own foreign-architecture binary',
 }
 
 
