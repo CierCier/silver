@@ -617,9 +617,8 @@ pub(crate) fn link_exe_with_ld_lld(
         link.arg("--dynamic-linker").arg(&*DYNAMIC_LINKER);
     }
 
-    if let Some(target) = &plan.target {
-        link.arg("-mtriple").arg(target);
-    }
+    // No emulation flag: ld.lld takes the target machine from the first
+    // object, so `--target` builds link without one.
     if let Some(sysroot) = &plan.sysroot {
         link.arg("--sysroot").arg(sysroot);
     }

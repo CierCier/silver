@@ -616,7 +616,7 @@ impl String {
         i64 i = 0;
         while (i + 16 <= self.len) {
             i64 non_ascii = 0;
-            if (@cfg(os.wasi)) {
+            if (!@cfg(arch.x86_64)) {
                 i64 j = 0;
                 while (j < 16) {
                     if (self.data[i + j] >= (u8)0x80) {

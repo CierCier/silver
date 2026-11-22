@@ -13,6 +13,8 @@ pkgs.mkShell {
     go
     llvmPackages_22.lld
     patchelf
+    # Runs aarch64 test binaries on x86_64 hosts (run_tests.py --target).
+    qemu-user
   ];
 
   LLVM_SYS_221_PREFIX = "${pkgs.llvmPackages_22.llvm.dev}";

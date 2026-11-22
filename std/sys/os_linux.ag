@@ -2,7 +2,13 @@
 //
 // Delegates to the generated raw syscall wrappers (std/sys/raw/*).
 // Imported by std/sys/os.ag only on `os.linux`; unconditional here.
+//
+// Every seam uses a syscall that both x86_64 and aarch64 provide: aarch64 has
+// only the `*at`, `pipe2`, `dup3`, `ppoll`, `epoll_pwait` and `clone` forms,
+// so the legacy x86_64 calls (`open`, `stat`, `fork`, ...) are expressed
+// through those on both architectures.
 
+import std.sys.raw.numbers;
 import std.sys.raw.fs;
 import std.sys.raw.memory;
 import std.sys.raw.process;
@@ -39,16 +45,105 @@ i64 sys_read(i64 fd, i64 buf, i64 len) {
     return raw_sys_read(fd, buf, len);
 }
 
-/// Linux: raw open(2) passthrough — the O_* bit layout consumed here is the
-/// Linux layout defined in std/sys/result.ag.
+/// `*at` flag: operate on a symlink itself rather than its target.
+const i64 AT_SYMLINK_NOFOLLOW = 256;
+/// `unlinkat` flag: remove a directory, like rmdir(2).
+const i64 AT_REMOVEDIR = 512;
+/// Child-exit signal delivered to the parent of a forked process.
+const i64 SIGCHLD = 17;
+
+/// Linux: open(2) relative to the working directory — the O_* bit layout
+/// consumed here is the Linux layout defined in std/sys/result.ag.
 i64 sys_open(i64 path, i64 flags, i64 mode) {
-    return raw_sys_open(path, flags, mode);
+    return sys_openat(AT_FDCWD, path, flags, mode);
 }
 
-/// Linux: raw stat(2) passthrough — fills the kernel struct stat in the
-/// caller's buffer (st_size at offset 48, st_mtim at 88/96 on x86_64).
+/// fstatat(2) of `path` relative to `dirfd` into the seam's x86_64
+/// `struct stat` layout (std/sys/os.ag) at `buf`, which must hold 144 bytes.
+/// Returns 0 or -errno.
+i64 sys_fstatat(i64 dirfd, i64 path, i64 buf, i64 flags) {
+    i64 r = sys_newfstatat(dirfd, path, buf, flags);
+    if (@cfg(arch.aarch64)) {
+        if (r == 0) {
+            // The generic layout differs before st_size and at st_blksize:
+            //   generic: mode u32 @16, nlink u32 @20, uid @24, gid @28,
+            //            rdev @32, blksize i32 @56
+            //   x86_64:  nlink u64 @16, mode @24, uid @28, gid @32,
+            //            rdev @40, blksize i64 @56
+            // st_size, st_blocks and the timestamps already agree.
+            u32* words = (u32*)buf;
+            u64* quads = (u64*)buf;
+            u32 mode = words[4];
+            u32 nlink = words[5];
+            u32 uid = words[6];
+            u32 gid = words[7];
+            u64 rdev = quads[4];
+            i32 blksize = (i32)words[14];
+            quads[2] = (u64)nlink;
+            words[6] = mode;
+            words[7] = uid;
+            words[8] = gid;
+            words[9] = (u32)0;
+            quads[5] = rdev;
+            quads[7] = (u64)(i64)blksize;
+        }
+    }
+    return r;
+}
+
+/// Linux: stat(2) — fills the seam's x86_64 `struct stat` layout in the
+/// caller's 144-byte buffer (st_size at offset 48, st_mtim at 88/96).
 i64 sys_stat(i64 path, i64 buf) {
-    return raw_sys_stat(path, buf);
+    return sys_fstatat(AT_FDCWD, path, buf, 0);
+}
+
+/// lstat(2): like `sys_stat`, but a symlink reports itself.
+i64 sys_lstat(i64 path, i64 buf) {
+    return sys_fstatat(AT_FDCWD, path, buf, AT_SYMLINK_NOFOLLOW);
+}
+
+/// readlink(2) relative to the working directory. Returns the byte count
+/// (no NUL is written) or -errno.
+i64 sys_readlink(i64 path, i64 buf, i64 len) {
+    return sys_readlinkat(AT_FDCWD, path, buf, len);
+}
+
+/// pipe(2): writes the read and write fds as two i32 at `fds`.
+i64 sys_pipe(i64 fds) {
+    return sys_pipe2(fds, 0);
+}
+
+/// dup2(2): makes `new_fd` a copy of `old_fd`. Returns `new_fd` or -errno.
+i64 sys_dup2(i64 old_fd, i64 new_fd) {
+    if (old_fd == new_fd) {
+        // dup3 rejects equal fds; dup2 returns the fd when it is open.
+        i64 r = sys_fcntl(old_fd, 1, 0); // F_GETFD
+        return r < 0 ? r : new_fd;
+    }
+    return sys_dup3(old_fd, new_fd, 0);
+}
+
+/// fork(2), as clone(SIGCHLD): returns the child pid in the parent, 0 in the
+/// child, or -errno.
+i64 sys_fork() {
+    return sys_clone(SIGCHLD, 0, 0, 0, 0);
+}
+
+/// poll(2) with a millisecond timeout; negative waits forever. Returns the
+/// ready count, 0 on timeout, or -errno.
+i64 sys_poll(i64 fds, i64 nfds, i64 timeout_ms) {
+    if (timeout_ms < 0) {
+        return sys_ppoll(fds, nfds, 0, 0, 8);
+    }
+    i64 timeout[2];
+    timeout[0] = timeout_ms / 1000;
+    timeout[1] = (timeout_ms % 1000) * 1000000;
+    return sys_ppoll(fds, nfds, (i64)&timeout[0], 0, 8);
+}
+
+/// epoll_wait(2) with a millisecond timeout; negative waits forever.
+i64 sys_epoll_wait(i64 epfd, i64 events, i64 maxevents, i64 timeout_ms) {
+    return sys_epoll_pwait(epfd, events, maxevents, timeout_ms, 0);
 }
 
 /// Seam: closes `fd`. Returns 0 or -errno.
@@ -85,12 +180,12 @@ i64 sys_lseek(i64 fd, i64 off, i64 whence) {
 
 /// Seam: unlink(2). Returns 0 or -errno.
 i64 sys_unlink(i64 path) {
-    return raw_sys_unlink(path);
+    return sys_unlinkat(AT_FDCWD, path, 0);
 }
 
 /// Seam: rename(2), replacing `to`. Returns 0 or -errno.
 i64 sys_rename(i64 from, i64 to) {
-    return raw_sys_rename(from, to);
+    return sys_renameat(AT_FDCWD, from, AT_FDCWD, to);
 }
 
 // ---------------------------------------------------------------------------
@@ -125,8 +220,8 @@ void thread_exit(i64 code) {
 void thread_yield() {
     // raw/thread.ag's generated wrapper has the same name as this one (and
     // importing that module makes the overload ambiguous), so call the
-    // syscall seam directly: SYS_sched_yield = 24 on x86_64.
-    syscall0(24);
+    // syscall seam directly.
+    syscall0((i64)SYSCALL.SCHED_YIELD);
 }
 
 // ---------------------------------------------------------------------------
@@ -139,10 +234,26 @@ void thread_yield() {
 /// `flags`. The kernel clears `*ctid` when the thread exits. Returns the
 /// child tid or -errno. The stack must stay mapped until the thread exits.
 i64 thread_spawn_raw(i64 flags, u8* stack_top, i64 fn, i64 arg, i32* ctid) {
-    // clone + child trampoline. Parent returns the child tid in %rax; the
-    // child resumes with rsp = stack_top, calls fn(arg) (arg arrives in r9,
-    // fn in r8 under the asm() syscall register convention), then exits via
-    // sys_exit(60) — CLONE_THREAD ends only this thread.
+    // clone + child trampoline. The parent gets the child tid as the result;
+    // the child resumes on `stack_top`, calls fn(arg), then exits the thread
+    // (CLONE_THREAD ends only this thread). `fn` rides in clone's `tls`
+    // argument, which the kernel ignores without CLONE_SETTLS, and `arg` in
+    // the unused sixth register. The two kernels order ctid and tls
+    // differently, and the child must not touch the parent's stack.
+    if (@cfg(arch.aarch64)) {
+        // clone(flags, stack, ptid, tls, ctid) in x0..x4; arg in x5.
+        return asm("
+            svc #0
+            cbnz x0, 1f
+            mov x0, x5
+            blr x3
+            mov x0, #0
+            mov x8, #93
+            svc #0
+            1:
+        ", [(i64)SYSCALL.CLONE, flags, stack_top, 0, fn, (i64)ctid, arg]);
+    }
+    // clone(flags, stack, ptid, ctid, tls) in rdi, rsi, rdx, r10, r8; arg in r9.
     return asm("
         syscall
         test %rax, %rax
@@ -153,7 +264,7 @@ i64 thread_spawn_raw(i64 flags, u8* stack_top, i64 fn, i64 arg, i32* ctid) {
         mov $$60, %eax
         syscall
         1:
-    ", [56, flags, stack_top, 0, (i64)ctid, fn, arg]);
+    ", [(i64)SYSCALL.CLONE, flags, stack_top, 0, (i64)ctid, fn, arg]);
 }
 
 // ---------------------------------------------------------------------------
@@ -205,17 +316,17 @@ void sys_platform_init() {
 
 /// Seam: mkdir(2) with permission bits `mode`. Returns 0 or -errno.
 i64 sys_mkdir(i64 path, i64 mode) {
-    return raw_sys_mkdir(path, mode);
+    return sys_mkdirat(AT_FDCWD, path, mode);
 }
 
 /// Seam: access(2) check of `mode` bits. Returns 0 or -errno.
 i64 sys_access(i64 path, i64 mode) {
-    return raw_sys_access(path, mode);
+    return sys_faccessat(AT_FDCWD, path, mode);
 }
 
 /// Seam: rmdir(2); the directory must be empty. Returns 0 or -errno.
 i64 sys_rmdir(i64 path) {
-    return raw_sys_rmdir(path);
+    return sys_unlinkat(AT_FDCWD, path, AT_REMOVEDIR);
 }
 
 /// List NUL-separated entry names of directory `path` into `buf` (capacity
@@ -225,7 +336,7 @@ i64 sys_list_dir(i64 path, u8* buf, i64 cap) {
     if (path == 0 || buf == (u8*)0 || cap <= 0) {
         return -22; // EINVAL
     }
-    i64 fd = raw_sys_open(path, 65536, 0); // O_DIRECTORY
+    i64 fd = sys_open(path, O_DIRECTORY, 0);
     if (fd < 0) {
         return fd;
     }

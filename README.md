@@ -176,8 +176,9 @@ What this means in practice:
   rules. Raw pointers are unchecked and not marked `unsafe`. Taking two locks in
   different orders can deadlock, and the compiler does not check it.
 - **Narrow platform support.** Stage1 builds native programs for x86_64 Linux
-  only. WebAssembly (`wasm32-wasip1`) is stage0-only and has no threads. The
-  Windows port is a design and partial implementation, not a supported target.
+  only. aarch64 Linux and WebAssembly (`wasm32-wasip1`) are stage0-only, and
+  WebAssembly has no threads. The Windows port is a design and partial
+  implementation, not a supported target.
 - **Small ecosystem.** The package manifest takes local-path and Git
   dependencies, and the repository documents no package registry.
 - **Known gaps.** A process can have at most 64 live tasks, lambdas are not
@@ -191,7 +192,7 @@ What this means in practice:
 | | Stage0 (Rust) | Stage1 (Silver) |
 |---|---|---|
 | Role | Bootstraps stage1; full command set | Self-hosting compiler, language server |
-| Native targets | x86_64 Linux and its cross-compilation paths | x86_64 Linux |
+| Native targets | x86_64 and aarch64 Linux | x86_64 Linux |
 | WebAssembly | `wasm32-wasip1` | No |
 | Debugging aids | DWARF, allocation leak tracking | `-g` is accepted but no DWARF is generated yet |
 
@@ -287,15 +288,17 @@ agc path/to/file.ag --emit=module --shared -o path/to/file.agm
 Stage1 builds native programs for the host target on x86_64 Linux. An explicit
 `--target TRIPLE` must match it exactly, and unsupported targets fail before any
 output is created. `check` accepts another target's `cfg` values, which does not
-make that target supported. Stage0 keeps its own cross-compilation paths. See the
+make that target supported. Stage0 also cross-compiles for aarch64 Linux
+(`--target aarch64-unknown-linux-gnu`); `agc run` and the test runner execute
+those binaries under `qemu-aarch64` on an x86_64 host. See the
 [compiler target contract](docs/compiler-guide.md#native-target-contract).
 
 ## Testing
 
 ```bash
-# Run every suite: Rust tests, the stdlib suite with stage0 and stage1, and the
-# language-server suite. Keeps going after a failure and exits non-zero if any
-# step failed.
+# Run every suite: Rust tests, the stdlib suite with stage0 (native and, under
+# qemu, the other Linux architecture) and stage1, and the language-server suite.
+# Keeps going after a failure and exits non-zero if any step failed.
 nix run .#check
 ```
 

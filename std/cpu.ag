@@ -1,4 +1,4 @@
-// std/cpu.ag — runtime CPU feature detection (x86-64).
+// std/cpu.ag — runtime CPU feature detection (x86-64; no-op elsewhere).
 //
 // __silver_cpu_init() runs once, before main, from the `_start` entry point
 // (std/sys/entry.ag). It probes CPUID and stores one global bool per feature;
@@ -29,19 +29,25 @@ bool g_has_avx2;
 /// True when the CPU supports AVX-512F and the OS saves ZMM and opmask state.
 bool g_has_avx512f;
 
-if (@cfg(os.wasi)) {
+if (!@cfg(arch.x86_64)) {
 
-// WebAssembly: no cpuid, no x86 registers, no pause instruction. The probe
-// globals stay zero-initialized (all features reported absent), which is
-// exactly what portable code paths want. `@cfg(cpu.*)` folds to a read of
-// these globals and therefore folds to false everywhere on wasm.
+// Not x86: no cpuid. The probe globals stay zero-initialized (all features
+// reported absent), which is exactly what portable code paths want.
+// `@cfg(cpu.*)` folds to a read of these globals and therefore to false.
 
-/// No-op on WebAssembly: every feature flag stays false.
+/// No-op off x86: every feature flag stays false.
 void __silver_cpu_init() {
 }
 
-/// No-op on WebAssembly.
+if (@cfg(arch.aarch64)) {
+/// Emit a `yield` hint (spin-loop hint for SMT processors).
 void cpu_relax() {
+    asm("yield", [], []);
+}
+} else {
+/// No-op on WebAssembly, which has no spin-loop hint.
+void cpu_relax() {
+}
 }
 
 } else {

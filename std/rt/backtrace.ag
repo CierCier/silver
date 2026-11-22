@@ -16,6 +16,7 @@
 // Pure Silver + inline asm; no libc dependency. Used by abort() and
 // __silver_assert_failed to print a named stack trace before dying.
 
+import std.cpu;
 import std.sys.os;
 
 /// One compiler-emitted function record: entry address, name, and the
@@ -69,6 +70,9 @@ extern "C" {
 if (@cfg(os.linux)) {
 /// Return the caller's frame pointer so it remains valid after this helper returns.
 i64 bt_read_rbp() {
+    if (@cfg(arch.aarch64)) {
+        return asm("ldr x0, [x29]", [], []);
+    }
     return asm("movq (%rbp), %rax", [], []);
 }
 }
@@ -153,60 +157,19 @@ i64 g_bt_lock;
 /// Internal: nonzero once the tables are sorted (published after the sort).
 i32 g_bt_sorted;
 
-if (@cfg(os.wasi)) {
-// WebAssembly v1 is single-threaded: the table sort needs no locking, and
-// the wasm printer is a stub anyway (the host unwinds via the names section).
-// Plain loads/stores keep the shared `bt_ensure_sorted` code compiling
-// without inline asm (which is a hard compile error on wasm).
-/// Internal: stores 1 at `addr` and returns the previous value (no atomics
-/// needed on single-threaded WASI).
-i64 bt_xchg(i64 addr) {
-    i64* p = (i64*)addr;
-    i64 prev = *p;
-    *p = 1;
-    return prev;
-}
-
-/// Internal: reads the sorted flag at `addr`.
-i64 bt_sorted_load(i64 addr) {
-    i32* p = (i32*)addr;
-    return (i64)*p;
-}
-
-/// Internal: no-op lock (single-threaded WASI).
-void bt_lock_acquire() {
-}
-
-/// Internal: no-op unlock (single-threaded WASI).
-void bt_lock_release() {
-}
-} else {
-/// Atomically exchange 1 with *addr; returns the previous value.
-i64 bt_xchg(i64 addr) {
-    return asm("movq $1, %rax\nxchgq %rax, (%rdi)", [0, addr], ["memory"]);
-}
-
-/// Read the publication flag through inline asm: the memory clobber makes the
-/// load opaque to the optimizer, so a table read can never be hoisted or
-/// cached above it. (The x86 load itself is already acquire under TSO; this
-/// closes the compiler-level half of the race at any opt level.)
-i64 bt_sorted_load(i64 addr) {
-    return asm("movl (%rdi), %eax", [0, addr], ["memory"]);
-}
+// The orderings are std/atomic.ag's ATOMIC_* values, written as literals
+// because the runtime does not import std.atomic: 1 = acquire, 2 = release.
 
 /// Internal: spins on `g_bt_lock` until acquired.
 void bt_lock_acquire() {
-    i64 addr = (i64)&g_bt_lock;
-    while (bt_xchg(addr) != 0) {
-        i64 _p = asm("pause", [], []);
+    while (__atomic_exchange_i64(&g_bt_lock, 1, 1) != 0) {
+        cpu_relax();
     }
 }
 
 /// Internal: releases `g_bt_lock`.
 void bt_lock_release() {
-    i64 addr = (i64)&g_bt_lock;
-    i64 _s = asm("movq $0, (%rdi)", [0, addr], ["memory"]);
-}
+    __atomic_store_i64(&g_bt_lock, 0, 2);
 }
 
 /// Internal: orders line records by function start, then offset.
@@ -374,7 +337,7 @@ void bt_qsort_lines(i64 lo, i64 hi) {
 
 /// One-time in-place sort of both tables (double-checked under the spinlock).
 void bt_ensure_sorted() {
-    if (bt_sorted_load((i64)&g_bt_sorted) != 0) {
+    if (__atomic_load_i32(&g_bt_sorted, 1) != 0) {
         return;
     }
     bt_lock_acquire();
@@ -385,7 +348,7 @@ void bt_ensure_sorted() {
         if (__silver_bt_lines_count > 1) {
             bt_qsort_lines(0, __silver_bt_lines_count - 1);
         }
-        g_bt_sorted = 1;
+        __atomic_store_i32(&g_bt_sorted, 1, 2);
     }
     bt_lock_release();
 }

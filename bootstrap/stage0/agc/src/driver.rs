@@ -1119,23 +1119,36 @@ fn split_shell_words(s: &str) -> Vec<String> {
     words
 }
 
+/// The `SILVER_TEST_RUNNER` command (shell words) applied to `binary_path`.
+fn env_runner_command(binary_path: &Path) -> Option<std::process::Command> {
+    let runner = std::env::var("SILVER_TEST_RUNNER").ok()?;
+    let mut parts = split_shell_words(&runner).into_iter();
+    let mut cmd = std::process::Command::new(parts.next()?);
+    cmd.args(parts);
+    cmd.arg(binary_path);
+    Some(cmd)
+}
+
+/// The architecture of a Linux-style target triple when this host cannot
+/// execute it directly (normalized to the `qemu-<arch>` spelling).
+fn foreign_target_arch(target: Option<&str>) -> Option<&'static str> {
+    let arch = match target?.split('-').next()? {
+        "x86_64" | "amd64" => "x86_64",
+        "aarch64" | "arm64" => "aarch64",
+        _ => return None,
+    };
+    (arch != std::env::consts::ARCH).then_some(arch)
+}
+
 fn build_target_runner_command(
     binary_path: &Path,
     target: Option<&str>,
 ) -> Result<std::process::Command, String> {
-    let target_is_windows = crate::codegen::abi::target_is_windows(target);
     // WebAssembly modules need a wasm runtime. Node (with WASI support) is the
     // default; SILVER_TEST_RUNNER overrides (e.g. 'wasmtime run --dir .').
     if crate::codegen::abi::target_is_wasm(target) {
-        if let Ok(runner) = std::env::var("SILVER_TEST_RUNNER") {
-            let mut parts = split_shell_words(&runner);
-            if !parts.is_empty() {
-                let prog = parts.remove(0);
-                let mut cmd = std::process::Command::new(prog);
-                cmd.args(&parts);
-                cmd.arg(binary_path);
-                return Ok(cmd);
-            }
+        if let Some(cmd) = env_runner_command(binary_path) {
+            return Ok(cmd);
         }
         if crate::link::command_exists("node") {
             // Node's bare `node file.wasm` path treats the module as an ESM
@@ -1153,23 +1166,15 @@ fn build_target_runner_command(
             "cannot execute WebAssembly module without a runtime; install node or set SILVER_TEST_RUNNER (e.g. 'wasmtime run --dir .')".to_string(),
         );
     }
-    if target_is_windows && !cfg!(target_os = "windows") {
-        if let Ok(runner) = std::env::var("SILVER_TEST_RUNNER") {
-            let mut parts = split_shell_words(&runner);
-            if !parts.is_empty() {
-                let prog = parts.remove(0);
-                let mut cmd = std::process::Command::new(prog);
-                cmd.args(&parts);
-                cmd.arg(binary_path);
-                return Ok(cmd);
-            }
+    if crate::codegen::abi::target_is_windows(target) && !cfg!(target_os = "windows") {
+        if let Some(cmd) = env_runner_command(binary_path) {
+            return Ok(cmd);
         }
         if let Ok(wine) = std::env::var("WINE") {
-            let mut parts = split_shell_words(&wine);
-            if !parts.is_empty() {
-                let prog = parts.remove(0);
+            let mut parts = split_shell_words(&wine).into_iter();
+            if let Some(prog) = parts.next() {
                 let mut cmd = std::process::Command::new(prog);
-                cmd.args(&parts);
+                cmd.args(parts);
                 cmd.arg(binary_path);
                 return Ok(cmd);
             }
@@ -1177,6 +1182,21 @@ fn build_target_runner_command(
         return Err(
             "cannot execute Windows binary on non-Windows host without runner; set SILVER_TEST_RUNNER (e.g. 'wine64') or WINE".to_string(),
         );
+    }
+    // A Linux binary for another architecture runs under qemu user mode.
+    if let Some(arch) = foreign_target_arch(target) {
+        if let Some(cmd) = env_runner_command(binary_path) {
+            return Ok(cmd);
+        }
+        let qemu = format!("qemu-{arch}");
+        if crate::link::command_exists(&qemu) {
+            let mut cmd = std::process::Command::new(qemu);
+            cmd.arg(binary_path);
+            return Ok(cmd);
+        }
+        return Err(format!(
+            "cannot execute {arch} binary on this host; install {qemu} (qemu user mode) or set SILVER_TEST_RUNNER"
+        ));
     }
     Ok(std::process::Command::new(binary_path))
 }

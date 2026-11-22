@@ -53,11 +53,19 @@ const u32 EPOLLET        = 2147483648; // 1 << 31 (Edge-Triggered)
 /// epoll_create1 flag: close the epoll fd on exec.
 const i64 EPOLL_CLOEXEC = 524288; // 0o2000000
 
-/// Linux x86_64 struct epoll_event (packed 12 bytes).
+if (@cfg(arch.x86_64)) {
+/// Linux struct epoll_event: packed to 12 bytes on x86_64 only.
 #[packed]
 struct EpollEvent {
     u32 events;
     u64 data;
+}
+} else {
+/// Linux struct epoll_event: naturally aligned (16 bytes) off x86_64.
+struct EpollEvent {
+    u32 events;
+    u64 data;
+}
 }
 
 impl EpollEvent {

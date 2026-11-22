@@ -1,9 +1,9 @@
 // Multi-threaded allocator stress test.
 //
-// Spawns 4 real OS threads (raw `clone` via an asm shim, 1:1 threads sharing
-// the process address space) that hammer the allocator: size-class alloc/free
-// round trips with per-thread data patterns plus occasional huge (mmap-path)
-// allocations. The parent joins by spinning on an atomic done-counter, then
+// Spawns 4 real OS threads (raw `clone` via std's thread_spawn_raw, 1:1
+// threads sharing the process address space) that hammer the allocator:
+// size-class alloc/free round trips with per-thread data patterns plus
+// occasional huge (mmap-path) allocations. The parent joins by spinning on an atomic done-counter, then
 // verifies the allocator is still coherent.
 //
 // Without the allocator spinlock (std/mem/alloc.ag) this corrupts the shared
@@ -11,6 +11,7 @@
 // post-fray check passes.
 
 import std.sys.raw.process;
+import std.sys.os;
 import std.mem.alloc;
 import std.atomic;
 
@@ -19,14 +20,6 @@ const i64 CLONE_FLAGS = 331520;
 
 i64 g_done;
 i64 g_failed;
-
-// Raw clone shim: spawn a thread running fn(arg) on a fresh stack_top.
-// Parent: returns the child tid. Child: never returns (exits via sys_exit).
-// Inputs map to registers in order: num->rax, flags->rdi, stack->rsi, fn->rdx,
-// arg->r10 (matching the asm("syscall") wrapper convention).
-i64 clone_shim(i64 flags, u8* stack_top, i64 fn, i64 arg) {
-    return asm("syscall\ntest %rax, %rax\njnz 1f\nmov %r10, %rdi\ncall *%rdx\nmov $$0, %rdi\nmov $$60, %eax\nsyscall\n1:", [56, flags, stack_top, fn, arg]);
-}
 
 void worker(i64 tid) {
     u8 pat = (u8)(tid + 1);
@@ -67,7 +60,7 @@ i64 main() {
         u8* stack = mem_sys_alloc(65536);
         @assert(!(stack == (u8*)0), "stack == (u8*)0");
         u8* top = (u8*)((i64)stack + 65536);
-        i64 tid = clone_shim(CLONE_FLAGS, top, (i64)worker, t);
+        i64 tid = thread_spawn_raw(CLONE_FLAGS, top, (i64)worker, t, (i32*)0);
         @assert(!(tid < 0), "tid < 0");
     }
     i64 spins = 0;

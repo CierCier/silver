@@ -3,17 +3,14 @@
 import std.test;
 import std.term.loop;
 import std.sys.result;
-import std.sys.syscall;
+import std.sys.raw.misc;
 import std.mem.vec;
 import std.string;
 import std.time;
 
-const i64 SYS_PIPE2 = 293;
-const i64 PIPE_FLAGS = 526336; // O_NONBLOCK | O_CLOEXEC
-
 // pipe2(fds, O_NONBLOCK|O_CLOEXEC). Returns 0 or a negative errno.
 i64 make_pipe(i32* fds) {
-    return syscall2(SYS_PIPE2, (i64)fds, PIPE_FLAGS);
+    return sys_pipe2((i64)fds, O_NONBLOCK | O_CLOEXEC);
 }
 
 i32 main() {

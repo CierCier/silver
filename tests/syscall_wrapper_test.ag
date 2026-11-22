@@ -1,8 +1,9 @@
 // expected_exit: 42
 // Exercise the syscall wrapper through the process exit status.
 import std.sys.syscall;
+import std.sys.raw.numbers;
 
 void main() {
-    // SYS_exit = 60, rdi = 42 (exit code)
-    syscall1(60, 42);
+    // The first argument register carries the exit code.
+    syscall1((i64)SYSCALL.EXIT, 42);
 }

@@ -6,7 +6,8 @@
 # Steps, in order:
 #   1. build the bootstrap workspace (stage0 agc, agsm, Rust FFI)
 #   2. Rust tests for the workspace
-#   3. stdlib suite with stage0
+#   3. stdlib suite with stage0, natively and for the other Linux
+#      architecture under qemu user mode
 #   4. build stage1 with stage0, then the stdlib suite with stage1
 #   5. build the native language server, then the LSP protocol suite
 #
@@ -71,6 +72,21 @@ step "rust tests" cargo test --locked --workspace --no-fail-fast
 
 step "stdlib suite (stage0)" \
   python3 tests/run_tests.py --no-tui --jobs "$jobs"
+
+case "$(uname -m)" in
+  x86_64) cross_target="aarch64-unknown-linux-gnu" ;;
+  aarch64) cross_target="x86_64-unknown-linux-gnu" ;;
+  *) cross_target="" ;;
+esac
+cross_qemu="qemu-${cross_target%%-*}"
+if [[ -z "$cross_target" ]]; then
+  skip "stdlib suite (cross, qemu)" "no cross target for $(uname -m)"
+elif ! command -v "$cross_qemu" > /dev/null; then
+  skip "stdlib suite ($cross_target)" "$cross_qemu not found"
+else
+  step "stdlib suite ($cross_target)" \
+    python3 tests/run_tests.py --no-tui --jobs "$jobs" --target "$cross_target"
+fi
 
 if step "build stage1" "$stage0" build silver.toml --bin agc --no-cache -o "$stage1"; then
   step "stdlib suite (stage1)" \

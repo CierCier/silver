@@ -20,8 +20,14 @@ import std.sys.result;
 import std.sys.socket;
 
 void test_packed_epoll_event() {
-    @assert(@size(EpollEvent) == 12);
-    @assert(@align(EpollEvent) == 1);
+    // The kernel packs struct epoll_event only on x86_64.
+    if (@cfg(arch.x86_64)) {
+        @assert(@size(EpollEvent) == 12);
+        @assert(@align(EpollEvent) == 1);
+    } else {
+        @assert(@size(EpollEvent) == 16);
+        @assert(@align(EpollEvent) == 8);
+    }
 
     EpollEvent ev = EpollEvent.new(EPOLLIN | EPOLLOUT, 0x123456789ABCDEF0);
     @assert(ev.events == (EPOLLIN | EPOLLOUT));
