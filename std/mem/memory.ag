@@ -18,7 +18,7 @@
 
 import std.cpu;
 
-if (!@cfg(os.wasi)) {
+if (@cfg(arch.x86_64)) {
 
 /// Copy 64 bytes per iteration (`blocks` iterations), AVX-512.
 #[target_feature("avx512f")]
@@ -120,7 +120,7 @@ u8* silver_rt_memset(u8* dst, u8 value, i64 len) {
     u8* result = dst;
     i64 n = len;
     if (n >= 64) {
-        if (!@cfg(os.wasi) && @cfg(cpu.avx512f)) {
+        if (@cfg(arch.x86_64) && @cfg(cpu.avx512f)) {
             i64 blocks = n / 64;
             memset_v512(dst, value, blocks);
             n = n - blocks * 64;
@@ -128,7 +128,7 @@ u8* silver_rt_memset(u8* dst, u8 value, i64 len) {
         }
     }
     if (n >= 32) {
-        if (!@cfg(os.wasi) && @cfg(cpu.avx2)) {
+        if (@cfg(arch.x86_64) && @cfg(cpu.avx2)) {
             i64 blocks = n / 32;
             memset_v256(dst, value, blocks);
             n = n - blocks * 32;
@@ -162,7 +162,7 @@ u8* silver_rt_memcpy(u8* dst, u8* src, i64 len) {
     u8* result = dst;
     i64 n = len;
     if (n >= 64) {
-        if (!@cfg(os.wasi) && @cfg(cpu.avx512f)) {
+        if (@cfg(arch.x86_64) && @cfg(cpu.avx512f)) {
             i64 blocks = n / 64;
             memcpy_v512(dst, src, blocks);
             n = n - blocks * 64;
@@ -171,7 +171,7 @@ u8* silver_rt_memcpy(u8* dst, u8* src, i64 len) {
         }
     }
     if (n >= 32) {
-        if (!@cfg(os.wasi) && @cfg(cpu.avx2)) {
+        if (@cfg(arch.x86_64) && @cfg(cpu.avx2)) {
             i64 blocks = n / 32;
             memcpy_v256(dst, src, blocks);
             n = n - blocks * 32;
@@ -180,7 +180,7 @@ u8* silver_rt_memcpy(u8* dst, u8* src, i64 len) {
         }
     }
     if (n >= 16) {
-        if (!@cfg(os.wasi) && @cfg(cpu.sse41)) {
+        if (@cfg(arch.x86_64) && @cfg(cpu.sse41)) {
             i64 blocks = n / 16;
             memcpy_v128(dst, src, blocks);
             n = n - blocks * 16;
@@ -214,7 +214,7 @@ u8* silver_rt_memcpy(u8* dst, u8* src, i64 len) {
 /// overlap-safe: reads always trail writes. SIMD is build-gated via @cfg,
 /// exactly like memcpy; small moves skip the probes (size guard first).
 ///
-if (!@cfg(os.wasi)) {
+if (@cfg(arch.x86_64)) {
 
 /// Copy 64 bytes per iteration backwards, AVX-512.
 #[target_feature("avx512f")]
@@ -286,7 +286,7 @@ u8* silver_rt_memmove(u8* dst, u8* src, i64 len) {
     if (d < s) {
         // Copy forward: reads stay ahead of writes. Same cascade as memcpy.
         if (n >= 64) {
-            if (!@cfg(os.wasi) && @cfg(cpu.avx512f)) {
+            if (@cfg(arch.x86_64) && @cfg(cpu.avx512f)) {
                 i64 blocks = n / 64;
                 memcpy_v512(dst, src, blocks);
                 n = n - blocks * 64;
@@ -295,7 +295,7 @@ u8* silver_rt_memmove(u8* dst, u8* src, i64 len) {
             }
         }
         if (n >= 32) {
-            if (!@cfg(os.wasi) && @cfg(cpu.avx2)) {
+            if (@cfg(arch.x86_64) && @cfg(cpu.avx2)) {
                 i64 blocks = n / 32;
                 memcpy_v256(dst, src, blocks);
                 n = n - blocks * 32;
@@ -304,7 +304,7 @@ u8* silver_rt_memmove(u8* dst, u8* src, i64 len) {
             }
         }
         if (n >= 16) {
-            if (!@cfg(os.wasi) && @cfg(cpu.sse41)) {
+            if (@cfg(arch.x86_64) && @cfg(cpu.sse41)) {
                 i64 blocks = n / 16;
                 memcpy_v128(dst, src, blocks);
                 n = n - blocks * 16;
@@ -323,7 +323,7 @@ u8* silver_rt_memmove(u8* dst, u8* src, i64 len) {
         u8* dend = (u8*)(d + n);
         u8* send = (u8*)(s + n);
         if (n >= 64) {
-            if (!@cfg(os.wasi) && @cfg(cpu.avx512f)) {
+            if (@cfg(arch.x86_64) && @cfg(cpu.avx512f)) {
                 i64 blocks = n / 64;
                 memmove_v512_back(dend, send, blocks);
                 n = n - blocks * 64;
@@ -332,7 +332,7 @@ u8* silver_rt_memmove(u8* dst, u8* src, i64 len) {
             }
         }
         if (n >= 32) {
-            if (!@cfg(os.wasi) && @cfg(cpu.avx2)) {
+            if (@cfg(arch.x86_64) && @cfg(cpu.avx2)) {
                 i64 blocks = n / 32;
                 memmove_v256_back(dend, send, blocks);
                 n = n - blocks * 32;
@@ -341,7 +341,7 @@ u8* silver_rt_memmove(u8* dst, u8* src, i64 len) {
             }
         }
         if (n >= 16) {
-            if (!@cfg(os.wasi) && @cfg(cpu.sse41)) {
+            if (@cfg(arch.x86_64) && @cfg(cpu.sse41)) {
                 i64 blocks = n / 16;
                 memmove_v128_back(dend, send, blocks);
                 n = n - blocks * 16;
@@ -372,7 +372,7 @@ i64 silver_rt_strlen(str s) {
     if (p == (u8*)0) {
         return 0;
     }
-    if (@cfg(os.wasi)) {
+    if (!@cfg(arch.x86_64)) {
         i64 n = 0;
         while (p[n] != (u8)0) {
             n = n + 1;
@@ -412,7 +412,7 @@ i64 silver_rt_strlen(str s) {
     }
 }
 
-if (!@cfg(os.wasi)) {
+if (@cfg(arch.x86_64)) {
 
 /// Find byte `c` across 32-byte chunks with AVX2.
 #[target_feature("avx2")]
@@ -455,7 +455,7 @@ i64 mem_find_byte(u8* p, u8 c, i64 n) {
     if (p == (u8*)0 || n <= 0) {
         return -1;
     }
-    if (@cfg(os.wasi)) {
+    if (!@cfg(arch.x86_64)) {
         i64 j = 0;
         while (j < n) {
             if (p[j] == c) {
@@ -530,7 +530,7 @@ i64 mem_find_byte_back(u8* p, u8 c, i64 n) {
     if (p == (u8*)0 || n <= 0) {
         return -1;
     }
-    if (@cfg(os.wasi)) {
+    if (!@cfg(arch.x86_64)) {
         i64 j = n - 1;
         while (j >= 0) {
             if (p[j] == c) {
@@ -581,7 +581,7 @@ i64 mem_count_byte(u8* p, u8 c, i64 n) {
     if (p == (u8*)0 || n <= 0) {
         return 0;
     }
-    if (@cfg(os.wasi)) {
+    if (!@cfg(arch.x86_64)) {
         i64 c2 = 0;
         i64 j = 0;
         while (j < n) {
@@ -639,7 +639,7 @@ u8* memrchr(const void* s, i32 c, i64 n) {
     return (u8*)((i64)p + idx);
 }
 
-if (!@cfg(os.wasi)) {
+if (@cfg(arch.x86_64)) {
 
 /// Compare two regions in 32-byte chunks with AVX2.
 #[target_feature("avx2")]
@@ -690,7 +690,7 @@ i64 memcmp_v256(u8* p1, u8* p2, i64 blocks) {
 i32 memcmp(const void* s1, const void* s2, i64 n) {
     u8* p1 = (u8*)s1;
     u8* p2 = (u8*)s2;
-    if (@cfg(os.wasi)) {
+    if (!@cfg(arch.x86_64)) {
         i64 j = 0;
         while (j < n) {
             if (p1[j] != p2[j]) {
@@ -701,7 +701,7 @@ i32 memcmp(const void* s1, const void* s2, i64 n) {
         return 0;
     } else {
         i64 i = 0;
-        if (!@cfg(os.wasi) && @cfg(cpu.avx2)) {
+        if (@cfg(arch.x86_64) && @cfg(cpu.avx2)) {
             if (n >= 32) {
                 i64 blocks = n / 32;
                 i64 diff = memcmp_v256(p1, p2, blocks);

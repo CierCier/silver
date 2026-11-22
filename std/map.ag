@@ -48,7 +48,7 @@ u8 h2_fingerprint(i64 hash) {
 /// Match 16 control bytes against target h2 fingerprint using SSE2.
 /// Returns a 16-bit bitmask of matching bucket offsets.
 i64 probe_group_match(u8* ctrl_ptr, u8 h2) {
-    if (@cfg(os.wasi)) {
+    if (!@cfg(arch.x86_64)) {
         i64 mask = 0;
         i64 i = 0;
         while (i < 16) {
@@ -76,7 +76,7 @@ i64 probe_group_match(u8* ctrl_ptr, u8 h2) {
 /// Match 16 control bytes against EMPTY (0x80) using SSE2.
 /// Returns a 16-bit bitmask of empty bucket offsets.
 i64 probe_group_empty(u8* ctrl_ptr) {
-    if (@cfg(os.wasi)) {
+    if (!@cfg(arch.x86_64)) {
         i64 mask = 0;
         i64 i = 0;
         while (i < 16) {
@@ -101,7 +101,7 @@ i64 probe_group_empty(u8* ctrl_ptr) {
 
 /// Match 16 control bytes for any free (EMPTY or DELETED, MSB=1) slot using SSE2.
 i64 probe_group_free(u8* ctrl_ptr) {
-    if (@cfg(os.wasi)) {
+    if (!@cfg(arch.x86_64)) {
         i64 mask = 0;
         i64 i = 0;
         while (i < 16) {
@@ -121,7 +121,7 @@ i64 probe_group_free(u8* ctrl_ptr) {
 
 /// Bit scan forward (trailing zeros).
 i64 trailing_zeros(i64 mask) {
-    if (@cfg(os.wasi)) {
+    if (!@cfg(arch.x86_64)) {
         if (mask == 0) {
             return 64;
         }

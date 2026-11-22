@@ -353,7 +353,7 @@ impl JsonReader {
     /// Advances past JSON whitespace (space, tab, CR, LF).
     void skip_whitespace(*self) {
         u8* bytes = (u8*)self.input;
-        if (@cfg(os.wasi)) {
+        if (!@cfg(arch.x86_64)) {
             // No SSE2 on wasm; plain scalar skip. (The scalar tail below does
             // the same job, but the SIMD pre-scan is the common path.)
             while (self.index < self.length) {
@@ -774,7 +774,7 @@ impl JsonReader {
             i64 start = self.index;
             while (self.index + 16 <= self.length) {
                 i64 delim = 0;
-                if (@cfg(os.wasi)) {
+                if (!@cfg(arch.x86_64)) {
                     i64 j = 0;
                     while (j < 16) {
                         u8 c = bytes[self.index + j];
@@ -803,7 +803,7 @@ impl JsonReader {
                 }
                 if (delim != 0) {
                     i64 bit = 0;
-                    if (@cfg(os.wasi)) {
+                    if (!@cfg(arch.x86_64)) {
                         while ((delim & 1) == 0) {
                             delim = delim >> 1;
                             bit = bit + 1;

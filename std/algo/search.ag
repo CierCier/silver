@@ -74,7 +74,7 @@ i64 find_first<T>(T* data, i64 len, T key) {
     return -1;
 }
 
-if (!@cfg(os.wasi)) {
+if (@cfg(arch.x86_64)) {
 
 /// Vectorized search for i64 in 4-element (256-bit AVX2) chunks.
 #[target_feature("avx2")]
@@ -119,7 +119,7 @@ i64 find_i64(i64* data, i64 len, i64 key) {
     }
     i64 i = 0;
     // Nested (not `cond && @cfg(cpu.x)`): see mem_find_byte in std/mem/memory.ag.
-    if (!@cfg(os.wasi)) {
+    if (@cfg(arch.x86_64)) {
         if (@cfg(cpu.avx2)) {
             if (len >= 4) {
                 i64 blocks = len / 4;
@@ -188,7 +188,7 @@ i64 max_element<T>(T* data, i64 len) {
     return max_idx;
 }
 
-if (!@cfg(os.wasi)) {
+if (@cfg(arch.x86_64)) {
 
 /// Vectorized sum of i64 array using AVX2.
 #[target_feature("avx2")]
@@ -223,7 +223,7 @@ i64 sum_i64(i64* data, i64 len) {
     i64 total = 0;
     i64 i = 0;
     // Nested (not `cond && @cfg(cpu.x)`): see mem_find_byte in std/mem/memory.ag.
-    if (!@cfg(os.wasi)) {
+    if (@cfg(arch.x86_64)) {
         if (@cfg(cpu.avx2)) {
             if (len >= 4) {
                 i64 blocks = len / 4;
@@ -239,7 +239,7 @@ i64 sum_i64(i64* data, i64 len) {
     return total;
 }
 
-if (!@cfg(os.wasi)) {
+if (@cfg(arch.x86_64)) {
 
 /// Vectorized sum of f64 array using AVX.
 #[target_feature("avx")]
@@ -276,7 +276,7 @@ f64 sum_f64(f64* data, i64 len) {
     f64 total = 0.0;
     i64 i = 0;
     // Nested (not `cond && @cfg(cpu.x)`): see mem_find_byte in std/mem/memory.ag.
-    if (!@cfg(os.wasi)) {
+    if (@cfg(arch.x86_64)) {
         if (@cfg(cpu.avx)) {
             if (len >= 4) {
                 i64 blocks = len / 4;

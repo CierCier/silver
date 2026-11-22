@@ -409,20 +409,31 @@ pub(crate) fn cc_query_raw(arg: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// The ELF dynamic loader (PT_INTERP) for dynamically-linked executables.
-/// ld.lld only adds the default interpreter when libc is a direct NEEDED
-/// dependency, so links against e.g. raylib alone would run without a loader
-/// and jump to null on the first PLT call. Prefer the loader the C compiler
-/// knows about; fall back to the standard /lib64 path.
-static DYNAMIC_LINKER: LazyLock<String> = LazyLock::new(|| {
-    let queried = cc_query_raw("-print-file-name=ld-linux-x86-64.so.2").unwrap_or_default();
-    let trimmed = queried.trim();
-    if !trimmed.is_empty() && !trimmed.starts_with("ld-linux") && Path::new(trimmed).is_absolute() {
-        trimmed.to_string()
+/// The glibc dynamic loader (PT_INTERP) for a dynamically linked executable
+/// for `target` (the host when `None`). ld.lld only adds the default
+/// interpreter when libc is a direct NEEDED dependency, so links against e.g.
+/// raylib alone would run without a loader and jump to null on the first PLT
+/// call. For the host, prefer the loader the C compiler knows about (Nix keeps
+/// it outside /lib); otherwise use the arch's standard path.
+fn dynamic_linker(target: Option<&str>) -> String {
+    let host = std::env::consts::ARCH;
+    let arch = match target.and_then(|t| t.split('-').next()).unwrap_or(host) {
+        "aarch64" | "arm64" => "aarch64",
+        _ => "x86_64",
+    };
+    let (name, standard) = if arch == "aarch64" {
+        ("ld-linux-aarch64.so.1", "/lib/ld-linux-aarch64.so.1")
     } else {
-        "/lib64/ld-linux-x86-64.so.2".to_string()
+        ("ld-linux-x86-64.so.2", "/lib64/ld-linux-x86-64.so.2")
+    };
+    if arch == host {
+        let queried = cc_query_raw(&format!("-print-file-name={name}")).unwrap_or_default();
+        if Path::new(&queried).is_absolute() {
+            return queried;
+        }
     }
-});
+    standard.to_string()
+}
 
 pub(crate) fn cc_library_dirs() -> Vec<PathBuf> {
     CC_LIB_DIRS.clone()
@@ -676,12 +687,11 @@ pub(crate) fn link_exe_with_ld_lld(
     if plan.static_link {
         link.arg("-static");
     } else if link_has_shared_libraries(native_libs, &search_dirs, dependency_paths) {
-        link.arg("--dynamic-linker").arg(&*DYNAMIC_LINKER);
+        link.arg("--dynamic-linker").arg(dynamic_linker(plan.target.as_deref()));
     }
 
-    if let Some(target) = &plan.target {
-        link.arg("-mtriple").arg(target);
-    }
+    // No emulation flag: ld.lld takes the target machine from the first
+    // object, so `--target` builds link without one.
     if let Some(sysroot) = &plan.sysroot {
         link.arg("--sysroot").arg(sysroot);
     }
@@ -753,7 +763,7 @@ pub(crate) fn link_exe_with_cc(
         // (the `-nostdlib` above leaves them out of the link).
         link.arg("-Wl,--allow-shlib-undefined");
         if link_has_shared_libraries(native_libs, &search_dirs, dependency_paths) {
-            link.arg(format!("-Wl,-dynamic-linker,{}", *DYNAMIC_LINKER));
+            link.arg(format!("-Wl,-dynamic-linker,{}", dynamic_linker(plan.target.as_deref())));
         }
     }
     let has_shared = !plan.static_link && link_has_shared_libraries(native_libs, &search_dirs, dependency_paths);

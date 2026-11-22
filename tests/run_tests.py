@@ -6,6 +6,7 @@ import atexit
 import dataclasses
 import glob
 import os
+import platform
 import shlex
 import shutil
 import subprocess
@@ -73,6 +74,17 @@ def target_is_windows_name(target: Optional[str]) -> bool:
 
 def target_is_wasm(target: Optional[str]) -> bool:
     return bool(target) and ("wasm" in target.lower())
+
+
+def foreign_target_arch(target: Optional[str]) -> Optional[str]:
+    """The qemu-user arch of a Linux target this host cannot run natively.
+    Mirrors driver.rs (foreign_target_arch)."""
+    if not target or target_is_wasm(target) or target_is_windows_name(target):
+        return None
+    aliases = {"x86_64": "x86_64", "amd64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}
+    arch = aliases.get(target.split("-")[0])
+    host = aliases.get(platform.machine().lower())
+    return arch if arch and arch != host else None
 
 
 # Tests that cannot run on the wasm32-wasip1 target. Everything not listed
@@ -147,6 +159,21 @@ WINDOWS_SKIP = {
     'term_pty_test': 'Linux pty (/dev/ptmx); ConPTY backend pending',
     'term_loop_test': 'Linux pty sessions and raw pipe2 syscalls',
     'term_raw_test': 'termios ioctls (raw mode itself is portable via RawMode)',
+}
+
+
+# Tests that cannot run on a foreign-architecture Linux target under qemu
+# user mode: they link host-architecture native libraries (no target sysroot
+# in the dev shell), use ioctls qemu does not translate, or exec a
+# foreign-architecture binary, which needs binfmt_misc on the host.
+CROSS_ARCH_SKIP = {
+    'tls_test': 'links host-architecture OpenSSL',
+    'http2_tls_test': 'links host-architecture OpenSSL',
+    'https_server_test': 'links host-architecture OpenSSL',
+    'rust_ffi_test': 'links a host-architecture Rust staticlib',
+    'runtime_test': 'links host-architecture libc (sprintf, qsort)',
+    'dma_test': 'udmabuf ioctls are not translated by qemu user mode',
+    'process_test': 're-executes its own foreign-architecture binary',
 }
 
 
@@ -666,6 +693,11 @@ def main():
         elif services.has_node:
             prime_wasm_runner_shim(agc_bin)
             runner = ["node", "--no-warnings", wasm_runner_shim_path()]
+    foreign_arch = foreign_target_arch(target)
+    if not runner and foreign_arch:
+        # Mirror the driver: SILVER_TEST_RUNNER wins, then qemu user mode.
+        env_runner = os.environ.get("SILVER_TEST_RUNNER")
+        runner = shlex.split(env_runner) if env_runner else [f"qemu-{foreign_arch}"]
     # Each --libdir value is already a complete path from the shell/argparse;
     # re-splitting it would break paths containing spaces (e.g. a Windows SDK
     # under "Program Files").
@@ -711,6 +743,8 @@ def main():
                 skip_reason = WINDOWS_SKIP[name]
             elif target and target_is_wasm(target) and name in WASM_SKIP:
                 skip_reason = WASM_SKIP[name]
+            elif foreign_arch and name in CROSS_ARCH_SKIP:
+                skip_reason = CROSS_ARCH_SKIP[name]
 
             if skip_reason:
                 res = TestResult(name, "SKIP", skip_reason)

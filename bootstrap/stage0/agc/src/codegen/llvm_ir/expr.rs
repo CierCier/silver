@@ -2039,11 +2039,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         clobbers: &[String],
         span: &Span,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
-        // asm() is lowered with a fixed x86_64 register model shared by both
-        // platforms: inputs land in {rax},{rdi},{rsi},{rdx},{r10},{r8},{r9}
-        // in order, the result is read from {rax}, and rcx/r11 are always
-        // clobbered. On Windows the same model works for ordinary blobs
-        // (memcpy-style SIMD, cpuid, rbp reads): rdi/rsi are nonvolatile on
+        // asm() is lowered with a fixed register model shaped like the Linux
+        // syscall convention of the target architecture:
+        //   x86_64:  inputs {rax},{rdi},{rsi},{rdx},{r10},{r8},{r9}; result {rax};
+        //            rcx/r11 always clobbered.
+        //   aarch64: inputs {x8},{x0},{x1},{x2},{x3},{x4},{x5}; result {x0}.
+        // The first input is the syscall number on both. On Windows the
+        // x86_64 model works for ordinary blobs (memcpy-style SIMD, cpuid, rbp
+        // reads): rdi/rsi are nonvolatile on
         // Win64, so they are implicitly added as clobbers — LLVM then spills
         // and restores any live values around the asm. User-mode `syscall`
         // has no stable contract on Windows (WoW64 breaks it) and is rejected.
@@ -2073,12 +2076,28 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 *span,
             ));
         }
-        // Validate: x86_64 syscall has 1 syscall number (rax) + 6 arg registers
-        if inputs.len() > 7 {
+        let arch = triple.split('-').next().unwrap_or_default();
+        let (result_reg, input_regs, fixed_clobbers): (&str, [&str; 7], &str) = match arch {
+            "x86_64" | "amd64" => (
+                "{rax}",
+                ["{rax}", "{rdi}", "{rsi}", "{rdx}", "{r10}", "{r8}", "{r9}"],
+                ",~{rcx},~{r11}",
+            ),
+            "aarch64" | "arm64" => ("{x0}", ["{x8}", "{x0}", "{x1}", "{x2}", "{x3}", "{x4}", "{x5}"], ""),
+            _ => {
+                return Err(CodegenError::with_span(
+                    crate::diagnostics::messages::asm_unsupported_arch(&triple),
+                    *span,
+                ));
+            }
+        };
+        // One syscall-number register plus six argument registers.
+        if inputs.len() > input_regs.len() {
             return Err(CodegenError::with_span(
                 format!(
-                    "inline asm with {} input(s) unsupported: the asm register model has 1 result register (rax) and 6 argument registers at most",
-                    inputs.len()
+                    "inline asm with {} input(s) unsupported: the asm register model has 1 result register ({result_reg}) and {} input registers at most",
+                    inputs.len(),
+                    input_regs.len()
                 ),
                 *span,
             ));
@@ -2098,18 +2117,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             args.push(BasicMetadataValueEnum::from(i64_val));
         }
 
-        // 2. Build constraint string
-        // Output: {rax} — syscall return value is always in %rax
-        // Inputs (in syscall order): {rax}, {rdi}, {rsi}, {rdx}, {r10}, {r8}, {r9}
-        // Clobbers: ~{rcx}, ~{r11} — always destroyed by Linux syscall, plus
-        // any caller-supplied clobbers (e.g. "rbx", "rdx" for `cpuid`).
-        let regs = ["{rax}", "{rdi}", "{rsi}", "{rdx}", "{r10}", "{r8}", "{r9}"];
-        let mut constraints = String::from("={rax}");
-        for reg in regs.iter().take(inputs.len()) {
+        // 2. Build the constraint string: the result register, the inputs in
+        // order, the architecture's fixed clobbers, then any caller-supplied
+        // clobbers (e.g. "rbx", "rdx" for `cpuid`).
+        let mut constraints = format!("={result_reg}");
+        for reg in input_regs.iter().take(inputs.len()) {
             constraints.push(',');
             constraints.push_str(reg);
         }
-        constraints.push_str(",~{rcx},~{r11}");
+        constraints.push_str(fixed_clobbers);
         if is_windows {
             // Win64 nonvolatiles among the fixed input registers: the blob is
             // free to destroy them; listing them as clobbers makes LLVM spill

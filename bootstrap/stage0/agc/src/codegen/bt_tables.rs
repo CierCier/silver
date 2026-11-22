@@ -25,8 +25,8 @@ pub(crate) const BT_LINES_COUNT: &str = "__silver_bt_lines_count";
 pub(crate) const BT_ARGS: &str = "__silver_bt_args";
 pub(crate) const BT_ARGS_COUNT: &str = "__silver_bt_args_count";
 
-/// One spilled argument the runtime can print: its name, `DW_OP_fbreg`
-/// frame offset, and byte size (at most 8).
+/// One spilled argument the runtime can print: its name, offset from the
+/// frame pointer, and byte size (at most 8).
 pub(crate) struct BtArg {
     pub name: String,
     pub fbreg: i64,
@@ -58,17 +58,22 @@ impl BtTables {
             .into_iter()
             .filter_map(|function| {
                 let sizes = param_sizes(&function.name)?;
+                let fp_above_sp = function.fp_above_sp;
                 let args = function
                     .params
                     .into_iter()
                     .enumerate()
-                    .filter_map(|(index, (name, location))| match location {
-                        BtParamLoc::Fbreg(fbreg) => Some(BtArg {
+                    .filter_map(|(index, (name, location))| {
+                        let fbreg = match location {
+                            BtParamLoc::Fbreg(fbreg) => fbreg,
+                            BtParamLoc::SpOffset(offset) => offset - fp_above_sp?,
+                            BtParamLoc::Reg(_) | BtParamLoc::Unknown => return None,
+                        };
+                        Some(BtArg {
                             name,
                             fbreg,
                             size: sizes.get(index).copied().unwrap_or(8).min(8),
-                        }),
-                        BtParamLoc::Reg(_) | BtParamLoc::Unknown => None,
+                        })
                     })
                     .collect();
                 Some(BtFunction {

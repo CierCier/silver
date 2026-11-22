@@ -34,6 +34,7 @@ import std.rt.backtrace;
 import std.atomic;
 import std.cpu;
 import std.sys.syscall;
+import std.sys.raw.numbers;
 /// Static free-list head table in .bss — eliminates lazy-init branch on every
 /// alloc/free. Zero-initialized by the OS loader at program startup.
 /// Internal: global free-list heads per size class, guarded by the
@@ -210,13 +211,13 @@ i64 g_mem_multithreaded;
 if (@cfg(os.linux)) {
     /// Returns the calling thread's kernel tid (gettid).
     i64 mem_get_tid() {
-        return syscall0(186); // SYS_gettid
+        return syscall0((i64)SYSCALL.GETTID);
     }
 
     /// Returns true when thread `tid` still exists (probed with tkill signal 0).
     bool mem_thread_alive(i64 tid) {
         if (tid <= 0) { return false; }
-        i64 r = syscall2(200, tid, 0); // SYS_tkill
+        i64 r = syscall2((i64)SYSCALL.TKILL, tid, 0);
         return r == 0;
     }
 } else if (@cfg(os.wasi)) {

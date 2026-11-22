@@ -66,8 +66,13 @@ const i64 O_TRUNC = 512;       // 0o1000
 const i64 O_APPEND = 1024;     // 0o2000
 /// open flag: non-blocking I/O.
 const i64 O_NONBLOCK = 2048;   // 0o4000
+if (@cfg(arch.aarch64)) {
+/// open flag: fail with ENOTDIR unless the path is a directory.
+const i64 O_DIRECTORY = 16384; // 0o40000 on arm64
+} else {
 /// open flag: fail with ENOTDIR unless the path is a directory.
 const i64 O_DIRECTORY = 65536; // 0o200000
+}
 /// open flag: close the descriptor on exec.
 const i64 O_CLOEXEC = 524288;  // 0o2000000
 

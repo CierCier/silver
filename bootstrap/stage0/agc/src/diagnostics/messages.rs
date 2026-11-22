@@ -9,6 +9,10 @@ pub fn reference_carrier_expected() -> &'static str {
     "internal reference requires a data pointer and initialization-state capability"
 }
 
+pub fn asm_unsupported_arch(target: &str) -> String {
+    format!("inline asm() has no register model for target `{target}`; supported architectures are x86_64 and aarch64")
+}
+
 pub fn c_struct_abi_unsupported(target: &str) -> String {
     format!("passing a struct by value across a C boundary is not supported for target `{target}`")
 }
