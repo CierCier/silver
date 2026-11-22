@@ -1173,9 +1173,14 @@ impl ExprLowerer {
         }
         Vec<LowerMacroArgument> arguments = Vec<LowerMacroArgument>.new();
         Vec<LowerMacroBinding> bindings = Vec<LowerMacroBinding>.new();
+        String failure = String.new();
         bool supported = lower_collect_macro_bindings(definition, call_args,
-            &bindings, &arguments, name_node.text, &self.error);
-        if (!supported) { self.error_span = name_node.span; }
+            &bindings, &arguments, name_node.text, &failure);
+        if (supported) {
+            failure.drop();
+        } else {
+            self.record_error(move failure, name_node.span);
+        }
         if (supported) {
             supported = lower_bind_macro_type_arguments(self, definition,
                 generic_less, generic_greater, &bindings, &arguments);
@@ -1251,6 +1256,17 @@ impl ExprLowerer {
         return result;
     }
 
+    /// Records `message` at `span` unless an earlier diagnostic exists, so
+    /// the first failure keeps its text and location.
+    void record_error(ExprLowerer* self, String message, Span span) {
+        if (self.error.len() > 0) {
+            message.drop();
+            return;
+        }
+        self.error = move message;
+        self.error_span = span;
+    }
+
     /// Moves an error recorded inside an outermost macro expansion to the
     /// call: generated spans point into the expansion buffer, not user source.
     void report_error_at_macro_call(ExprLowerer* self, bool had_error, SyntaxNode* name_node) {
@@ -1303,14 +1319,16 @@ impl ExprLowerer {
 
         Vec<LowerMacroArgument> arguments = Vec<LowerMacroArgument>.new();
         Vec<LowerMacroBinding> bindings = Vec<LowerMacroBinding>.new();
+        String failure = String.new();
         if (!lower_collect_macro_bindings(definition, call_args,
-                &bindings, &arguments, name_node.text, &self.error)) {
-            self.error_span = name_node.span;
+                &bindings, &arguments, name_node.text, &failure)) {
+            self.record_error(move failure, name_node.span);
             bindings.drop();
             arguments.drop();
             self.unsupported = true;
             return true;
         }
+        failure.drop();
         if (!lower_bind_macro_type_arguments(self, definition, generic_less,
                                              generic_greater, &bindings,
                                              &arguments)) {
@@ -2338,10 +2356,7 @@ impl ExprLowerer {
                 && designator_end.token_kind == TokenKind.Assign) {
                 elements.drop();
                 self.unsupported = true;
-                if (self.error.len() == 0) {
-                    self.error = designated_array_initializer_unsupported();
-                    self.error_span = element.span;
-                }
+                self.record_error(designated_array_initializer_unsupported(), element.span);
                 return 0;
             }
             if (element.kind == NodeKind.Block) {

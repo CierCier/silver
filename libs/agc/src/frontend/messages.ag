@@ -571,6 +571,13 @@ String unknown_method(str method, str type_name) {
     return @format("unknown method '{}' on type {}", method, type_name);
 }
 
+/// Diagnostic text: "cannot call trait default method '{}' on type {};
+/// define it in the impl". Returns an owned string.
+String trait_default_method_call(str method, str type_name) {
+    return @format("cannot call trait default method '{}' on type {}; define it in the impl",
+                   method, type_name);
+}
+
 /// Diagnostic text: "no overload of method '{}' on type {} matches these
 /// arguments". Returns an owned string.
 String method_overload_mismatch(str method, str type_name) {

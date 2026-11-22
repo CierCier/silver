@@ -797,9 +797,11 @@ void typecheck_infer_type_args(TypeTable* types, CalleeTypeArgs* args, u32 decla
     } else if (declared_entry.kind == TypeKind.Array && actual_entry.kind == TypeKind.Array) {
         typecheck_infer_type_args(types, args, declared_entry.inner, actual_entry.inner,
                                   depth + 1);
-    } else if (declared_entry.kind == TypeKind.Named && actual_entry.kind == TypeKind.Named
-               && declared_entry.name_id == actual_entry.name_id
-               && declared_entry.count == actual_entry.count) {
+    } else if (declared_entry.count == actual_entry.count
+               && ((declared_entry.kind == TypeKind.Tuple && actual_entry.kind == TypeKind.Tuple)
+                   || (declared_entry.kind == TypeKind.Named
+                       && actual_entry.kind == TypeKind.Named
+                       && declared_entry.name_id == actual_entry.name_id))) {
         i64 i = 0;
         while (i < declared_entry.count) {
             typecheck_infer_type_args(types, args,
@@ -2310,42 +2312,61 @@ SyntaxNode* typecheck_impl_trait(SyntaxNode* impl_item) {
     return (SyntaxNode*)0;
 }
 
-/// Counts the declarations of `method_name` in impls of `owner_name`.
-/// With `reachable`, counts instead what the owner reaches without
-/// declaring it: members of traits an impl applies to it (`impl Show for
-/// A`, or a blanket `impl<T> Show for T`) and methods of blanket impls.
-/// `*generic` counts those with their own type parameters.
-void typecheck_count_methods(SyntaxNode* root, str owner_name, str method_name,
-                             bool reachable, i64* count, i64* generic) {
-    *count = 0;
-    *generic = 0;
+/// Where `method_name` is declared for a receiver type: `own` impls
+/// (`generic` counts those with their own type parameters), `blanket`
+/// impls (`impl<T> Show for T`), and members of traits an impl applies to
+/// the type (`trait_member`), which neither compiler can call yet.
+struct MethodDeclarations {
+    i64 own;
+    i64 generic;
+    i64 blanket;
+    i64 trait_member;
+}
+
+/// Whether `impl_item` targets its own type parameter (`impl<T> Show for
+/// T`) and so applies to every type. `impl Show for i32` does not.
+bool typecheck_impl_is_blanket(TypeTable* types, SyntaxNode* impl_item, SyntaxNode* target) {
+    Vec<u32> params = Vec<u32>.new();
+    mono_impl_type_parameters(impl_item, types, &params);
+    bool blanket = mono_contains_type_param(&params, types.names.intern(target.text));
+    params.drop();
+    return blanket;
+}
+
+/// Counts the declarations of `method_name` that `owner_name` can reach.
+MethodDeclarations typecheck_count_methods(TypeTable* types, SyntaxNode* root, str owner_name,
+                                           str method_name) {
+    MethodDeclarations found = { .own = 0, .generic = 0, .blanket = 0, .trait_member = 0 };
+    i64 ignored_generic = 0;
     SyntaxNode* item = root.first_child;
     while (item != (SyntaxNode*)0) {
         SyntaxNode* target = item.kind == NodeKind.Impl
             ? impl_target_identifier(item) : (SyntaxNode*)0;
-        bool own = target != (SyntaxNode*)0 && strcmp(target.text, owner_name) == 0;
-        if (!reachable) {
-            if (own) { typecheck_count_block_methods(item, method_name, count, generic); }
-        } else if (target != (SyntaxNode*)0) {
-            bool blanket = !own
-                && find_item_by_name(root, NodeKind.Struct, target.text) == (SyntaxNode*)0
-                && find_enum_item(root, target.text) == (SyntaxNode*)0;
+        if (target != (SyntaxNode*)0) {
+            bool own = strcmp(target.text, owner_name) == 0;
+            bool blanket = !own && typecheck_impl_is_blanket(types, item, target);
+            if (own) {
+                typecheck_count_block_methods(item, method_name, &found.own, &found.generic);
+            } else if (blanket) {
+                typecheck_count_block_methods(item, method_name, &found.blanket,
+                                              &ignored_generic);
+            }
             SyntaxNode* trait_name = typecheck_impl_trait(item);
             if ((own || blanket) && trait_name != (SyntaxNode*)0) {
                 typecheck_count_block_methods(
                     find_item_by_name(root, NodeKind.Trait, trait_name.text),
-                    method_name, count, generic);
+                    method_name, &found.trait_member, &ignored_generic);
             }
-            if (blanket) { typecheck_count_block_methods(item, method_name, count, generic); }
         }
         item = item.next_sibling;
     }
+    return found;
 }
 
 /// Reports a call to a method that a declared struct or enum receiver
-/// cannot have: no impl or trait declares the name, or the owner declares
-/// it but no overload accepts the arguments. Unresolved receivers and
-/// argument types are not judged.
+/// cannot have: no impl declares the name, only a trait default does, or
+/// the owner declares it but no overload accepts the arguments.
+/// Unresolved receivers and argument types are not judged.
 void typecheck_method_call_target(AstPool* pool, TypeTable* types, SyntaxNode* root,
                                   u32 receiver_type, str method_name, u32 args_start,
                                   bool static_method, Span span,
@@ -2365,19 +2386,19 @@ void typecheck_method_call_target(AstPool* pool, TypeTable* types, SyntaxNode* r
         && find_enum_item(root, owner_name) == (SyntaxNode*)0) {
         return;
     }
-    i64 declared = 0;
-    i64 generic = 0;
-    typecheck_count_methods(root, owner_name, method_name, false, &declared, &generic);
-    if (declared == 0) {
-        typecheck_count_methods(root, owner_name, method_name, true, &declared, &generic);
-        if (declared == 0) {
-            diagnostics.error(span, unknown_method(method_name, types.type_name(owner_type)));
-            *ok = false;
-        }
+    MethodDeclarations found = typecheck_count_methods(types, root, owner_name, method_name);
+    if (found.own == 0) {
+        if (found.blanket > 0) { return; }
+        // Codegen emits only methods an impl block defines, so a trait
+        // default is reported rather than accepted and failed in build.
+        diagnostics.error(span, found.trait_member > 0
+            ? trait_default_method_call(method_name, types.type_name(owner_type))
+            : unknown_method(method_name, types.type_name(owner_type)));
+        *ok = false;
         return;
     }
     // Overload selection does not infer a method's own type parameters.
-    if (generic > 0) { return; }
+    if (found.generic > 0) { return; }
     if (args_start >= (u32)pool.args.len()) { return; }
     SyntaxNode* ret_start = (SyntaxNode*)0;
     SyntaxNode* name = (SyntaxNode*)0;

@@ -426,7 +426,7 @@ The checker rejects these invalid core forms with a source diagnostic:
 | --- | --- |
 | Literals | A literal of the wrong kind for its declared type, such as `str s = 42;`. |
 | Calls | Unknown functions, wrong argument counts, and argument types that do not convert. |
-| Methods | On a declared struct or enum, a name that neither its impls, a trait it implements, nor a blanket impl declares, and arguments that fit no non-generic overload. |
+| Methods | On a declared struct or enum, a name that neither its impls nor a blanket impl declares, a call that only a trait default would answer (codegen emits only impl methods), and arguments that fit no non-generic overload. |
 | Generic calls | Arguments and results that conflict with explicit type arguments or with type arguments inferred from non-literal arguments. |
 | Aggregates | Unknown fields in struct literals and field access, and field or array element values that do not convert. |
 | Assignments | Values that do not convert to the target, and undeclared targets. |
