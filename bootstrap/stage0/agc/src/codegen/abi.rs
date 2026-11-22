@@ -10,7 +10,9 @@
 //! - AAPCS64 (https://github.com/ARM-software/abi-aa/blob/main/aapcs64/aapcs64.rst)
 //! - WebAssembly Basic C ABI (https://github.com/WebAssembly/tool-conventions/blob/main/BasicCABI.md)
 //!
-//! Each handler's output matches clang 22 for the same C struct.
+//! Each handler places a struct in the same registers and stack slots as
+//! clang 22. The LLVM carrier type can still differ from clang's, as with
+//! `i64` where clang uses `ptr` for an AArch64 struct holding one pointer.
 use std::num::NonZeroU32;
 
 use inkwell::context::Context;
@@ -234,7 +236,14 @@ impl Arm64Abi {
                 }
                 BasicTypeEnum::StructType(inner) => inner.get_field_types_iter().all(|f| visit(f, base, count)),
                 BasicTypeEnum::ArrayType(array) => {
-                    (0..array.len()).all(|_| visit(array.get_element_type(), base, count))
+                    // Walk the element once; a huge array must not cost a walk
+                    // per element before the four-member limit rejects it.
+                    let mut members = 0;
+                    if array.len() > 0 && !visit(array.get_element_type(), base, &mut members) {
+                        return false;
+                    }
+                    *count = count.saturating_add(members.saturating_mul(array.len()));
+                    true
                 }
                 _ => false,
             }
@@ -348,13 +357,22 @@ pub fn get_abi_handler(target_triple: &str) -> Option<Box<dyn AbiHandler>> {
         } else {
             Some(Box::new(Amd64Abi))
         }
-    } else if matches!(arch, "aarch64" | "arm64") && !target_is_windows(Some(&triple)) && !triple.contains("apple") {
+    } else if matches!(arch, "aarch64" | "arm64") && !target_is_windows(Some(&triple)) && !target_is_darwin(&triple) {
         // Darwin and Windows arm64 deviate from AAPCS64 (Darwin variadics and
         // stack packing, Windows HFA variadics); neither is a Silver target.
         Some(Box::new(Arm64Abi))
     } else {
         None
     }
+}
+
+/// Whether `triple` names an Apple OS, by vendor or by OS component, as LLVM
+/// treats `aarch64-unknown-darwin` like `arm64-apple-darwin`.
+fn target_is_darwin(triple: &str) -> bool {
+    triple.split('-').skip(1).any(|part| {
+        part == "apple" || ["darwin", "macos", "ios", "tvos", "watchos", "xros", "visionos"]
+            .iter().any(|os| part.starts_with(os))
+    })
 }
 
 /// Returns true when the target triple denotes a WebAssembly target.

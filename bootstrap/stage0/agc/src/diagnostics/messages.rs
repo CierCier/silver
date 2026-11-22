@@ -13,6 +13,14 @@ pub fn c_struct_abi_unsupported(target: &str) -> String {
     format!("passing a struct by value across a C boundary is not supported for target `{target}`")
 }
 
+pub fn c_abi_conversion_outside_function() -> &'static str {
+    "C ABI value conversion requires an active function"
+}
+
+pub fn c_abi_conversion_failed(error: impl Display) -> String {
+    format!("failed to convert a value to or from its C ABI form: {error}")
+}
+
 pub fn reference_state_unavailable() -> &'static str {
     "cannot borrow owned storage without its initialization-state capability"
 }

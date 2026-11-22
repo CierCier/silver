@@ -9,6 +9,7 @@ pub(crate) use crate::codegen::abi::AbiSlot;
 use crate::codegen::abi::StructPass;
 use crate::codegen::llvm_ir::{FunctionSig, LlvmIrGenerator};
 use crate::codegen::{CodegenError, CodegenResult};
+use crate::diagnostics::messages;
 use crate::parser::ast;
 
 impl<'ctx> LlvmIrGenerator<'ctx> {
@@ -396,6 +397,17 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(attributes)
     }
 
+    /// Whether a struct of type `ty` crosses a C call at `slot` as a pointer
+    /// to a copy (`byval` or indirect) rather than as a register value.
+    fn c_struct_passes_by_reference(&mut self, ty: &ast::Type, slot: AbiSlot) -> CodegenResult<bool> {
+        Ok(matches!(self.c_struct_pass(ty, slot)?, Some((_, StructPass::ByVal | StructPass::Indirect))))
+    }
+
+    /// The function that receives C ABI conversion code.
+    fn c_abi_function(&self) -> CodegenResult<FunctionValue<'ctx>> {
+        self.current_fn.ok_or_else(|| CodegenError::new(messages::c_abi_conversion_outside_function()))
+    }
+
     /// Reinterprets the bytes of `value` as `to` through a stack slot large
     /// and aligned enough for both types. A C struct and the type that
     /// carries it in registers may differ in size (a 3-byte struct passes as
@@ -405,9 +417,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         value: BasicValueEnum<'ctx>,
         to: BasicTypeEnum<'ctx>,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
-        let function = self
-            .current_fn
-            .ok_or_else(|| CodegenError::new("no active function for C ABI conversion"))?;
+        let function = self.c_abi_function()?;
         let from = value.get_type();
         let target_data = self.target_data();
         let slot_ty = if target_data.get_abi_size(&to) > target_data.get_abi_size(&from) { to } else { from };
@@ -416,8 +426,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         slot.as_instruction()
             .expect("alloca instruction")
             .set_alignment(align)
-            .map_err(|e| CodegenError::new(format!("failed to align C ABI slot: {e}")))?;
-        let error = |e: inkwell::builder::BuilderError| CodegenError::new(format!("failed to convert C ABI value: {e}"));
+            .map_err(|e| CodegenError::new(messages::c_abi_conversion_failed(e)))?;
+        let error = |e: inkwell::builder::BuilderError| CodegenError::new(messages::c_abi_conversion_failed(e));
         self.builder.build_store(slot, value).map_err(error)?;
         self.builder.build_load(to, slot, "abi.value").map_err(error)
     }
@@ -464,13 +474,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
-    /// Converts argument `value` of source type `ty` to its C-ABI form. A
-    /// struct passed by reference becomes a pointer to a fresh copy.
+    /// Converts `value` of source type `ty`, sent to C as an argument or a
+    /// callback result at `slot`, to its C-ABI form. A struct passed by
+    /// reference becomes a pointer to a fresh copy.
     pub(crate) fn coerce_value_to_abi(
         &mut self,
         value: BasicValueEnum<'ctx>,
         ty: &ast::Type,
         linkage: &ast::ExternLinkage,
+        slot: AbiSlot,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
         if !matches!(linkage, ast::ExternLinkage::C) {
             return Ok(value);
@@ -486,7 +498,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return self.callable_entry(value, true).map(|v| v.as_basic_value_enum());
         }
 
-        let abi_ty = self.lower_abi_type(ty, linkage, AbiSlot::Argument)?;
+        let abi_ty = self.lower_abi_type(ty, linkage, slot)?;
         if abi_ty == value.get_type() {
             return Ok(value);
         }
@@ -505,27 +517,25 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok(promoted.as_basic_value_enum());
         }
 
-        if abi_ty.is_pointer_type() && !value.get_type().is_pointer_type() {
-            let function = self
-                .current_fn
-                .ok_or_else(|| CodegenError::new("no active function for C ABI conversion"))?;
-            let copy = self.create_entry_alloca(function, "abi.copy", value.get_type())?;
+        if self.c_struct_passes_by_reference(ty, slot)? {
+            let copy = self.create_entry_alloca(self.c_abi_function()?, "abi.copy", value.get_type())?;
             self.builder
                 .build_store(copy, value)
-                .map_err(|e| CodegenError::new(format!("failed to copy C ABI argument: {e}")))?;
+                .map_err(|e| CodegenError::new(messages::c_abi_conversion_failed(e)))?;
             return Ok(copy.as_basic_value_enum());
         }
         self.reinterpret_through_memory(value, abi_ty)
     }
 
-    /// Converts a value received from C, either a call result or a callback
-    /// argument, back to source type `ty`. A struct result returned through
-    /// `sret` never reaches here; `build_foreign_call` loads it from the slot.
+    /// Converts a value received from C at `slot`, either a call result or a
+    /// callback argument, back to source type `ty`. A struct result returned
+    /// through `sret` never reaches here; callers load it from the slot.
     pub(crate) fn uncoerce_value_from_abi(
         &mut self,
         value: BasicValueEnum<'ctx>,
         ty: &ast::Type,
         linkage: &ast::ExternLinkage,
+        slot: AbiSlot,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
         if !matches!(linkage, ast::ExternLinkage::C) {
             return Ok(value);
@@ -559,6 +569,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok(narrowed.as_basic_value_enum());
         }
 
+        if self.c_struct_passes_by_reference(ty, slot)? {
+            // The C caller passed a pointer to its own copy.
+            return self
+                .builder
+                .build_load(native_ty, value.into_pointer_value(), "abi.byref")
+                .map_err(|e| CodegenError::new(messages::c_abi_conversion_failed(e)));
+        }
         self.reinterpret_through_memory(value, native_ty)
     }
 

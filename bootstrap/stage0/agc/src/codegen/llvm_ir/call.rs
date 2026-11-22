@@ -7,6 +7,7 @@ use inkwell::values::{
 use inkwell::{AtomicOrdering, AtomicRMWBinOp};
 
 use crate::codegen::SilverGenerator;
+use crate::codegen::abi::AbiSlot;
 use crate::codegen::llvm_ir::LlvmIrGenerator;
 use crate::codegen::llvm_ir::aggregate::Operand;
 use crate::codegen::llvm_ir::function_abi::Callee;
@@ -296,7 +297,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
                     if let Some(linkage) = &signature.linkage {
                         value =
-                            self.coerce_value_to_abi(value, &signature.params[index], linkage)?;
+                            self.coerce_value_to_abi(value, &signature.params[index], linkage, AbiSlot::Argument)?;
                     }
                 }
                 args.push(if internal { self.internal_argument(value)? } else { Operand::Value(value) });
@@ -354,7 +355,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
                         if let Some(linkage) = &signature.linkage {
                             value =
-                                self.coerce_value_to_abi(value, &signature.params[index], linkage)?;
+                                self.coerce_value_to_abi(value, &signature.params[index], linkage, AbiSlot::Argument)?;
                         }
                     }
                 } else if is_variadic {
@@ -1153,7 +1154,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     };
                     // Apply ABI coercion for extern methods
                     if let Some(linkage) = &signature.linkage {
-                        self.coerce_value_to_abi(cast_arg, first_param, linkage)?
+                        self.coerce_value_to_abi(cast_arg, first_param, linkage, AbiSlot::Argument)?
                     } else {
                         cast_arg
                     }
@@ -1253,6 +1254,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             value,
                             &signature.params[param_index],
                             linkage,
+                            AbiSlot::Argument,
                         )?;
                     }
                 }
@@ -1357,6 +1359,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 value,
                                 &signature.params[param_index],
                                 linkage,
+                            AbiSlot::Argument,
                             )?;
                         }
                     }

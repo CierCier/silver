@@ -5,6 +5,7 @@ use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, Functi
 use super::LlvmIrGenerator;
 use super::aggregate::Operand;
 use super::function_abi::PassMode;
+use crate::codegen::abi::AbiSlot;
 use crate::codegen::{CodegenError, CodegenResult};
 use crate::lexer::Span;
 use crate::parser::ast;
@@ -124,7 +125,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             for (param, parameter) in params.into_iter().zip(&signature.params) {
                 let value = self.operand_value(param, "arg").map_err(|e| CodegenError::new(e.to_string()))?;
                 arguments.push(BasicMetadataValueEnum::from(
-                    self.coerce_value_to_abi(value, parameter, &ast::ExternLinkage::C)?,
+                    self.coerce_value_to_abi(value, parameter, &ast::ExternLinkage::C, AbiSlot::Argument)?,
                 ));
             }
             let (_, value) = self.build_foreign_call(function, Some(signature), arguments, "")?;
