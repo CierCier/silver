@@ -415,7 +415,8 @@ unsupported.
 Stage1 `check`, `build`, and the language server run one expression checker
 ([`typecheck_expressions_scoped`](../libs/agc/src/frontend/typecheck_expr.ag))
 over every cfg-active non-generic function and every cfg-active non-generic
-method of a non-generic `impl`. Every error it reports fails the command, so
+method of an `impl` whose target takes no type arguments (`impl Record`, not
+`impl<T> Box<T>` or `impl Result<i64, Error>`). Every error it reports fails the command, so
 `check` and `build` agree on semantic acceptance. Link and environment failures
 remain build-only.
 
@@ -425,7 +426,7 @@ The checker rejects these invalid core forms with a source diagnostic:
 | --- | --- |
 | Literals | A literal of the wrong kind for its declared type, such as `str s = 42;`. |
 | Calls | Unknown functions, wrong argument counts, and argument types that do not convert. |
-| Methods | On a declared struct or enum, a name that no impl or trait declares, and arguments that fit no non-generic overload. |
+| Methods | On a declared struct or enum, a name that neither its impls, a trait, nor a blanket impl declares, and arguments that fit no non-generic overload. |
 | Generic calls | Arguments and results that conflict with explicit type arguments or with type arguments inferred from non-literal arguments. |
 | Aggregates | Unknown fields in struct literals and field access, and field or array element values that do not convert. |
 | Assignments | Values that do not convert to the target, and undeclared targets. |
@@ -433,16 +434,20 @@ The checker rejects these invalid core forms with a source diagnostic:
 
 Implicit conversions follow stage0. Numeric, `char`, and `bool` primitives
 convert to each other. Unit enums (enums without payloads) convert to and from
-those primitives and to other unit enums. A user `cast` block also converts
+integers, `char`, `bool`, and other unit enums. Aggregate elements convert the
+same way. A user `cast` block also converts
 implicitly, and `&r` of a reference `r` reborrows through it. Overload selection
 does not count `bool` as a number, so `f(1)` still picks `f(i64)` over `f(bool)`.
 
-A value passed to an immutable `&T` parameter is borrowed implicitly. Overload
-selection prefers a by-value overload. A `&mut T` parameter needs `&mut place`.
-In `launch f(x)`, the scoped-launch pass reports a bare value for a reference
-parameter with its own diagnostic. A `[a, b]` literal fills a tuple type in a
-declaration, a `return`, or an argument, so `[i64, i64] p = [1, 2];` is
-accepted.
+A value passed to an immutable `&T` parameter is borrowed implicitly. In
+overload selection an implicit borrow costs two conversions, as in stage0, so
+`f(x)` picks `f(i64)` over `f(&i64)` for an `i64 x`. A `&mut T` parameter
+needs `&mut place`. In `launch f(x)`, the scoped-launch pass reports a bare
+local or parameter for a reference parameter with its own diagnostic. A
+`[a, b]` literal fills a tuple type in a declaration, an assignment, a
+`return`, or an argument, so `[i64, i64] p = [1, 2];` is accepted. Generic
+named types also compare their type arguments, so a `Cell<str>` is not a
+`Cell<i64>`.
 
 The checker does not judge a type it cannot resolve. It accepts an unknown type
 or an unbound type parameter wherever a type is expected. A generic callee takes
@@ -450,9 +455,11 @@ its explicit type arguments. Otherwise, each non-literal argument binds the
 parameters that appear in its declared type. Parameters left unbound stay
 unknown.
 
-A function body that the checker cannot lower fails with `cannot check the body
-of '<name>'` and does not pass silently. Designated array initializers
-(`i32 a[4] = { [1]=7 };`) fail with a specific diagnostic. Native codegen does
+A function body that the checker cannot lower does not pass silently. When
+lowering explains the construct, that diagnostic is reported on its own:
+designated array initializers (`i32 a[4] = { [1]=7 };`) fail with a specific
+diagnostic, at the macro call when a macro body contains one. Otherwise the
+body fails with `cannot check the body of '<name>'`. Native codegen does
 not implement them, and it previously wrote the wrong elements.
 
 Stage1 is stricter than stage0 in two cases. It rejects a non-exhaustive `match`
@@ -468,8 +475,9 @@ Remaining limits:
 - Overloads of methods with their own type parameters are not judged.
 - The checker does not judge method calls on receivers it cannot resolve, or on
   types that are not declared structs or enums.
-- Methods of a generic `impl` (`impl<T> ...` or `impl Box<T>`) and methods with
-  their own type parameters are not checked.
+- Methods of a generic `impl` (`impl<T> ...` or `impl Box<T>`), of a concrete
+  specialization (`impl Result<i64, Error>`), and methods with their own type
+  parameters are not checked.
 - Two codegen divergences pass checking: stage1 passes a `[a, b]` tuple literal
   argument incorrectly, and it converts `bool b = 1.5;` to `true` where stage0
   produces `false`.

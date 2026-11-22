@@ -1280,6 +1280,7 @@ class NativeLsp(unittest.TestCase):
                     "contentChanges": [{"text": text}]})
             with self.subTest(version=version):
                 published = self.session.published(uri, version)
+                self.assertEqual(published["version"], version)
                 errors = [item["message"] for item in published["diagnostics"] if item["severity"] == 1]
                 self.assertEqual(errors, messages)
 

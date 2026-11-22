@@ -1244,8 +1244,19 @@ impl ExprLowerer {
         }
         bindings.drop();
         arguments.drop();
-        return self.lower_macro_expansion_source(move expanded_source,
-                                                 has_block_expression);
+        bool had_error = self.error.len() > 0;
+        u32 result = self.lower_macro_expansion_source(move expanded_source,
+                                                       has_block_expression);
+        self.report_error_at_macro_call(had_error, name_node);
+        return result;
+    }
+
+    /// Moves an error recorded inside an outermost macro expansion to the
+    /// call: generated spans point into the expansion buffer, not user source.
+    void report_error_at_macro_call(ExprLowerer* self, bool had_error, SyntaxNode* name_node) {
+        if (!had_error && self.error.len() > 0 && self.macro_depth == 0) {
+            self.error_span = name_node.span;
+        }
     }
 
     /// Expands a user statement macro call into `stmt_ids`. Returns false when
@@ -1347,9 +1358,11 @@ impl ExprLowerer {
             }
         }
         if (generated_body != (SyntaxNode*)0) {
+            bool had_error = self.error.len() > 0;
             self.macro_depth += 1;
             self.lower_block(generated_body, stmt_ids);
             self.macro_depth -= 1;
+            self.report_error_at_macro_call(had_error, name_node);
         } else {
             self.unsupported = true;
         }
