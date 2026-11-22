@@ -368,6 +368,27 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
+    /// The struct a C-linkage parameter passes through a hidden `byval`
+    /// pointer, if any. References and reference-carrying callbacks are
+    /// struct values inside Silver but plain pointers at the C boundary
+    /// (`lower_abi_type`), so they never take `byval`: Win64 would otherwise
+    /// treat their 16-byte Silver representation as a by-reference aggregate.
+    pub(crate) fn c_byval_param_struct(
+        &mut self,
+        ty: &ast::Type,
+        target_data: &TargetData,
+    ) -> CodegenResult<Option<inkwell::types::StructType<'ctx>>> {
+        if matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_) | ast::TypeKind::Function(_)) {
+            return Ok(None);
+        }
+        if let BasicTypeEnum::StructType(struct_ty) = self.lower_basic_type(ty)?
+            && self.abi_handler.struct_needs_byval(self.context, target_data, struct_ty)
+        {
+            return Ok(Some(struct_ty));
+        }
+        Ok(None)
+    }
+
     pub(crate) fn coerce_value_to_abi(
         &mut self,
         value: BasicValueEnum<'ctx>,
@@ -696,24 +717,18 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         // Add byval attributes to user parameters (shifted by sret_offset)
         for (i, param_ty) in sig.params.iter().enumerate() {
-            let lowered = self.lower_basic_type(param_ty)?;
-            if let BasicTypeEnum::StructType(struct_ty) = lowered {
-                if self
-                    .abi_handler
-                    .struct_needs_byval(self.context, &target_data, struct_ty)
-                {
-                    let param_idx = (i as u32) + sret_offset;
-                    let byval_kind = Attribute::get_named_enum_kind_id("byval");
-                    let attr = self
-                        .context
-                        .create_type_attribute(byval_kind, struct_ty.as_any_type_enum());
-                    function.add_attribute(AttributeLoc::Param(param_idx), attr);
+            if let Some(struct_ty) = self.c_byval_param_struct(param_ty, &target_data)? {
+                let param_idx = (i as u32) + sret_offset;
+                let byval_kind = Attribute::get_named_enum_kind_id("byval");
+                let attr = self
+                    .context
+                    .create_type_attribute(byval_kind, struct_ty.as_any_type_enum());
+                function.add_attribute(AttributeLoc::Param(param_idx), attr);
 
-                    let align = self.abi_handler.byval_alignment(struct_ty, &target_data);
-                    let align_kind = Attribute::get_named_enum_kind_id("align");
-                    let align_attr = self.context.create_enum_attribute(align_kind, align);
-                    function.add_attribute(AttributeLoc::Param(param_idx), align_attr);
-                }
+                let align = self.abi_handler.byval_alignment(struct_ty, &target_data);
+                let align_kind = Attribute::get_named_enum_kind_id("align");
+                let align_attr = self.context.create_enum_attribute(align_kind, align);
+                function.add_attribute(AttributeLoc::Param(param_idx), align_attr);
             }
         }
 

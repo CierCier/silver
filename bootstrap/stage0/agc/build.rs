@@ -7,6 +7,12 @@ fn main() {
         cc::Build::new()
             .file("win_llvm_stubs.c")
             .compile("silver_llvm_target_stubs");
+        // The recursive frontend and codegen run on the main thread; give it
+        // the 8 MiB Linux main threads get instead of the 1 MiB PE default,
+        // which overflows while compiling large modules such as std.net.http.
+        if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+            println!("cargo:rustc-link-arg-bins=/STACK:8388608");
+        }
     }
 
     let git_dir = git_cmd(&["rev-parse", "--git-dir"]).map(std::path::PathBuf::from);
