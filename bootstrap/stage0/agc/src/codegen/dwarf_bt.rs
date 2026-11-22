@@ -13,9 +13,10 @@
 //!   parameter names and `DW_OP_fbreg` frame offsets (for reading spilled
 //!   arguments off the frame at abort time).
 //!
-//! Addresses in the object are `.text`-relative; `R_X86_64_64` relocations
-//! against `.debug_line` are applied (they carry the section symbol's value
-//! plus the addend, which is 0 for our own objects).
+//! Addresses in the object are `.text`-relative; absolute relocations
+//! (`R_X86_64_64`/`_32`, `R_AARCH64_ABS64`/`ABS32`) against the debug
+//! sections are applied (they carry the section symbol's value plus the
+//! addend).
 
 use rustc_hash::FxHashMap as HashMap;
 use rustc_hash::FxHashSet as HashSet;
@@ -177,6 +178,21 @@ struct ObjectFile<'a> {
     relocations: HashMap<usize, u64>,
 }
 
+const EM_X86_64: u16 = 62;
+const EM_AARCH64: u16 = 183;
+
+/// Whether ELF relocation `r_type` on `machine` stores `symbol + addend`, the
+/// only kind the debug sections of our objects carry.
+fn absolute_relocation(machine: u16, r_type: u32) -> bool {
+    match machine {
+        // R_X86_64_64, R_X86_64_32
+        EM_X86_64 => matches!(r_type, 1 | 10),
+        // R_AARCH64_ABS64, R_AARCH64_ABS32
+        EM_AARCH64 => matches!(r_type, 257 | 258),
+        _ => false,
+    }
+}
+
 fn elf_parse(data: &[u8]) -> Option<ObjectFile<'_>> {
     if !data.starts_with(b"\x7fELF\x02\x01\x01") {
         return None;
@@ -184,7 +200,7 @@ fn elf_parse(data: &[u8]) -> Option<ObjectFile<'_>> {
     let mut r = Reader::new(data);
     r.skip(16); // e_ident
     let _ = r.u16()?; // e_type
-    let _ = r.u16()?; // e_machine
+    let e_machine = r.u16()?;
     let _ = r.u32()?; // e_version
     let _ = r.u64()?; // e_entry
     let _ = r.u64()?; // e_phoff
@@ -281,8 +297,8 @@ fn elf_parse(data: &[u8]) -> Option<ObjectFile<'_>> {
             let r_addend = rr.u64()? as i64 as u64;
             let sym_idx = (r_info >> 32) as usize;
             let r_type = (r_info & 0xffff_ffff) as u32;
-            if r_type == 1 || r_type == 10 {
-                // R_X86_64_64 (1) and R_X86_64_32 (10): value = sym + addend
+            if absolute_relocation(e_machine, r_type) {
+                // value = sym + addend
                 let val = symbols.get(sym_idx).map(|s| s.value).unwrap_or(0);
                 relocations.insert(target.offset + r_offset, val.wrapping_add(r_addend));
             }
