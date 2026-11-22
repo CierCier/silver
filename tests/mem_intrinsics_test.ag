@@ -84,6 +84,9 @@ i32 main() {
     @memset(&ref_src[1], (u8)9, 2);
     @assert(ref_src[0] == (u8)1 && ref_src[1] == (u8)9 && ref_src[2] == (u8)9 && ref_src[3] == (u8)4,
         "@memset through a reference");
+    bool pick_second = ref_src[0] == (u8)1;
+    @memcpy(pick_second ? &ref_dst[1] : &ref_dst[0], &ref_src[1], 1);
+    @assert(ref_dst[0] == (u8)1 && ref_dst[1] == (u8)9, "@memcpy through a conditional reference");
 
     STDOUT.write_str("all intrinsics ok\n");
     return 0;

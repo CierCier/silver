@@ -2044,9 +2044,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         operand: &ast::Expression,
         intrinsic: &str,
     ) -> CodegenResult<PointerValue<'ctx>> {
-        let is_reference = self
-            .resolve_argument_type(operand)
-            .is_some_and(|ty| matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_)));
+        // Expressions the resolver does not type (a conditional choosing
+        // between references, a call through a function-typed local) are
+        // accepted when the value is exactly the reference carrier; user
+        // structs are named LLVM types and never match it.
+        let is_reference = match self.resolve_argument_type(operand) {
+            Some(ty) => matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_)),
+            None => value.get_type() == self.reference_type().as_basic_type_enum(),
+        };
         match value {
             BasicValueEnum::PointerValue(pointer) => Ok(pointer),
             BasicValueEnum::StructValue(_) if is_reference => self.reference_data(value, operand.span),
