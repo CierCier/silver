@@ -917,11 +917,13 @@ LLVMOpaqueValue* llvm_const_struct_from_initializer(LlvmContext* ctx,
             llvm_const_skip_initializer_value(&positional);
         }
         LLVMOpaqueValue* field_val = (LLVMOpaqueValue*)0;
+        // `T` in `Cell<T>` takes the instance's argument (`i64` in `Cell<i64>`).
+        u32 field_type = mono_resolve_struct_field_type(ctx, type_id, field.type_id);
         if (value_node == (SyntaxNode*)0) {
-            field_val = LLVMConstNull(llvm_lower_type(ctx.ctx, types, field.type_id));
+            field_val = LLVMConstNull(llvm_lower_type(ctx.ctx, types, field_type));
         } else {
             String field_prefix = llvm_const_global_literal_prefix(global_prefix, "field", fi);
-            field_val = llvm_const_literal_value(ctx, module, types, field.type_id,
+            field_val = llvm_const_literal_value(ctx, module, types, field_type,
                 field_prefix.to_str(), value_node);
             field_prefix.drop();
         }
