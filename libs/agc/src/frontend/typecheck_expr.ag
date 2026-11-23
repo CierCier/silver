@@ -4706,13 +4706,15 @@ void typecheck_impl_methods(AstPool* pool, SymbolTable* symbols, SyntaxNode* roo
             && cursor.token_kind == TokenKind.Semicolon;
         if (cursor.kind == NodeKind.Parenthesized && next != (SyntaxNode*)0
             && next.kind == NodeKind.Block) {
-            SyntaxNode* name = item_method_name(start, cursor);
             bool is_cast = start.kind == NodeKind.Token
                 && (start.token_kind == TokenKind.Cast || strcmp(start.text, "cast") == 0);
-            bool active = name != (SyntaxNode*)0 && !is_cast;
+            // `cast T(Owner self) { ... }` checks like a method returning `T`.
+            SyntaxNode* name = is_cast ? start : item_method_name(start, cursor);
+            bool active = name != (SyntaxNode*)0;
             String return_text = String.new();
-            SyntaxNode* scan = start;
-            while (active && scan != name) {
+            SyntaxNode* scan = is_cast ? start.next_sibling : start;
+            SyntaxNode* return_end = is_cast ? cursor : name;
+            while (active && scan != return_end) {
                 bool attribute = scan.kind == NodeKind.Token && strcmp(scan.text, "#") == 0;
                 if (attribute && scan.next_sibling != name
                     && scan.next_sibling.kind == NodeKind.Bracket) {

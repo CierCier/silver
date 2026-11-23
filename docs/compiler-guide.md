@@ -414,7 +414,8 @@ unsupported.
 
 Stage1 `check`, `build`, and the language server run one expression checker
 ([`typecheck_expressions_scoped`](../libs/agc/src/frontend/typecheck_expr.ag))
-over every cfg-active function and impl method, generic ones included. Inside
+over every cfg-active function, impl method, and `cast` block, generic ones
+included. A `cast T(Owner self)` block checks like a method returning `T`. Inside
 a generic body a type parameter is opaque: it matches only itself, so
 `return w;` with a `W w` fails in a function returning `T`. In an impl, `Self`
 keeps the target's type arguments (`HashMap<K, V>`, `Result<i64, Error>`) and
@@ -486,7 +487,6 @@ Remaining limits:
 - Overloads of methods with their own type parameters are not judged.
 - The checker does not judge method calls on receivers it cannot resolve, such
   as a value of an opaque type parameter.
-- `cast` blocks are not checked.
 
 ## 7. Diagnostics
 

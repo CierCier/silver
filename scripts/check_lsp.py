@@ -778,6 +778,15 @@ class NativeLsp(unittest.TestCase):
             report = session.result("textDocument/diagnostic", {"textDocument": {"uri": uri}})
             self.assertEqual([item["message"] for item in report["items"]], expected, name)
 
+    def test_cast_block_bodies_are_checked_like_methods(self):
+        text = ("struct Point { f64 x; f64 y; }\nimpl Point {\n"
+                " cast f64(Point self) {\n  return \"far\";\n }\n"
+                " cast i64(Point self) {\n  return (i64)self.x;\n }\n}\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
+                         [(3, "type mismatch: expected f64, found str")])
+
     def test_returned_pointee_places_and_unrelated_c_results_are_not_local_escapes(self):
         text = ('extern "C" i64* pick(i64* base, i64** slots, i64 count);\n'
                 'extern "C" i64* same(i64* value);\n'
