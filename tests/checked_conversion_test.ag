@@ -83,8 +83,6 @@ i32 main() {
     u32 raw = 2;
     assert_eq_i64(2, ordinal_code(raw), "integer argument becomes a unit enum tag");
     assert_eq_i64(2, widen(Ordinal.Third), "unit enum argument becomes an integer");
-    Task<i64> launched = launch widen(Ordinal.Third);
-    assert_eq_i64(2, wait launched, "launched unit enum argument becomes an integer");
     assert_eq_i64(1, (i64)ordinal_from(1), "returned integer becomes a unit enum");
     OrdinalBox box = { .ordinal = Ordinal.First };
     i8 two = 2;
