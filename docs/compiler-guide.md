@@ -428,7 +428,7 @@ The checker rejects these invalid core forms with a source diagnostic:
 | --- | --- |
 | Literals | A literal of the wrong kind for its declared type, such as `str s = 42;`. |
 | Calls | Unknown functions, wrong argument counts, and argument types that do not convert. |
-| Methods | On a declared struct or enum, a name that neither its impls nor a blanket impl declares, a call that only a trait default would answer (codegen emits only impl methods), and arguments that fit no non-generic overload. |
+| Methods | On a declared struct, enum, or primitive type (`i64`, `str`), a name that neither its impls nor a blanket impl declares, a call that only a trait default would answer (codegen emits only impl methods), and arguments that fit no non-generic overload. A `str` also takes the methods of `Slice<u8>`. |
 | Generic calls | Explicit type argument lists of the wrong length, and arguments and results that conflict with explicit type arguments or with type arguments inferred from non-literal arguments. |
 | Aggregates | Unknown fields in struct literals and field access, and field or array element values that do not convert. |
 | Assignments | Values that do not convert to the target, and undeclared targets. |
@@ -475,8 +475,8 @@ the generated code fails at run time.
 Remaining limits:
 
 - Overloads of methods with their own type parameters are not judged.
-- The checker does not judge method calls on receivers it cannot resolve, or on
-  types that are not declared structs or enums.
+- The checker does not judge method calls on receivers it cannot resolve, such
+  as a value of an opaque type parameter.
 - `cast` blocks are not checked.
 - Two codegen divergences pass checking: stage1 passes a `[a, b]` tuple literal
   argument incorrectly, and it converts `bool b = 1.5;` to `true` where stage0

@@ -2444,16 +2444,25 @@ void typecheck_method_call_target(AstPool* pool, TypeTable* types, SyntaxNode* r
         owner_type = types.resolve_subst(owner.inner);
         owner = types.get(owner_type);
     }
-    if (owner.kind != TypeKind.Named || typecheck_type_is_unresolved(types, owner_type, 0)
-        || strcmp(method_name, "drop") == 0) {
+    if (strcmp(method_name, "drop") == 0) { return; }
+    // Codegen compares primitives itself and sends a `str` method that no
+    // `impl str` declares to `Slice<u8>`.
+    bool primitive = owner_type != TYPE_VOID && type_is_primitive(owner_type);
+    if (primitive && strcmp(method_name, "compare") == 0) { return; }
+    if (!primitive && (owner.kind != TypeKind.Named
+        || typecheck_type_is_unresolved(types, owner_type, 0))) {
         return;
     }
-    str owner_name = types.names.get(owner.name_id);
-    if (find_item_by_name(root, NodeKind.Struct, owner_name) == (SyntaxNode*)0
+    str owner_name = primitive ? types.type_name(owner_type) : types.names.get(owner.name_id);
+    if (!primitive && find_item_by_name(root, NodeKind.Struct, owner_name) == (SyntaxNode*)0
         && find_enum_item(root, owner_name) == (SyntaxNode*)0) {
         return;
     }
     MethodDeclarations found = typecheck_count_methods(types, root, owner_name, method_name);
+    if (found.own == 0 && owner_type == TYPE_STR
+        && typecheck_count_methods(types, root, "Slice", method_name).own > 0) {
+        return;
+    }
     if (found.own == 0) {
         if (found.blanket > 0) { return; }
         // Codegen emits only methods an impl block defines, so a trait
