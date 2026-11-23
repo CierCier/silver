@@ -1088,7 +1088,7 @@ class NativeLsp(unittest.TestCase):
                  " owner.field = 2;\n return wait t;\n}\n",
                  [("cannot assign to 'owner.field' because it is borrowed", 4)]),
                 # A borrowed global's own type decides Send for a generic `&T`.
-                ("import std.mem.rc;\nRc<i64> counter = Rc<i64>.new(1);\nvoid peek<T>(&T _v) { }\ni64 main() {\n"
+                ("import std.mem.rc;\nRc<i64> counter;\nvoid peek<T>(&T _v) { }\ni64 main() {\n"
                  " Task<void> t = launch peek(&counter);\n wait t;\n return 0;\n}\n",
                  [("launch argument of type &Rc<i64> is not Send: Rc<T> carries a shared non-atomic reference count", 4)]),
                 # Only the borrowed field crosses into the task, not its whole owner.
