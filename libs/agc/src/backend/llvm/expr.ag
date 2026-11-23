@@ -6540,6 +6540,14 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 }
             } else {
                 a_val = llvm_emit_expr(ctx, arg_id);
+                // A `cast` block to the parameter type converts the value,
+                // as in a free-function call.
+                LLVMOpaqueValue* user_cast = llvm_try_apply_user_cast(
+                    ctx, a_val, arg_type, expected_arg_type);
+                if (user_cast != (LLVMOpaqueValue*)0) {
+                    a_val = user_cast;
+                    arg_type = expected_arg_type;
+                }
             }
             ctx.expected_type_id = saved_expected;
             if (a_val == (LLVMOpaqueValue*)0) {

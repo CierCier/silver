@@ -28,6 +28,11 @@ enum Ordinal { First; Second; Third; }
 enum Offset { Minus = -2; Plus = 2; }
 struct OrdinalBox { Ordinal ordinal; }
 struct Extent { i64 start; i32 width; }
+impl Extent {
+    cast i64(Extent self) { return self.start * 100; }
+    i64 offset(&self, i64 by) { return self.start + by; }
+    i64 scaled(i64 value) { return value; }
+}
 struct Window { Extent extent; u8 depth; }
 impl OrdinalBox {
     void set(*self, Ordinal ordinal) { self.ordinal = ordinal; }
@@ -98,6 +103,8 @@ i32 main() {
     assert_eq_i64(1, (i64)window.depth, "positional value converts to u8");
     Extent extents[2] = { { 7, 8 }, { 9, 10 } };
     assert_eq_i64(10, (i64)extents[1].width, "nested braces fill struct array elements");
+    assert_eq_i64(707, extents[0].offset(extents[0]), "method argument runs its cast block");
+    assert_eq_i64(900, Extent.scaled(extents[1]), "static method argument runs its cast block");
     i32 sparse[6] = { [1]=100, [4]=-2 };
     assert_eq_i64(100, (i64)sparse[1], "designated element is set");
     assert_eq_i64(-2, (i64)sparse[4], "designated negative element is set");
