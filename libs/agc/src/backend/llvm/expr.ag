@@ -1291,6 +1291,28 @@ LLVMOpaqueValue* llvm_try_apply_user_cast(LlvmContext* ctx, LLVMOpaqueValue* val
     return result;
 }
 
+/// Converts between an integer and a unit enum, whose value is `{ i16 tag }`:
+/// the integer becomes the tag, or the tag becomes the integer. `is_signed`
+/// says whether the integer side extends with its sign.
+LLVMOpaqueValue* llvm_convert_unit_enum(LlvmContext* ctx, LLVMOpaqueValue* val,
+                                        LLVMOpaqueType* target_ty, bool is_signed) {
+    bool to_enum = LLVMGetTypeKind(target_ty) == (u32)10;
+    LLVMOpaqueValue* integer = to_enum ? val
+        : LLVMBuildExtractValue(ctx.builder, val, 0, "enum_tag");
+    LLVMOpaqueType* integer_ty = to_enum ? LLVMInt16TypeInContext(ctx.ctx) : target_ty;
+    u32 from_width = LLVMGetIntTypeWidth(LLVMTypeOf(integer));
+    u32 to_width = LLVMGetIntTypeWidth(integer_ty);
+    if (from_width > to_width) {
+        integer = LLVMBuildTrunc(ctx.builder, integer, integer_ty, "enum_int_trunc");
+    } else if (from_width < to_width && is_signed) {
+        integer = LLVMBuildSExt(ctx.builder, integer, integer_ty, "enum_int_sext");
+    } else if (from_width < to_width) {
+        integer = LLVMBuildZExt(ctx.builder, integer, integer_ty, "enum_int_zext");
+    }
+    if (!to_enum) { return integer; }
+    return LLVMBuildInsertValue(ctx.builder, LLVMConstNull(target_ty), integer, 0, "enum_from_int");
+}
+
 /// Convert val to the lowered target type so stores never silently truncate
 /// (opaque pointers hide width mismatches from the LLVM verifier). Unknown
 /// or unhandled combinations pass through unchanged (status quo).
@@ -1347,6 +1369,16 @@ LLVMOpaqueValue* llvm_compat_value(LlvmContext* ctx, LLVMOpaqueValue* val,
             return LLVMBuildFPToUI(ctx.builder, val, target_ty, "compat_fptoui");
         }
         return LLVMBuildFPToSI(ctx.builder, val, target_ty, "compat_fptosi");
+    }
+    if (vk == (u32)8 && tk == (u32)10
+        && llvm_type_is_unit_enum(ctx.root, ctx.types, target_type_id)) {
+        return llvm_convert_unit_enum(ctx, val, target_ty,
+            llvm_type_is_signed(ctx.types, source_type_id));
+    }
+    if (vk == (u32)10 && tk == (u32)8
+        && llvm_type_is_unit_enum(ctx.root, ctx.types, source_type_id)) {
+        return llvm_convert_unit_enum(ctx, val, target_ty,
+            llvm_unit_enum_has_negative_tag(ctx.root, ctx.types, source_type_id));
     }
     if (vk == (u32)8 && tk == (u32)12) {
         return LLVMBuildIntToPtr(ctx.builder, val, target_ty, "compat_to_ptr");
@@ -1412,28 +1444,14 @@ void llvm_prepare_call_args(LlvmContext* ctx, LLVMOpaqueType* fn_type,
                 arg_v = llvm_compat_value(ctx, arg_v, source_type, target_types.get(pi));
                 call_args.set(pi, arg_v);
             }
-            if (c_abi && exp_kind == (u32)8 && act_kind == (u32)10
+            if (exp_kind == (u32)8 && act_kind == (u32)10
                 && llvm_type_is_unit_enum(ctx.root, ctx.types, source_type)) {
-                LLVMOpaqueValue* tag = LLVMBuildExtractValue(
-                    ctx.builder, arg_v, 0, "c_enum_arg_tag");
-                LLVMOpaqueType* tag_type = LLVMTypeOf(tag);
-                u32 tag_width = LLVMGetIntTypeWidth(tag_type);
-                u32 c_width = LLVMGetIntTypeWidth(exp_ty);
-                if (tag_width < c_width) {
-                    LLVMOpaqueValue* promoted_tag = (LLVMOpaqueValue*)0;
-                    if (llvm_unit_enum_has_negative_tag(ctx.root, ctx.types, source_type)) {
-                        promoted_tag = LLVMBuildSExt(
-                            ctx.builder, tag, exp_ty, "c_enum_arg_sext");
-                    } else {
-                        promoted_tag = LLVMBuildZExt(
-                            ctx.builder, tag, exp_ty, "c_enum_arg_zext");
-                    }
-                    call_args.set(pi, promoted_tag);
-                } else if (tag_width > c_width) {
-                    call_args.set(pi, LLVMBuildTrunc(ctx.builder, tag, exp_ty, "c_enum_arg_trunc"));
-                } else {
-                    call_args.set(pi, tag);
-                }
+                call_args.set(pi, llvm_convert_unit_enum(ctx, arg_v, exp_ty,
+                    llvm_unit_enum_has_negative_tag(ctx.root, ctx.types, source_type)));
+            } else if (exp_kind == (u32)10 && act_kind == (u32)8 && pi < target_types.len()
+                && llvm_type_is_unit_enum(ctx.root, ctx.types, target_types.get(pi))) {
+                call_args.set(pi, llvm_convert_unit_enum(ctx, arg_v, exp_ty,
+                    llvm_type_is_signed(ctx.types, source_type)));
             } else if (exp_kind == (u32)12 && act_kind == (u32)8) {
                 call_args.set(pi, LLVMBuildIntToPtr(ctx.builder, arg_v, exp_ty, "arg_to_ptr"));
             } else if (exp_kind == (u32)8 && act_kind == (u32)12) {
@@ -6518,7 +6536,10 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             }
             call_args.push(a_val);
             call_arg_types.push(arg_type);
-            call_target_types.push(TYPE_UNKNOWN);
+            // Method arguments are already in parameter form, except an
+            // integer passed to a unit enum, which needs its tag built.
+            call_target_types.push(llvm_type_is_unit_enum(ctx.root, ctx.types, expected_arg_type)
+                ? expected_arg_type : TYPE_UNKNOWN);
             i += 1;
         }
 

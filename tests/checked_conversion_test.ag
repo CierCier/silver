@@ -23,6 +23,18 @@ impl<T: TryFrom<i128>> Converter<T> {
     i64 describe_text<U: Describes<String>>(&self, &U value) { return value.describe(); }
 }
 
+// Unit enums and integers convert implicitly through the enum's tag.
+enum Ordinal { First; Second; Third; }
+enum Offset { Minus = -2; Plus = 2; }
+struct OrdinalBox { Ordinal ordinal; }
+impl OrdinalBox {
+    void set(*self, Ordinal ordinal) { self.ordinal = ordinal; }
+}
+i64 ordinal_code(Ordinal ordinal) { return ordinal; }
+i64 widen(i64 value) { return value; }
+Ordinal ordinal_from(i64 raw) { return raw; }
+i64 offset_code(Offset offset) { return offset; }
+
 i32 main() {
     Result<u8, Error> byte = u8.try_from((i128)255);
     assert_true(byte.unwrap() == (u8)255, "checked byte upper bound");
@@ -65,5 +77,17 @@ i32 main() {
     assert_true(surrogate.is_err(), "surrogates rejected");
     Result<char, Error> invalid = char.try_from((i128)0x110000);
     assert_true(invalid.is_err(), "codepoint overflow rejected");
+
+    u32 raw = 2;
+    assert_eq_i64(2, ordinal_code(raw), "integer argument becomes a unit enum tag");
+    assert_eq_i64(2, widen(Ordinal.Third), "unit enum argument becomes an integer");
+    assert_eq_i64(1, (i64)ordinal_from(1), "returned integer becomes a unit enum");
+    OrdinalBox box = { .ordinal = Ordinal.First };
+    i8 two = 2;
+    box.set(two);
+    assert_eq_i64(2, (i64)box.ordinal, "method argument becomes a unit enum tag");
+    i8 minus = -2;
+    assert_eq_i64(-2, offset_code(minus), "negative integer keeps its sign as a tag");
+    assert_eq_i64(-2, widen(Offset.Minus), "negative tag widens with its sign");
     return done();
 }
