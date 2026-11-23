@@ -1359,6 +1359,12 @@ class NativeLsp(unittest.TestCase):
                  # An implemented trait's default body is an impl method.
                  ('trait Reset { void reset(*self) { } }\nimpl Reset for Counter { }\n'
                   + valid.replace("c.bump(1)", "c.reset()"), []),
+                 # A generic trait's default takes the impl's type arguments.
+                 ('trait Echo<T> { T echo(&self, T x) { return x; } }\nimpl Echo<i32> for Counter { }\n'
+                  + valid.replace("c.bump(1)", "i32 e = c.echo(c.n)"), []),
+                 ('trait Echo<T> { T echo(&self, T x) { return x; } }\nimpl Echo<i32> for Counter { }\n'
+                  + valid.replace("c.bump(1)", 'c.echo("one")'),
+                  ["no overload of method 'echo' on type Counter matches these arguments"]),
                  (valid.replace("return c.n;", "return;"),
                   ["return type mismatch: expected i32, found void"]),
                  (valid, [])]

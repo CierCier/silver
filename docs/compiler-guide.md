@@ -422,7 +422,8 @@ keeps the target's type arguments (`HashMap<K, V>`, `Result<i64, Error>`) and
 pointer layers (`impl Record*`). Codegen binds the same `Self`, so a method may
 return `Self`. Before checking, each `impl Trait for X` receives a copy of every
 trait default method it does not define, so defaults check and build like impl
-methods. All three also see the same modules and JSON impls: `@assert`,
+methods. The copy replaces the trait's type parameters with the impl's
+arguments: `impl Echo<i64> for X` gives `X` an `echo` that takes `i64`. All three also see the same modules and JSON impls: `@assert`,
 the formatting macros, `@json`, `@from_json`, and `#[serialize]` import their
 library module without an `import` line, as in stage0
 ([`collect_implicit_import_names`](../libs/agc/src/frontend/cfg.ag)), and a

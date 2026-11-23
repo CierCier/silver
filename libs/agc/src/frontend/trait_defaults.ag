@@ -15,12 +15,84 @@ SyntaxNode* trait_defaults_block(SyntaxNode* item) {
     return block;
 }
 
+/// Pushes the first and end node of each top-level entry of the `<...>`
+/// list that opens at `less`: `T` and `U` in `<T, U>`, `Vec<u8>` in `<Vec<u8>>`.
+void trait_defaults_entries(SyntaxNode* less, Vec<SyntaxNode*>* bounds) {
+    if (less == (SyntaxNode*)0 || less.kind != NodeKind.Token
+        || less.token_kind != TokenKind.Less) {
+        return;
+    }
+    i64 depth = 1;
+    SyntaxNode* first = less.next_sibling;
+    SyntaxNode* cursor = first;
+    while (cursor != (SyntaxNode*)0 && depth > 0) {
+        if (cursor.kind == NodeKind.Token) {
+            if (cursor.token_kind == TokenKind.Less) { depth += 1; }
+            if (cursor.token_kind == TokenKind.Greater) { depth -= 1; }
+            if (depth == 0 || (depth == 1 && cursor.token_kind == TokenKind.Comma)) {
+                bounds.push(first);
+                bounds.push(cursor);
+                first = cursor.next_sibling;
+            }
+        }
+        cursor = cursor.next_sibling;
+    }
+}
+
+/// Replaces each trait type parameter among the siblings from `first` on,
+/// and in their subtrees, with a copy of the impl's argument for it.
+/// `params` and `args` hold matching entries from `trait_defaults_entries`.
+void trait_defaults_substitute(NodePool* pool, SyntaxNode* parent, SyntaxNode* first,
+                               Vec<SyntaxNode*>* params, Vec<SyntaxNode*>* args) {
+    SyntaxNode* previous = (SyntaxNode*)0;
+    SyntaxNode* cursor = first;
+    while (cursor != (SyntaxNode*)0) {
+        SyntaxNode* next = cursor.next_sibling;
+        i64 k = params.len();
+        bool member = previous != (SyntaxNode*)0 && previous.kind == NodeKind.Token
+            && previous.token_kind == TokenKind.Dot;
+        if (node_is_identifier(cursor) && !member) {
+            k = 0;
+            while (k < params.len() && strcmp(params.get(k).text, cursor.text) != 0) {
+                k += 2;
+            }
+        }
+        if (k < params.len()) {
+            SyntaxNode* holder = pool.create(NodeKind.Type, cursor.span, "");
+            SyntaxNode* token = args.get(k);
+            while (token != args.get(k + 1)) {
+                append_child(holder, lambda_clone_node(pool, token, false));
+                token = token.next_sibling;
+            }
+            if (holder.first_child != (SyntaxNode*)0) {
+                SyntaxNode* last = holder.last_child;
+                lambda_replace_range(parent, cursor, next, holder);
+                cursor = last;
+            }
+        } else if (cursor.kind != NodeKind.Token) {
+            trait_defaults_substitute(pool, cursor, cursor.first_child, params, args);
+        }
+        previous = cursor;
+        cursor = next;
+    }
+}
+
 /// Copies into `impl_item` the default methods of `trait_item` that it does
-/// not declare. A copy keeps the trait's spans and binds `Self` to the impl.
-void trait_defaults_copy(NodePool* pool, SyntaxNode* impl_item, SyntaxNode* trait_item) {
+/// not declare. A copy keeps the trait's spans, binds `Self` to the impl and
+/// the trait's type parameters to the impl's arguments (`impl Echo<i64>`).
+void trait_defaults_copy(NodePool* pool, SyntaxNode* impl_item, SyntaxNode* trait_name,
+                         SyntaxNode* trait_item) {
     SyntaxNode* impl_block = trait_defaults_block(impl_item);
     SyntaxNode* trait_block = trait_defaults_block(trait_item);
     if (impl_block == (SyntaxNode*)0 || trait_block == (SyntaxNode*)0) { return; }
+    Vec<SyntaxNode*> params = Vec<SyntaxNode*>.new();
+    Vec<SyntaxNode*> args = Vec<SyntaxNode*>.new();
+    SyntaxNode* trait_identifier = item_identifier(trait_item);
+    if (trait_identifier != (SyntaxNode*)0) {
+        trait_defaults_entries(trait_identifier.next_sibling, &params);
+        trait_defaults_entries(trait_name.next_sibling, &args);
+    }
+    if (params.len() != args.len()) { params.clear(); }
     SyntaxNode* start = trait_block.first_child;
     SyntaxNode* cursor = start;
     while (cursor != (SyntaxNode*)0) {
@@ -35,7 +107,13 @@ void trait_defaults_copy(NodePool* pool, SyntaxNode* impl_item, SyntaxNode* trai
             if (name != (SyntaxNode*)0) {
                 typecheck_count_block_methods(impl_item, name.text, &declared, &generic);
                 if (declared == 0) {
+                    SyntaxNode* tail = impl_block.last_child;
                     lambda_clone_range(pool, impl_block, start, next.next_sibling);
+                    if (params.len() > 0) {
+                        trait_defaults_substitute(pool, impl_block,
+                            tail == (SyntaxNode*)0 ? impl_block.first_child : tail.next_sibling,
+                            &params, &args);
+                    }
                 }
             }
             next = next.next_sibling;
@@ -43,6 +121,8 @@ void trait_defaults_copy(NodePool* pool, SyntaxNode* impl_item, SyntaxNode* trai
         }
         cursor = next;
     }
+    args.drop();
+    params.drop();
 }
 
 /// Gives every trait impl in `tree` the trait's default methods it lacks.
@@ -54,7 +134,7 @@ void materialize_trait_defaults(SyntaxTree* tree, NodePool* pool) {
             SyntaxNode* trait_item = trait_name == (SyntaxNode*)0 ? (SyntaxNode*)0
                 : find_item_by_name(tree.root, NodeKind.Trait, trait_name.text);
             if (trait_item != (SyntaxNode*)0) {
-                trait_defaults_copy(pool, item, trait_item);
+                trait_defaults_copy(pool, item, trait_name, trait_item);
             }
         }
         item = item.next_sibling;
