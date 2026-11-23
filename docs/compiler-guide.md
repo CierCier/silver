@@ -427,7 +427,7 @@ The checker rejects these invalid core forms with a source diagnostic:
 | Literals | A literal of the wrong kind for its declared type, such as `str s = 42;`. |
 | Calls | Unknown functions, wrong argument counts, and argument types that do not convert. |
 | Methods | On a declared struct or enum, a name that neither its impls nor a blanket impl declares, a call that only a trait default would answer (codegen emits only impl methods), and arguments that fit no non-generic overload. |
-| Generic calls | Arguments and results that conflict with explicit type arguments or with type arguments inferred from non-literal arguments. |
+| Generic calls | Explicit type argument lists of the wrong length, and arguments and results that conflict with explicit type arguments or with type arguments inferred from non-literal arguments. |
 | Aggregates | Unknown fields in struct literals and field access, and field or array element values that do not convert. |
 | Assignments | Values that do not convert to the target, and undeclared targets. |
 | Returns | Values that do not convert to the return type, and `return;` in a function with a resolved non-void return type. |
@@ -438,7 +438,8 @@ integers, `char`, `bool`, and other unit enums. Array and tuple elements take
 these conversions but not a user `cast` block, because element stores do not
 run one. A user `cast` block also converts
 implicitly, and `&r` of a reference `r` reborrows through it. Overload selection
-does not count `bool` as a number, so `f(1)` still picks `f(i64)` over `f(bool)`.
+ranks a scalar or `cast` conversion below a numeric match, so `f(1)` picks
+`f(i64)` over `f(bool)`, and `f(bool)` over `f(str)`.
 
 A value passed to an immutable `&T` parameter is borrowed implicitly. In
 overload selection an implicit borrow costs two conversions, as in stage0, so
@@ -447,8 +448,8 @@ needs `&mut place`. In `launch f(x)`, the scoped-launch pass reports a bare
 local or parameter for a reference parameter with its own diagnostic. A
 `[a, b]` literal fills a tuple type in a declaration, an assignment, a
 `return`, or an argument, so `[i64, i64] p = [1, 2];` is accepted. Generic
-named types also compare their type arguments, so a `Cell<str>` is not a
-`Cell<i64>`.
+named types require identical type arguments, so neither a `Cell<str>` nor a
+`Cell<i32>` is a `Cell<i64>`: codegen passes the struct unconverted.
 
 The checker does not judge a type it cannot resolve. It accepts an unknown type
 or an unbound type parameter wherever a type is expected. A generic callee takes

@@ -189,6 +189,9 @@ bool typecheck_same_type_arg(TypeTable* types, u32 expected, u32 actual, i64 dep
     if (depth > 16 || exp_entry.kind != act_entry.kind || exp_entry.count != act_entry.count) {
         return false;
     }
+    if (exp_entry.kind == TypeKind.Reference && exp_entry.is_mut != act_entry.is_mut) {
+        return false;
+    }
     if (exp_entry.kind == TypeKind.Pointer || exp_entry.kind == TypeKind.Reference
         || exp_entry.kind == TypeKind.Array) {
         return typecheck_same_type_arg(types, exp_entry.inner, act_entry.inner, depth + 1);
@@ -1178,12 +1181,22 @@ SyntaxNode* typecheck_resolve_free_function(AstPool* pool, TypeTable* types,
                 bool literal = expr_is_literal(pool, arg_id);
                 bool direct = typecheck_call_argument_matches(types, expected, actual, literal);
                 bool tuple = !direct && typecheck_tuple_literal_fits(pool, root, types, expected, arg_id);
-                if (!direct && !tuple && !typecheck_implicit_borrow(types, expected, actual, literal)) {
+                bool converts = !direct && !tuple
+                    && typecheck_implicit_cast(root, types, actual, expected);
+                if (!direct && !tuple && !converts
+                    && !typecheck_implicit_borrow(types, expected, actual, literal)) {
                     matches = false;
                     break;
                 }
-                // An implicit borrow ranks below a conversion of the same argument.
-                if (!direct && !tuple) { score += 2; } else if (expected != actual) { score += 1; }
+                // Per argument: a matching type or tuple fill costs 2, a scalar
+                // or `cast` conversion (`1` to `bool`) 3, an implicit borrow 4.
+                if (converts) {
+                    score += 3;
+                } else if (!direct && !tuple) {
+                    score += 4;
+                } else if (expected != actual) {
+                    score += 2;
+                }
                 p += 1;
             }
             if (matches) {
@@ -3518,6 +3531,14 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 CalleeTypeArgs type_args = typecheck_callee_type_args(
                     pool, types, callee_fn, expr, &params, &arg_types);
                 if (generic_callee) { inferred = type_args.resolve(types, ret_type); }
+                // A mismatched count would otherwise fall back to inference
+                // and ignore the written type arguments.
+                if (expr.generic_args_count > 0
+                    && (i64)expr.generic_args_count != type_args.params.len()) {
+                    diagnostics.error(expr.span, type_argument_count_mismatch(callee_name,
+                        type_args.params.len(), (i64)expr.generic_args_count));
+                    *ok = false;
+                }
                 bool variadic = params.len() > 0
                     && binding_is_variadic_parameter(params.get_ptr(params.len() - 1));
                 i64 fixed_count = params.len() - (variadic ? 1 : 0);

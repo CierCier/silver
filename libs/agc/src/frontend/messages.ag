@@ -76,6 +76,12 @@ String lambda_generic_scope() {
     return String.from_str("lambdas inside generic functions or impls are not supported yet");
 }
 
+/// Diagnostic text: "'{}' takes {} type arguments, given {}". Returns an
+/// owned string.
+String type_argument_count_mismatch(str name, i64 expected, i64 given) {
+    return @format("'{}' takes {} type arguments, given {}", name, expected, given);
+}
+
 /// Diagnostic text: "lambda parameter count mismatch: expected {}, found {}".
 /// Returns an owned string.
 String lambda_parameter_count(i64 expected, i64 actual) {
