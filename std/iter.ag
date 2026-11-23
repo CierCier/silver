@@ -247,60 +247,6 @@ impl<I, T, U> Iterator for FilterMapIter<I, T, U> {
     }
 }
 
-/// Maps each outer element to an inner iterator with `f` and yields the inner
-/// elements in order.
-struct FlatMapIter<I, J, T, U> {
-    I outer;
-    J current;
-    bool has_current;
-    J (T) f;
-}
-
-impl<I, J, T, U> Iterator for FlatMapIter<I, J, T, U> {
-    type Item = U;
-    Optional<U> next(*self) {
-        while (true) {
-            if (self.has_current) {
-                Optional<U> o = self.current.next();
-                if (o.is_some()) { return o; }
-                self.has_current = false;
-            }
-            Optional<T> outer_next = self.outer.next();
-            if (outer_next.is_none()) { return None; }
-            T v = outer_next.unwrap();
-            J (T) ff = self.f;
-            self.current = ff(v);
-            self.has_current = true;
-        }
-        return None;
-    }
-}
-
-/// Yields the elements of each inner iterator produced by the outer one.
-struct FlattenIter<I, J, T> {
-    I outer;
-    J current;
-    bool has_current;
-}
-
-impl<I, J, T> Iterator for FlattenIter<I, J, T> {
-    type Item = T;
-    Optional<T> next(*self) {
-        while (true) {
-            if (self.has_current) {
-                Optional<T> o = self.current.next();
-                if (o.is_some()) { return o; }
-                self.has_current = false;
-            }
-            Optional<J> outer_next = self.outer.next();
-            if (outer_next.is_none()) { return None; }
-            self.current = outer_next.unwrap();
-            self.has_current = true;
-        }
-        return None;
-    }
-}
-
 /// Advances `iter` to exhaustion and returns how many elements it yielded.
 i64 iter_count<I, T>(I* iter) {
     i64 c = 0;
@@ -512,21 +458,4 @@ RevIter<T> iter_rev<T>(T* data, i64 len) {
     r.len = len;
     r.idx = 0;
     return r;
-}
-
-/// Wraps a copy of `*outer` in a flat-map adapter using `f`.
-FlatMapIter<Outer, Inner, T, U> iter_flat_map<Outer, Inner, T, U>(Outer* outer, Inner (T) f) {
-    FlatMapIter<Outer, Inner, T, U> fm;
-    fm.outer = *outer;
-    fm.has_current = false;
-    fm.f = f;
-    return fm;
-}
-
-/// Wraps a copy of `*outer` in a flattening adapter.
-FlattenIter<Outer, Inner, T> iter_flatten<Outer, Inner, T>(Outer* outer) {
-    FlattenIter<Outer, Inner, T> fl;
-    fl.outer = *outer;
-    fl.has_current = false;
-    return fl;
 }
