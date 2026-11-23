@@ -778,6 +778,19 @@ class NativeLsp(unittest.TestCase):
             report = session.result("textDocument/diagnostic", {"textDocument": {"uri": uri}})
             self.assertEqual([item["message"] for item in report["items"]], expected, name)
 
+    def test_returned_pointee_places_and_unrelated_c_results_are_not_local_escapes(self):
+        text = ('extern "C" i64* pick(i64* base, i64** slots, i64 count);\n'
+                'extern "C" i64* same(i64* value);\n'
+                "struct Doc { i64 count; }\n"
+                "i64* count_of(Doc* doc) { return &doc.count; }\n"
+                "i64* first(i64* base) {\n i64* slot = base;\n return pick(base, &slot, 1);\n}\n"
+                "i64* leak_call() {\n i64 local = 3;\n return same(&local);\n}\n"
+                "Doc** leak_slot(Doc* doc) { return &doc; }\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual({item["range"]["start"]["line"] for item in diagnostics}, {10, 12})
+        self.assertTrue(all("does not outlive" in item["message"] for item in diagnostics))
+
     def test_shared_values_and_lock_blocks_resolve_to_user_declarations(self):
         repo = Path(__file__).resolve().parent.parent
         text = ("import std.sync;\n"

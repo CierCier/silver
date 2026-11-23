@@ -477,6 +477,19 @@ bool borrow_in_return_expression(SyntaxNode* node) {
     return false;
 }
 
+/// Returns true when the place at leaf `index` projects through a raw
+/// pointer (`doc.field`, `p[i]` for a `Doc* doc` or `i64* p`): its storage is
+/// the pointee, not the local that holds the pointer.
+bool borrow_place_behind_pointer(Vec<Binding>* bindings, Vec<SyntaxNode*>* leaves, i64 index) {
+    if (index + 1 >= leaves.len()) { return false; }
+    SyntaxNode* next = leaves.get(index + 1);
+    if (!borrow_text_equals(next.text, ".") && !borrow_text_equals(next.text, "[")) {
+        return false;
+    }
+    Binding* binding = visible_binding(bindings, leaves.get(index).text, leaves.get(index));
+    return binding != (Binding*)0 && binding.declared_type.kind == ProjectionTypeKind.Pointer;
+}
+
 /// Reports returning a reference to local `name` that does not outlive
 /// `function`.
 void report_escape(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbols,
@@ -978,7 +991,7 @@ bool borrow_call_returns_argument(Vec<BorrowReturnOrigin>* origins,
             if (matches) { return true; }
         }
     }
-    return item_is_c_extern_function(root, call.text);
+    return item_c_extern_may_return_argument(root, call.text, argument_index);
 }
 
 /// Follows a call that forwards a borrowed argument through another call,
@@ -2865,7 +2878,8 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
                 if (j < leaves.len() && borrow_text_equals(leaves.get(j).text, "mut")) {
                     j += 1;
                 }
-                if (j < leaves.len() && leaves.get(j).token_kind == TokenKind.Identifier) {
+                if (j < leaves.len() && leaves.get(j).token_kind == TokenKind.Identifier
+                    && !borrow_place_behind_pointer(&bindings, &leaves, j)) {
                     report_escape(analyzer, tree, symbols, function, leaves.get(j).text, leaves.get(j).span);
                 }
             } else if (borrow_function_returns_indirect(function, symbols)
@@ -2901,7 +2915,8 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
                 if (j < leaves.len() && leaves.get(j).token_kind == TokenKind.Identifier) {
                     str name = leaves.get(j).text;
                     if (borrow_in_return_expression(node)
-                        && borrow_function_returns_indirect(function, symbols)) {
+                        && borrow_function_returns_indirect(function, symbols)
+                        && !borrow_place_behind_pointer(&bindings, &leaves, j)) {
                         i64 return_argument_index = 0;
                         SyntaxNode* return_call = borrow_call_for_argument(
                             leaves.get(j), &return_argument_index);

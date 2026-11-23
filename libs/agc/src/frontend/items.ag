@@ -401,6 +401,74 @@ SyntaxNode* item_c_extern_function_parameters(SyntaxNode* root, str function_nam
     return signature.parameter_list;
 }
 
+/// Appends the type tokens in `[start, end)` without attributes or the
+/// `const` and `volatile` qualifiers.
+void item_append_extern_type(SyntaxNode* start, SyntaxNode* end, String* out) {
+    SyntaxNode* part = start;
+    while (part != (SyntaxNode*)0 && part != end) {
+        SyntaxNode* next = item_skip_extern_attribute(part);
+        if (next != part) {
+            part = next;
+            continue;
+        }
+        if (!(part.kind == NodeKind.Token && (part.token_kind == TokenKind.Const
+                                              || part.token_kind == TokenKind.Volatile))) {
+            append_node_tokens(part, out);
+        }
+        part = part.next_sibling;
+    }
+}
+
+/// Returns true when pointer type `text` points at storage without interior
+/// places: another pointer or a primitive scalar.
+bool item_is_scalar_pointer_text(String* text) {
+    if (!text.ends_with("*")) { return false; }
+    return text.ends_with("**") || text.equals("i8*") || text.equals("i16*")
+        || text.equals("i32*") || text.equals("i64*") || text.equals("u8*")
+        || text.equals("u16*") || text.equals("u32*") || text.equals("u64*")
+        || text.equals("f32*") || text.equals("f64*") || text.equals("bool*")
+        || text.equals("char*") || text.equals("void*");
+}
+
+/// Returns true when C extern `function_name` may return a pointer into the
+/// storage that argument `index` points at. Behind a scalar pointer, only a
+/// result of the same type or an untyped byte pointer can: so
+/// `LLVMBuildGEP2(..., &indices, ...)` returning a value pointer does not
+/// borrow `indices`. Other arguments may always be returned.
+bool item_c_extern_may_return_argument(SyntaxNode* root, str function_name, i64 index) {
+    ExternFunctionSignature signature = item_find_c_extern_function(root, function_name);
+    if (signature.parameter_list == (SyntaxNode*)0) { return false; }
+    SyntaxNode* start = signature.parameter_list.first_child;
+    i64 position = 0;
+    while (start != (SyntaxNode*)0 && position < index) {
+        if (start.kind == NodeKind.Token && start.token_kind == TokenKind.Comma) { position += 1; }
+        start = start.next_sibling;
+    }
+    SyntaxNode* end = start;
+    SyntaxNode* last = (SyntaxNode*)0;
+    while (end != (SyntaxNode*)0
+           && !(end.kind == NodeKind.Token && end.token_kind == TokenKind.Comma)) {
+        last = end;
+        end = end.next_sibling;
+    }
+    if (last == (SyntaxNode*)0) { return true; }
+    // A trailing identifier after the type names the parameter.
+    if (last != start && last.kind == NodeKind.Token
+        && last.token_kind == TokenKind.Identifier) {
+        end = last;
+    }
+    String parameter = String.new();
+    item_append_extern_type(start, end, &parameter);
+    String result = String.new();
+    item_append_extern_type(signature.signature_start, signature.function_name, &result);
+    bool may_return = !item_is_scalar_pointer_text(&parameter)
+        || parameter.equals(result.to_str())
+        || result.equals("void*") || result.equals("i8*") || result.equals("u8*");
+    parameter.drop();
+    result.drop();
+    return may_return;
+}
+
 /// Returns true when a parameter list ends with `...`.
 bool item_node_has_variadic_ellipsis(SyntaxNode* parameters) {
     if (parameters == (SyntaxNode*)0) { return false; }
