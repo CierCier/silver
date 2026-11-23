@@ -382,6 +382,8 @@ impl DocumentStore {
                     names.push(doc.analysis.imports.get_ptr(j).clone());
                     j += 1;
                 }
+                // A closed document's syntax may be compacted away.
+                doc.ensure_syntax();
                 collect_implicit_import_names(doc.analysis.tree.root, &names);
                 j = 0;
                 while (j < names.len()) {

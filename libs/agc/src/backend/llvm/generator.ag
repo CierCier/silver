@@ -184,11 +184,20 @@ bool llvm_has_prior_function_body(TypeTable* types, SyntaxNode* root,
     return false;
 }
 
+/// Returns the type an explicit `Self` parameter takes in `impl_item`: the
+/// full target of a pointer impl (`Record*` in `impl Record*`), else
+/// unknown, so `Self` names the target struct.
+u32 llvm_exact_self_type(TypeTable* types, SyntaxNode* impl_item) {
+    return impl_target_pointer_depth(impl_item) > 0
+        ? typecheck_impl_self_type(types, impl_item) : TYPE_UNKNOWN;
+}
+
 /// Returns the LLVM parameter types of a function (receiver included),
-/// using C ABI lowering when `c_abi` is set.
+/// using C ABI lowering when `c_abi` is set. A `Self` parameter takes
+/// `exact_self_type` when known (see `llvm_exact_self_type`).
 Vec<LLVMOpaqueType*> llvm_param_types(LlvmContext* ctx, TypeTable* types,
                                       Vec<Binding>* params, str self_type_name,
-                                      str _function_name, bool c_abi) {
+                                      u32 exact_self_type, str _function_name, bool c_abi) {
     Vec<LLVMOpaqueType*> param_types = Vec<LLVMOpaqueType*>.new();
     i64 p = 0;
     while (p < params.len()) {
@@ -196,10 +205,11 @@ Vec<LLVMOpaqueType*> llvm_param_types(LlvmContext* ctx, TypeTable* types,
         bool exact_function_type = binding_has_function_type(param);
         String dec_str = binding_parameter_type_text(param);
         str type_str = dec_str.to_str();
+        bool exact_self = exact_self_type != TYPE_UNKNOWN && strcmp(type_str, "Self") == 0;
         if (self_type_name != (str)0 && (strcmp(type_str, "Self") == 0 || (strcmp(param.name, "self") == 0 && strlen(type_str) == 0))) {
             type_str = self_type_name;
         }
-        u32 param_type_id = types.parse_type_name(type_str);
+        u32 param_type_id = exact_self ? exact_self_type : types.parse_type_name(type_str);
         if (binding_is_variadic_parameter(param)
             || param.declared_type.kind == ProjectionTypeKind.Array) {
             param_type_id = types.resolve_subst(typecheck_parameter_type_id(types, param));
@@ -650,13 +660,23 @@ LLVMOpaqueValue* llvm_const_pointer_literal(LLVMOpaqueContext* raw_ctx,
 
 /// Lower one aggregate field or array element to a constant. Returns null when
 /// the initializer is not a supported compile-time literal.
-LLVMOpaqueValue* llvm_const_literal_value(LLVMOpaqueContext* raw_ctx,
+LLVMOpaqueValue* llvm_const_literal_value(LlvmContext* ctx,
     LLVMOpaqueModule* module, TypeTable* types, u32 target_type_id,
     str global_prefix, SyntaxNode* val) {
     if (val == (SyntaxNode*)0) {
         return (LLVMOpaqueValue*)0;
     }
+    LLVMOpaqueContext* raw_ctx = ctx.ctx;
     TypeEntry* target_entry = types.get(target_type_id);
+    if (val.kind == NodeKind.Block) {
+        if (target_entry.kind == TypeKind.Array) {
+            SyntaxNode* nested = val.first_child;
+            return llvm_const_array_from_initializer(ctx, module, types, target_type_id,
+                global_prefix, &nested, true);
+        }
+        return llvm_const_struct_from_initializer(ctx, module, types, target_type_id,
+            global_prefix, val);
+    }
     LLVMOpaqueType* field_ty = llvm_lower_type(raw_ctx, types, target_type_id);
     bool is_ptr = target_entry.kind == TypeKind.Pointer || target_entry.kind == TypeKind.Reference;
     if (val.kind == NodeKind.Token && val.token_kind == TokenKind.Minus
@@ -745,7 +765,7 @@ LLVMOpaqueValue* llvm_const_literal_value(LLVMOpaqueContext* raw_ctx,
         }
         SyntaxNode* only = val.first_child;
         if (only != (SyntaxNode*)0 && only.next_sibling == (SyntaxNode*)0) {
-            return llvm_const_literal_value(raw_ctx, module, types, target_type_id, global_prefix, only);
+            return llvm_const_literal_value(ctx, module, types, target_type_id, global_prefix, only);
         }
     }
     return (LLVMOpaqueValue*)0;
@@ -770,11 +790,13 @@ void llvm_const_skip_initializer_value(SyntaxNode** cursor) {
     *cursor = next;
 }
 
-/// Builds a constant array from a `{ ... }` initializer at `*cursor`.
-/// With `bounded`, extra elements are an error; missing ones are zero.
-LLVMOpaqueValue* llvm_const_array_from_initializer(LLVMOpaqueContext* raw_ctx,
+/// Builds a constant array from a `{ ... }` initializer at `*cursor`,
+/// with `[index] = value` designators. With `bounded`, extra elements are
+/// an error; missing ones are zero.
+LLVMOpaqueValue* llvm_const_array_from_initializer(LlvmContext* ctx,
     LLVMOpaqueModule* module, TypeTable* types, u32 array_type_id,
     str global_prefix, SyntaxNode** cursor, bool bounded) {
+    LLVMOpaqueContext* raw_ctx = ctx.ctx;
     TypeEntry* array_entry = types.get(array_type_id);
     if (array_entry.kind != TypeKind.Array || array_entry.count < 0) {
         return (LLVMOpaqueValue*)0;
@@ -783,17 +805,38 @@ LLVMOpaqueValue* llvm_const_array_from_initializer(LLVMOpaqueContext* raw_ctx,
     i64 elem_count = array_entry.count;
     LLVMOpaqueType* elem_ty = llvm_lower_type(raw_ctx, types, elem_type_id);
     Vec<LLVMOpaqueValue*> values = Vec<LLVMOpaqueValue*>.with_capacity(elem_count);
+    while (values.len() < elem_count) {
+        values.push(LLVMConstNull(elem_ty));
+    }
     bool const_ok = true;
     i64 index = 0;
-    while (index < elem_count && const_ok) {
+    while (const_ok) {
         while (*cursor != (SyntaxNode*)0 && (*cursor).kind == NodeKind.Token
             && (*cursor).token_kind == TokenKind.Comma) {
             *cursor = (*cursor).next_sibling;
         }
-        if (*cursor == (SyntaxNode*)0) {
-            values.push(LLVMConstNull(elem_ty));
-            index += 1;
-            continue;
+        if (*cursor == (SyntaxNode*)0) { break; }
+        // `[i] = value` moves the index, as in C. Without braces, a nested
+        // array ends at its length or at a designator of the enclosing array.
+        SyntaxNode* designator = *cursor;
+        bool designated = designator.kind == NodeKind.Bracket
+            && designator.next_sibling != (SyntaxNode*)0
+            && designator.next_sibling.kind == NodeKind.Token
+            && designator.next_sibling.token_kind == TokenKind.Assign;
+        if (!bounded && (designated || index >= elem_count)) { break; }
+        if (designated) {
+            SyntaxNode* literal = designator.first_child;
+            if (literal == (SyntaxNode*)0 || literal.kind != NodeKind.Token
+                || literal.token_kind != TokenKind.IntLiteral) {
+                const_ok = false;
+                break;
+            }
+            index = parse_int_literal(literal.text);
+            *cursor = designator.next_sibling.next_sibling;
+        }
+        if (index < 0 || index >= elem_count || *cursor == (SyntaxNode*)0) {
+            const_ok = false;
+            break;
         }
 
         String element_prefix = llvm_const_global_literal_prefix(global_prefix, "array", index);
@@ -803,15 +846,15 @@ LLVMOpaqueValue* llvm_const_array_from_initializer(LLVMOpaqueContext* raw_ctx,
             if ((*cursor).kind == NodeKind.Block) {
                 SyntaxNode* block = *cursor;
                 SyntaxNode* nested_cursor = block.first_child;
-                value = llvm_const_array_from_initializer(raw_ctx, module, types,
+                value = llvm_const_array_from_initializer(ctx, module, types,
                     elem_type_id, element_prefix.to_str(), &nested_cursor, true);
                 *cursor = block.next_sibling;
             } else {
-                value = llvm_const_array_from_initializer(raw_ctx, module, types,
+                value = llvm_const_array_from_initializer(ctx, module, types,
                     elem_type_id, element_prefix.to_str(), cursor, false);
             }
         } else {
-            value = llvm_const_literal_value(raw_ctx, module, types, elem_type_id,
+            value = llvm_const_literal_value(ctx, module, types, elem_type_id,
                 element_prefix.to_str(), *cursor);
             llvm_const_skip_initializer_value(cursor);
         }
@@ -819,24 +862,94 @@ LLVMOpaqueValue* llvm_const_array_from_initializer(LLVMOpaqueContext* raw_ctx,
         if (value == (LLVMOpaqueValue*)0) {
             const_ok = false;
         } else {
-            values.push(value);
+            values.set(index, value);
         }
         index += 1;
     }
-    while (*cursor != (SyntaxNode*)0 && (*cursor).kind == NodeKind.Token
-        && (*cursor).token_kind == TokenKind.Comma) {
-        *cursor = (*cursor).next_sibling;
-    }
-    if (bounded && *cursor != (SyntaxNode*)0) { const_ok = false; }
 
     LLVMOpaqueValue* result = (LLVMOpaqueValue*)0;
     if (const_ok) {
-        while (values.len() < elem_count) {
-            values.push(LLVMConstNull(elem_ty));
-        }
         result = LLVMConstArray2(elem_ty, values.data, (u64)elem_count);
     }
     values.drop();
+    return result;
+}
+
+/// Builds a constant struct of named type `type_id` from the `{ ... }`
+/// initializer `block`: `.field = literal` entries, or positional entries in
+/// field order. Missing fields are zero. Returns null when an entry is not a
+/// supported literal or a positional entry has no field.
+LLVMOpaqueValue* llvm_const_struct_from_initializer(LlvmContext* ctx,
+    LLVMOpaqueModule* module, TypeTable* types, u32 type_id,
+    str global_prefix, SyntaxNode* block) {
+    TypeEntry* entry = types.get(type_id);
+    if (entry.kind != TypeKind.Named) { return (LLVMOpaqueValue*)0; }
+    LlvmStructDef* def = ctx.find_struct_by_str(types.names.get(entry.name_id));
+    if (def == (LlvmStructDef*)0) { return (LLVMOpaqueValue*)0; }
+    bool designated = false;
+    SyntaxNode* scan = block.first_child;
+    while (scan != (SyntaxNode*)0 && !designated) {
+        designated = scan.kind == NodeKind.Token && strcmp(scan.text, ".") == 0
+            && scan.next_sibling != (SyntaxNode*)0
+            && scan.next_sibling.next_sibling != (SyntaxNode*)0
+            && strcmp(scan.next_sibling.next_sibling.text, "=") == 0;
+        scan = scan.next_sibling;
+    }
+    Vec<LLVMOpaqueValue*> field_vals = Vec<LLVMOpaqueValue*>.new();
+    bool const_ok = true;
+    SyntaxNode* positional = block.first_child;
+    i64 fi = 0;
+    while (fi < def.fields.len() && const_ok) {
+        LlvmFieldInfo* field = def.fields.get_ptr(fi);
+        SyntaxNode* value_node = (SyntaxNode*)0;
+        if (designated) {
+            str field_name = ctx.names.get(field.name_id);
+            SyntaxNode* cur = block.first_child;
+            while (cur != (SyntaxNode*)0 && value_node == (SyntaxNode*)0) {
+                if (cur.kind == NodeKind.Token && strcmp(cur.text, ".") == 0
+                    && cur.next_sibling != (SyntaxNode*)0
+                    && strcmp(cur.next_sibling.text, field_name) == 0
+                    && cur.next_sibling.next_sibling != (SyntaxNode*)0
+                    && strcmp(cur.next_sibling.next_sibling.text, "=") == 0) {
+                    value_node = cur.next_sibling.next_sibling.next_sibling;
+                }
+                cur = cur.next_sibling;
+            }
+        } else {
+            while (positional != (SyntaxNode*)0 && positional.kind == NodeKind.Token
+                && positional.token_kind == TokenKind.Comma) {
+                positional = positional.next_sibling;
+            }
+            value_node = positional;
+            llvm_const_skip_initializer_value(&positional);
+        }
+        LLVMOpaqueValue* field_val = (LLVMOpaqueValue*)0;
+        if (value_node == (SyntaxNode*)0) {
+            field_val = LLVMConstNull(llvm_lower_type(ctx.ctx, types, field.type_id));
+        } else {
+            String field_prefix = llvm_const_global_literal_prefix(global_prefix, "field", fi);
+            field_val = llvm_const_literal_value(ctx, module, types, field.type_id,
+                field_prefix.to_str(), value_node);
+            field_prefix.drop();
+        }
+        if (field_val == (LLVMOpaqueValue*)0) {
+            const_ok = false;
+        } else {
+            field_vals.push(field_val);
+        }
+        fi += 1;
+    }
+    while (positional != (SyntaxNode*)0 && positional.kind == NodeKind.Token
+        && positional.token_kind == TokenKind.Comma) {
+        positional = positional.next_sibling;
+    }
+    if (!designated && positional != (SyntaxNode*)0) { const_ok = false; }
+    LLVMOpaqueValue* result = (LLVMOpaqueValue*)0;
+    if (const_ok) {
+        result = LLVMConstNamedStruct(llvm_lower_type(ctx.ctx, types, type_id),
+            field_vals.data, (u32)field_vals.len());
+    }
+    field_vals.drop();
     return result;
 }
 
@@ -989,7 +1102,7 @@ void llvm_bt_record_args(LLVMOpaqueContext* ctx, LLVMOpaqueModule* module,
 void llvm_bt_record_external_function(LlvmContext* ctx, TypeTable* types,
                                       LLVMTargetDataRef* target_data,
                                       Span span, SyntaxNode* params_node,
-                                      str self_type_name,
+                                      str self_type_name, u32 exact_self_type,
                                       LLVMOpaqueValue* fn_val, str function_name,
                                       Vec<String>* source_paths,
                                       Vec<LLVMOpaqueValue*>* function_records,
@@ -1000,7 +1113,7 @@ void llvm_bt_record_external_function(LlvmContext* ctx, TypeTable* types,
     Vec<Binding> params = Vec<Binding>.new();
     collect_parameter_bindings(params_node, &params);
     Vec<LLVMOpaqueType*> param_types = llvm_param_types(
-        ctx, types, &params, self_type_name, function_name, false);
+        ctx, types, &params, self_type_name, exact_self_type, function_name, false);
     Vec<LLVMOpaqueValue*> arg_records = Vec<LLVMOpaqueValue*>.new();
     LLVMOpaqueType* i64_type = LLVMInt64TypeInContext(ctx.ctx);
     i64 i = 0;
@@ -1129,7 +1242,8 @@ void llvm_bt_record_imported_methods(LlvmContext* ctx, TypeTable* types,
                 emitted_name.to_str());
             if (fn_val != (LLVMOpaqueValue*)0) {
                 llvm_bt_record_external_function(ctx, types, target_data,
-                    cursor.span, params_node, struct_name, fn_val,
+                    cursor.span, params_node, struct_name,
+                    llvm_exact_self_type(types, impl_item), fn_val,
                     emitted_name.to_str(), source_paths, function_records,
                     arg_function_records);
             }
@@ -1449,7 +1563,7 @@ impl LlvmGenerator {
                     Vec<Binding> params = Vec<Binding>.new();
                     collect_parameter_bindings(binding_function_parameters(item), &params);
                     Vec<LLVMOpaqueType*> param_types = llvm_param_types(
-                        &ctx, types, &params, (str)0, fn_name.to_str(),
+                        &ctx, types, &params, (str)0, TYPE_UNKNOWN, fn_name.to_str(),
                         false);
                     LLVMOpaqueType* fn_type = LLVMFunctionType(ret_llvm_type, param_types.data, (u32)param_types.len(), 0);
                     if (LLVMGetNamedFunction(self.module, fn_name.to_str()) == (LLVMOpaqueValue*)0) {
@@ -1585,6 +1699,7 @@ impl LlvmGenerator {
                                     collect_parameter_bindings(params_node, &params);
                                     Vec<LLVMOpaqueType*> param_types = llvm_param_types(
                                         &ctx, types, &params, struct_name,
+                                        llvm_exact_self_type(types, item),
                                         mangled.to_str(), false);
                                     LLVMOpaqueType* fn_type = LLVMFunctionType(ret_llvm_type, param_types.data, (u32)param_types.len(), 0);
                                     if (LLVMGetNamedFunction(self.module, mangled.to_str()) == (LLVMOpaqueValue*)0) {
@@ -1681,7 +1796,7 @@ impl LlvmGenerator {
                             Vec<Binding> params = Vec<Binding>.new();
                             collect_parameter_bindings(params_node, &params);
                             Vec<LLVMOpaqueType*> param_types = llvm_param_types(
-                                &ctx, types, &params, (str)0, fn_name,
+                                &ctx, types, &params, (str)0, TYPE_UNKNOWN, fn_name,
                                 c_abi);
                             bool variadic = c_abi
                                 && item_c_extern_function_is_variadic(tree.root, fn_name);
@@ -1804,7 +1919,7 @@ impl LlvmGenerator {
                             // `(5)`. The old code skipped the parens and read
                             // the raw literal, producing `ptr 0` for pointer
                             // casts (verify failure). Lower properly instead.
-                            g_init = llvm_const_literal_value(self.ctx, self.module, types,
+                            g_init = llvm_const_literal_value(&ctx, self.module, types,
                                 g_type_id, g_name, init_node);
                             if (g_init == (LLVMOpaqueValue*)0) {
                                 ctx.note_unresolved("global-init", g_name);
@@ -1854,66 +1969,20 @@ impl LlvmGenerator {
                                 ctx.note_unresolved("global-init", g_name);
                             }
                         } else if (init_node.kind == NodeKind.Block) {
-                            // Struct literal: { .field = lit, ... }. Build one
-                            // constant per struct field in declaration order;
-                            // missing fields zero-fill. Array literal:
-                            // { lit, ... } with exact element count.
+                            // Struct literal: `{ .field = lit, ... }` or
+                            // positional entries. Array literal: `{ lit, ... }`
+                            // with at most the declared element count.
                             // Non-literal values fail closed via note_unresolved.
                             TypeEntry* g_entry = ctx.types.get(g_type_id);
                             if (g_entry.kind == TypeKind.Named) {
-                                str g_type_name = types.names.get(g_entry.name_id);
-                                LlvmStructDef* def = ctx.find_struct_by_str(g_type_name);
-                                if (def != (LlvmStructDef*)0) {
-                                    Vec<LLVMOpaqueValue*> field_vals = Vec<LLVMOpaqueValue*>.new();
-                                    bool const_ok = true;
-                                    i64 fi = 0;
-                                    while (fi < def.fields.len() && const_ok) {
-                                        LlvmFieldInfo* field = def.fields.get_ptr(fi);
-                                        str field_name = ctx.names.get(field.name_id);
-                                        SyntaxNode* cur = init_node.first_child;
-                                        LLVMOpaqueValue* field_val = (LLVMOpaqueValue*)0;
-                                        bool found_field = false;
-                                        while (cur != (SyntaxNode*)0 && !found_field) {
-                                            if (cur.kind == NodeKind.Token && strcmp(cur.text, ".") == 0
-                                                && cur.next_sibling != (SyntaxNode*)0
-                                                && cur.next_sibling.kind == NodeKind.Token
-                                                && strcmp(cur.next_sibling.text, field_name) == 0) {
-                                                SyntaxNode* eq = cur.next_sibling.next_sibling;
-                                                if (eq != (SyntaxNode*)0 && eq.kind == NodeKind.Token
-                                                    && (eq.token_kind == TokenKind.Assign || strcmp(eq.text, "=") == 0)) {
-                                                    found_field = true;
-                                                    String field_prefix = llvm_const_global_literal_prefix(g_name, "field", fi);
-                                                    field_val = llvm_const_literal_value(self.ctx, self.module,
-                                                        types, field.type_id, field_prefix.to_str(), eq.next_sibling);
-                                                    field_prefix.drop();
-                                                    if (field_val == (LLVMOpaqueValue*)0) {
-                                                        const_ok = false;
-                                                    }
-                                                }
-                                            }
-                                            cur = cur.next_sibling;
-                                        }
-                                        if (!found_field) {
-                                            LLVMOpaqueType* field_ty = llvm_lower_type(self.ctx, types, field.type_id);
-                                            field_val = LLVMConstNull(field_ty);
-                                        }
-                                        if (const_ok) {
-                                            field_vals.push(field_val);
-                                        }
-                                        fi += 1;
-                                    }
-                                    if (const_ok) {
-                                        g_init = LLVMConstNamedStruct(g_llvm_type, field_vals.data, (u32)field_vals.len());
-                                    } else {
-                                        ctx.note_unresolved("global-init", g_name);
-                                    }
-                                    field_vals.drop();
-                                } else {
+                                g_init = llvm_const_struct_from_initializer(&ctx, self.module,
+                                    types, g_type_id, g_name, init_node);
+                                if (g_init == (LLVMOpaqueValue*)0) {
                                     ctx.note_unresolved("global-init", g_name);
                                 }
                             } else if (g_entry.kind == TypeKind.Array) {
                                 SyntaxNode* value_cursor = init_node.first_child;
-                                g_init = llvm_const_array_from_initializer(self.ctx, self.module,
+                                g_init = llvm_const_array_from_initializer(&ctx, self.module,
                                     types, g_type_id, g_name, &value_cursor, true);
                                 if (g_init == (LLVMOpaqueValue*)0) {
                                     ctx.note_unresolved("global-init", g_name);
@@ -2025,7 +2094,8 @@ impl LlvmGenerator {
                                 if (fn_val != (LLVMOpaqueValue*)0) {
                                     llvm_bt_record_external_function(&ctx, types,
                                         self.target_data, item.span,
-                                        binding_function_parameters(item), (str)0, fn_val,
+                                        binding_function_parameters(item), (str)0,
+                                        TYPE_UNKNOWN, fn_val,
                                         fn_name.to_str(), source_paths,
                                         &bt_function_records,
                                         &bt_arg_function_records);
@@ -2323,10 +2393,13 @@ impl LlvmGenerator {
                                             bool exact_function_type = binding_has_function_type(param);
                                             String dec_str = binding_parameter_type_text(param);
                                             str type_str = dec_str.to_str();
+                                            u32 exact_self_type = strcmp(type_str, "Self") == 0
+                                                ? llvm_exact_self_type(types, item) : TYPE_UNKNOWN;
                                             if (strcmp(type_str, "Self") == 0 || (strcmp(param.name, "self") == 0 && strlen(type_str) == 0)) {
                                                 type_str = struct_name;
                                             }
-                                            u32 param_type_id = ctx.subst_type(type_str);
+                                            u32 param_type_id = exact_self_type != TYPE_UNKNOWN
+                                                ? exact_self_type : ctx.subst_type(type_str);
                                             if (param_type_id == TYPE_UNKNOWN) {
                                                 param_type_id = types.parse_type_name(type_str);
                                             }

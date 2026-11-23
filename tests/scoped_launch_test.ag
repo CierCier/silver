@@ -104,6 +104,10 @@ i64 twice(i64 value) {
     return value * 2;
 }
 
+i64 level_code(Level level) {
+    return level;
+}
+
 i64 leave_early(bool early) {
     i64 slot = 0;
     Task<void> writer = launch slow_write(&mut slot, 9);
@@ -225,6 +229,9 @@ i64 main() {
     // 10. Launch arguments convert like direct call arguments.
     Task<i64> tagged = launch twice(Level.High);
     if (wait tagged != 4) { return 17; }
+    i64 ordinal = 2;
+    Task<i64> coded = launch level_code(ordinal);
+    if (wait coded != 2) { return 18; }
 
     out.drop();
     values.drop();

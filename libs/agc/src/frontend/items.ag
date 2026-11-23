@@ -431,10 +431,12 @@ bool item_is_scalar_pointer_text(String* text) {
 }
 
 /// Returns true when C extern `function_name` may return a pointer into the
-/// storage that argument `index` points at. Behind a scalar pointer, only a
-/// result of the same type or an untyped byte pointer can: so
-/// `LLVMBuildGEP2(..., &indices, ...)` returning a value pointer does not
-/// borrow `indices`. Other arguments may always be returned.
+/// storage that argument `index` points at. Behind a scalar pointer, a
+/// result of the pointee type is a value loaded from that storage, and a
+/// non-pointer result holds no address: so `LLVMBuildGEP2(..., &indices,
+/// ...)` returning an `LLVMOpaqueValue*` from `LLVMOpaqueValue**` does not
+/// borrow `indices`. Any other pointer or `str` result may view it, as
+/// `f64* reinterpret(i64*)` can. Other arguments may always be returned.
 bool item_c_extern_may_return_argument(SyntaxNode* root, str function_name, i64 index) {
     ExternFunctionSignature signature = item_find_c_extern_function(root, function_name);
     if (signature.parameter_list == (SyntaxNode*)0) { return false; }
@@ -461,9 +463,11 @@ bool item_c_extern_may_return_argument(SyntaxNode* root, str function_name, i64 
     item_append_extern_type(start, end, &parameter);
     String result = String.new();
     item_append_extern_type(signature.signature_start, signature.function_name, &result);
+    String pointee = parameter.substr(0, parameter.len() > 0 ? parameter.len() - 1 : 0);
     bool may_return = !item_is_scalar_pointer_text(&parameter)
-        || parameter.equals(result.to_str())
-        || result.equals("void*") || result.equals("i8*") || result.equals("u8*");
+        || ((result.ends_with("*") || result.equals("str"))
+            && !result.equals(pointee.to_str()));
+    pointee.drop();
     parameter.drop();
     result.drop();
     return may_return;

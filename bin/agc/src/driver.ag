@@ -404,7 +404,7 @@ i32 emit_check(str path, CfgSet* cfg, Vec<String>* include_dirs, LintConfig* lin
             }
             if (diagnostics.is_empty()) {
                 profiler_begin_phase("lambda lowering");
-                materialize_trait_defaults(&tree, &pool);
+                materialize_trait_defaults(&tree, &pool, cfg);
                 lower_lambdas(&tree, &pool, &symbols, &diagnostics, cfg);
                 profiler_end_phase("lambda lowering");
             }

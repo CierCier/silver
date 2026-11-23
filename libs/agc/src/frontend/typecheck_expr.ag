@@ -2262,6 +2262,12 @@ SyntaxNode* typecheck_select_method(AstPool* pool, SyntaxNode* root, TypeTable* 
                 while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
                     block = block.next_sibling;
                 }
+                // In `impl Record*`, a `Self` parameter is a `Record*`.
+                bool pointer_impl = impl_target_pointer_depth(item) > 0;
+                if (pointer_impl) {
+                    types.push_subst(types.names.intern("Self"),
+                                     typecheck_impl_self_type(types, item));
+                }
                 SyntaxNode* member = block == (SyntaxNode*)0
                     ? (SyntaxNode*)0 : block.first_child;
                 while (member != (SyntaxNode*)0) {
@@ -2334,6 +2340,7 @@ SyntaxNode* typecheck_select_method(AstPool* pool, SyntaxNode* root, TypeTable* 
                            && scan.token_kind == TokenKind.Semicolon
                            ? scan.next_sibling : scan);
                 }
+                if (pointer_impl) { types.pop_subst(1); }
             }
         }
         item = item.next_sibling;
@@ -2649,9 +2656,13 @@ void typecheck_forward_requirements(TypeTable* types, SyntaxNode* root, SyntaxNo
                                     DiagnosticBag* diagnostics, bool* ok) {
     SyntaxNode* group = use.parent;
     if (group == (SyntaxNode*)0 || group.kind != NodeKind.Parenthesized) { return; }
+    // A method call (`.name(...)`) or a macro (`@name(...)`) is not a call
+    // to the free function `name`.
     SyntaxNode* callee_name = binding_previous_sibling(group);
+    SyntaxNode* before_callee = callee_name == (SyntaxNode*)0 ? (SyntaxNode*)0
+        : binding_previous_sibling(callee_name);
     if (callee_name == (SyntaxNode*)0 || !node_is_identifier(callee_name)
-        || cfg_node_text(binding_previous_sibling(callee_name), ".")) {
+        || cfg_node_text(before_callee, ".") || cfg_node_text(before_callee, "@")) {
         return;
     }
     SyntaxNode* before = binding_previous_sibling(use);
@@ -4904,8 +4915,8 @@ u32 typecheck_impl_self_type(TypeTable* types, SyntaxNode* item) {
     return self_type;
 }
 
-/// Type-checks the cfg-active method bodies of an impl, with `Self` bound to
-/// the target and its type arguments. Cast blocks are not checked.
+/// Type-checks the cfg-active method and `cast` block bodies of an impl,
+/// with `Self` bound to the target and its type arguments.
 void typecheck_impl_methods(AstPool* pool, SymbolTable* symbols, SyntaxNode* root,
                             SyntaxNode* item, CfgSet* cfg, DiagnosticBag* diagnostics,
                             bool* ok) {
@@ -4984,9 +4995,39 @@ void typecheck_impl_methods(AstPool* pool, SymbolTable* symbols, SyntaxNode* roo
     types.pop_subst(1);
 }
 
-/// Lowers global `item` like a local declaration, records its declared type
-/// on the symbol so bodies can read it, and checks its initializer when
-/// `report` is set.
+/// True when lowered expression `id` is a literal form the native backend
+/// emits as a global's constant: a literal, `-` literal, a cast of either,
+/// `@line()`/`@file()`, or an array or struct literal of those.
+bool typecheck_constant_initializer(AstPool* pool, u32 id) {
+    AstExpr* expr = pool.get_expr(id);
+    if (expr.kind == ExprKind.Literal || expr.kind == ExprKind.SourceLocation) { return true; }
+    if (expr.kind == ExprKind.Unary) {
+        return expr.aux == (u32)TokenKind.Minus
+            && pool.get_expr(expr.inner0).kind == ExprKind.Literal;
+    }
+    if (expr.kind == ExprKind.Cast) {
+        ExprKind inner = pool.get_expr(expr.inner0).kind;
+        return (inner == ExprKind.Literal || inner == ExprKind.Unary)
+            && typecheck_constant_initializer(pool, expr.inner0);
+    }
+    if (expr.kind != ExprKind.ArrayLit && expr.kind != ExprKind.StructLit) { return false; }
+    // Array elements follow a count; struct fields are (name, value) pairs.
+    i64 i = 0;
+    while (i < (i64)expr.aux) {
+        i64 offset = expr.kind == ExprKind.ArrayLit ? 1 + i : i * 2 + 1;
+        if (!typecheck_constant_initializer(pool, pool.args.get((i64)expr.inner1 + offset))) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+/// Lowers global `item` like a local declaration and records its declared
+/// type on the symbol so bodies and other globals can read it. With
+/// `report`, checks every lowered statement and requires a constant
+/// initializer: a struct literal lowers to the `Let` and one assignment per
+/// field.
 void typecheck_global(AstPool* pool, SymbolTable* symbols, SyntaxNode* root, SyntaxNode* item,
                       bool report, DiagnosticBag* diagnostics, bool* ok) {
     SyntaxNode* start = item.first_child;
@@ -4995,24 +5036,47 @@ void typecheck_global(AstPool* pool, SymbolTable* symbols, SyntaxNode* root, Syn
         start = strcmp(start.text, "#") == 0 && start.next_sibling != (SyntaxNode*)0
             ? start.next_sibling.next_sibling : start.next_sibling;
     }
+    SyntaxNode* name = item_identifier(item);
+    str name_text = name == (SyntaxNode*)0 ? "" : name.text;
     ExprLowerer lowerer = ExprLowerer.new(pool, &symbols.types, &symbols.names);
     lowerer.unit_root = root;
     Vec<u32> stmt_ids = Vec<u32>.new();
     lowerer.lower_block_range(start, (SyntaxNode*)0, &stmt_ids);
-    if (lowerer.unsupported || stmt_ids.len() != 1
-        || pool.get_stmt(stmt_ids.get(0)).kind != StmtKind.Let) {
+    bool shaped = !lowerer.unsupported && stmt_ids.len() > 0
+        && pool.get_stmt(stmt_ids.get(0)).kind == StmtKind.Let;
+    if (!shaped) {
+        if (report) {
+            if (lowerer.error.len() > 0) {
+                diagnostics.error(lowerer.error_span, move lowerer.error);
+            } else {
+                diagnostics.error(name == (SyntaxNode*)0 ? item.span : name.span,
+                                  unchecked_global_initializer(name_text));
+            }
+            *ok = false;
+        }
         stmt_ids.drop();
         return;
     }
-    AstStmt* stmt = pool.get_stmt(stmt_ids.get(0));
-    SyntaxNode* name = item_identifier(item);
-    if (name != (SyntaxNode*)0 && stmt.inner0 != TYPE_UNKNOWN) {
-        symbols.set_type(name.text, stmt.inner0);
+    AstStmt* declaration = pool.get_stmt(stmt_ids.get(0));
+    if (name != (SyntaxNode*)0 && declaration.inner0 != TYPE_UNKNOWN) {
+        symbols.set_type(name.text, declaration.inner0);
     }
     if (report) {
         TypeEnv env = TypeEnv.new();
-        typecheck_statement(pool, &symbols.types, symbols, root, &env, TYPE_VOID,
-                            stmt_ids.get(0), diagnostics, ok);
+        i64 i = 0;
+        while (i < stmt_ids.len()) {
+            AstStmt* stmt = pool.get_stmt(stmt_ids.get(i));
+            u32 value = stmt.kind == StmtKind.Let || stmt.kind == StmtKind.Assign
+                ? stmt.inner1 : (u32)0;
+            if (value != 0 && !typecheck_constant_initializer(pool, value)) {
+                diagnostics.error(pool.get_expr(value).span,
+                                  String.from_str(global_initializer_not_constant()));
+                *ok = false;
+            }
+            typecheck_statement(pool, &symbols.types, symbols, root, &env, TYPE_VOID,
+                                stmt_ids.get(i), diagnostics, ok);
+            i += 1;
+        }
     }
     stmt_ids.drop();
 }
@@ -5024,15 +5088,22 @@ bool typecheck_expressions_scoped(AstPool* pool, SymbolTable* symbols, SyntaxTre
     bool ok = true;
     Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
     cfg_collect_items(tree.root, cfg, diagnostics, &items);
-    // Globals are typed first: any body may read one.
+    // Globals are typed first: any initializer or body may read one, so
+    // every declared type is recorded before any initializer is checked.
+    i64 pass = 0;
     i64 index = 0;
-    while (index < items.len()) {
-        SyntaxNode* item = items.get(index);
-        if (item.kind == NodeKind.Global) {
-            typecheck_global(pool, symbols, tree.root, item,
-                file_id_filter == 0 || item.span.file == (i64)file_id_filter, diagnostics, &ok);
+    while (pass < 2) {
+        index = 0;
+        while (index < items.len()) {
+            SyntaxNode* item = items.get(index);
+            if (item.kind == NodeKind.Global) {
+                typecheck_global(pool, symbols, tree.root, item, pass == 1
+                    && (file_id_filter == 0 || item.span.file == (i64)file_id_filter),
+                    diagnostics, &ok);
+            }
+            index += 1;
         }
-        index += 1;
+        pass += 1;
     }
     index = 0;
     while (index < items.len()) {

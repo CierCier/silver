@@ -2274,7 +2274,8 @@ impl ExprLowerer {
     }
 
     /// Lowers a `{ .field = value, ... }` or positional `{ value, ... }`
-    /// struct literal of `struct_name`.
+    /// struct literal of `struct_name`. Mixing the two forms is an error,
+    /// as in stage0.
     u32 lower_struct_lit(ExprLowerer* self, str struct_name, SyntaxNode* block) {
         // Lower each entry into a name/expr pair; a positional entry takes
         // the next declared field. Malformed entries fail closed.
@@ -2282,6 +2283,8 @@ impl ExprLowerer {
         SyntaxNode* struct_item = struct_name == (str)0 || self.unit_root == (SyntaxNode*)0
             ? (SyntaxNode*)0 : find_item_by_name(self.unit_root, NodeKind.Struct, struct_name);
         i64 position = 0;
+        bool named = false;
+        bool positional = false;
         SyntaxNode* cur = block.first_child;
         while (cur != (SyntaxNode*)0) {
             if (cur.kind == NodeKind.Token && cur.token_kind == TokenKind.Comma) {
@@ -2301,12 +2304,18 @@ impl ExprLowerer {
                     name_node = (SyntaxNode*)0;
                 } else {
                     value_start = eq.next_sibling;
+                    named = true;
                 }
             } else {
                 name_node = struct_field_name_at(struct_item, position);
                 value_start = cur;
+                positional = true;
             }
             position += 1;
+            if (named && positional) {
+                self.record_error(String.from_str(struct_initializer_mixed_entries()), cur.span);
+                name_node = (SyntaxNode*)0;
+            }
             if (name_node == (SyntaxNode*)0) {
                 pairs.drop();
                 self.unsupported = true;
@@ -2354,8 +2363,9 @@ impl ExprLowerer {
 
     /// Lowers `T a[N] = { [i]=v, w, ... }` as a zero-filled `a` followed by
     /// one element assignment per scalar or struct entry. An entry after
-    /// `[i]=v` fills index `i + 1`, as in C. Returns false, lowering nothing,
-    /// when `initializer` has no designator at any depth.
+    /// `[i]=v` fills index `i + 1`, as in C. A designator must be an integer
+    /// literal, and every index must lie inside its array. Returns false,
+    /// lowering nothing, when `initializer` has no designator at any depth.
     bool lower_designated_array_decl(ExprLowerer* self, u32 var_name, SyntaxNode* var_node,
                                      u32 type_id, SyntaxNode* initializer, Span span,
                                      Vec<u32>* stmt_ids) {
@@ -2364,30 +2374,26 @@ impl ExprLowerer {
         self.pool.args.push(0);
         stmt_ids.push(self.pool.add_stmt_let(var_name, type_id,
             self.pool.add_array_lit(empty_start, 0, initializer.span), span));
-        Vec<SyntaxNode*> designators = Vec<SyntaxNode*>.new();
-        Vec<i64> offsets = Vec<i64>.new();
-        self.lower_array_entries(var_name, var_node, self.types.get(type_id).inner, initializer,
-                                 &designators, &offsets, stmt_ids);
-        offsets.drop();
-        designators.drop();
+        Vec<i64> indices = Vec<i64>.new();
+        self.lower_array_entries(var_name, var_node, type_id, initializer, &indices, stmt_ids);
+        indices.drop();
         return true;
     }
 
-    /// Lowers the entries of one initializer `block` whose elements have
-    /// type `element_type`. `designators` and `offsets` give the index
-    /// path of the enclosing entries; each path level is the designator
-    /// (or none, from 0) plus an offset.
+    /// Lowers the entries of one initializer `block` for array type
+    /// `array_type`. `indices` holds the element index of each enclosing
+    /// entry.
     void lower_array_entries(ExprLowerer* self, u32 var_name, SyntaxNode* var_node,
-                             u32 element_type, SyntaxNode* block,
-                             Vec<SyntaxNode*>* designators, Vec<i64>* offsets,
+                             u32 array_type, SyntaxNode* block, Vec<i64>* indices,
                              Vec<u32>* stmt_ids) {
+        TypeEntry* array = self.types.get(array_type);
+        i64 count = array.count;
+        u32 element_type = array.inner;
         TypeEntry* element = self.types.get(element_type);
         bool nested_array = element.kind == TypeKind.Array;
-        u32 inner_type = element.inner;
         str struct_name = element.kind == TypeKind.Named
             ? self.types.names.get(element.name_id) : (str)0;
-        SyntaxNode* designator = (SyntaxNode*)0;
-        i64 offset = 0;
+        i64 index = 0;
         SyntaxNode* entry = block.first_child;
         while (entry != (SyntaxNode*)0 && !self.unsupported) {
             if (entry.kind == NodeKind.Token && entry.token_kind == TokenKind.Comma) {
@@ -2396,17 +2402,28 @@ impl ExprLowerer {
             }
             SyntaxNode* value_start = entry;
             if (self.is_array_designator(entry)) {
-                designator = entry;
-                offset = 0;
+                SyntaxNode* literal = entry.first_child;
+                bool constant = literal != (SyntaxNode*)0 && literal.next_sibling == (SyntaxNode*)0
+                    && literal.kind == NodeKind.Token && literal.token_kind == TokenKind.IntLiteral
+                    && items_parse_enum_tag(literal.text, false, &index);
+                if (!constant) {
+                    self.unsupported = true;
+                    self.record_error(String.from_str(array_designator_not_constant()), entry.span);
+                    return;
+                }
                 value_start = entry.next_sibling.next_sibling;
             }
-            designators.push(designator);
-            offsets.push(offset);
+            if (count >= 0 && index >= count) {
+                self.unsupported = true;
+                self.record_error(array_designator_out_of_bounds(index, count), entry.span);
+                return;
+            }
+            indices.push(index);
             SyntaxNode* next = (SyntaxNode*)0;
             if (value_start != (SyntaxNode*)0 && value_start.kind == NodeKind.Block
                 && nested_array) {
-                self.lower_array_entries(var_name, var_node, inner_type, value_start,
-                                         designators, offsets, stmt_ids);
+                self.lower_array_entries(var_name, var_node, element_type, value_start,
+                                         indices, stmt_ids);
                 next = value_start.next_sibling;
             } else {
                 u32 value_id = 0;
@@ -2421,45 +2438,33 @@ impl ExprLowerer {
                     value_id = self.lower_sequence_until_comma(value_start, &next);
                     self.expected_type_id = saved_expected_type;
                 }
-                u32 target = 0;
-                if (value_id != 0) {
-                    target = self.array_entry_target(var_name, var_node, designators, offsets,
-                                                     self.pool.get_expr(value_id).span);
-                }
-                if (target == 0) {
+                if (value_id == 0) {
                     self.unsupported = true;
                 } else {
-                    stmt_ids.push(self.pool.add_stmt_assign(target, value_id,
-                                                            self.pool.get_expr(value_id).span));
+                    Span value_span = self.pool.get_expr(value_id).span;
+                    stmt_ids.push(self.pool.add_stmt_assign(
+                        self.array_entry_target(var_name, var_node, indices, value_span),
+                        value_id, value_span));
                 }
             }
-            designators.pop();
-            offsets.pop();
-            offset += 1;
+            indices.pop();
+            index += 1;
             entry = next;
         }
     }
 
-    /// Builds `var[i][j]...` for one index path; returns 0 when a designator
-    /// does not lower. Each statement gets its own index expressions.
+    /// Builds `var[i][j]...` for one index path.
     u32 array_entry_target(ExprLowerer* self, u32 var_name, SyntaxNode* var_node,
-                           Vec<SyntaxNode*>* designators, Vec<i64>* offsets, Span span) {
+                           Vec<i64>* indices, Span span) {
         u32 target = self.pool.add_var(var_name, var_node.span);
         i64 level = 0;
-        while (level < offsets.len()) {
-            i64 offset = offsets.get(level);
-            String offset_text = String.new();
-            offset_text.push_display(&offset);
+        while (level < indices.len()) {
+            i64 index = indices.get(level);
+            String index_text = String.new();
+            index_text.push_display(&index);
             u32 index_id = self.pool.add_literal_val(TYPE_I64,
-                self.names.intern(offset_text.to_str()), span);
-            offset_text.drop();
-            SyntaxNode* designator = designators.get(level);
-            if (designator != (SyntaxNode*)0) {
-                u32 base = self.lower_sequence(designator.first_child, (SyntaxNode*)0);
-                if (base == 0) { return 0; }
-                index_id = offset == 0 ? base
-                    : self.pool.add_binary(TokenKind.Plus, base, index_id, span);
-            }
+                self.names.intern(index_text.to_str()), span);
+            index_text.drop();
             target = self.pool.add_index(target, index_id, span);
             level += 1;
         }

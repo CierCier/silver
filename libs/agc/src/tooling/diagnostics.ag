@@ -204,7 +204,7 @@ DiagnosticBag check_snapshot_diagnostics(SyntaxTree* source, Vec<SyntaxTree*>* d
     ImportedDeclarations imported = ImportedDeclarations.new();
     imported.loaded = true;
     if (diagnostics.is_empty()) {
-        materialize_trait_defaults(&scratch.tree, &scratch.pool);
+        materialize_trait_defaults(&scratch.tree, &scratch.pool, cfg);
         lower_lambdas(&scratch.tree, &scratch.pool, &symbols, &diagnostics, cfg);
     }
     if (diagnostics.is_empty()) {
@@ -333,7 +333,7 @@ ImportOverloadSafety diagnostic_probe_import_overloads(
     if (!preparation.is_empty()) { return ImportOverloadSafety.Inconclusive; }
     diagnostic_register_types(&symbols, &scratch.tree, cfg);
     DiagnosticBag lowering = DiagnosticBag.new();
-    materialize_trait_defaults(&scratch.tree, &scratch.pool);
+    materialize_trait_defaults(&scratch.tree, &scratch.pool, cfg);
     lower_lambdas(&scratch.tree, &scratch.pool, &symbols, &lowering, cfg);
     if (!lowering.is_empty()) { return ImportOverloadSafety.Inconclusive; }
 

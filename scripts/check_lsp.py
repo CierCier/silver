@@ -814,6 +814,40 @@ class NativeLsp(unittest.TestCase):
         self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
                          [(7, "no overload of method 'put' on type Box matches these arguments")])
 
+    def test_global_and_designated_initializers_match_build(self):
+        # Each initializer that `build` cannot emit fails `check` too.
+        text = ("struct P { i64 x; i64 y; i64 z; }\n"
+                "i64 second = 3;\n"
+                "i64 first = second;\n"
+                "i64 sum = 1 + 2;\n"
+                "P mixed = { .y = 1, 2 };\n"
+                "P typed = { .x = \"x\" };\n"
+                "P ordered = { 1, 2, 3 };\n"
+                "i32 grid[4] = { 1, [2] = 5, 6 };\n"
+                "i64 calls() { return 1; }\n"
+                "i64 main() {\n"
+                " i32 past[2] = { [1] = 7, 8 };\n"
+                " return first + sum + ordered.x + (i64)grid[2] + (i64)past[1];\n}\n"
+                "i64 dynamic() {\n i32 slots[4] = { [calls()] = 7 };\n return (i64)slots[1];\n}\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
+                         [(2, "global initializer must be a compile-time constant expression"),
+                          (3, "global initializer must be a compile-time constant expression"),
+                          (4, "cannot mix positional/indexed items with named struct initializer"),
+                          (5, "type mismatch: expected i64, found str"),
+                          (10, "array initializer index 2 is out of bounds for 2 elements"),
+                          (14, "array initializer index must be a constant integer")])
+
+    def test_self_parameters_in_pointer_impls_take_the_pointer_type(self):
+        text = ("struct Record { i64 v; }\nimpl Record* {\n"
+                " Self pick(Self self, Self other) { return other; }\n"
+                " i64 get(Self self) { return self.v; }\n}\n"
+                "i64 main() {\n Record r = { .v = 3 };\n Record s = { .v = 5 };\n"
+                " Record* p = &r;\n Record* q = p.pick(&s);\n return q.v + p.get();\n}\n")
+        uri = self.open(text)
+        self.assertEqual(self.session.published(uri, 1)["diagnostics"], [])
+
     def test_positional_and_self_struct_literals_are_checked(self):
         text = ("struct P { i64 x; str y; }\nimpl P {\n"
                 " Self make(i64 v) {\n  Self r = { .x = v, .y = 1 };\n  return r;\n }\n}\n"
@@ -825,16 +859,20 @@ class NativeLsp(unittest.TestCase):
                           (9, "type mismatch: expected str, found i32")])
 
     def test_returned_pointee_places_and_unrelated_c_results_are_not_local_escapes(self):
+        # A result of the parameter's pointee type (`i64*` from `i64**`) is a
+        # loaded value; any other pointer result may view the argument.
         text = ('extern "C" i64* pick(i64* base, i64** slots, i64 count);\n'
                 'extern "C" i64* same(i64* value);\n'
+                'extern "C" f64* reinterpret(i64* value);\n'
                 "struct Doc { i64 count; }\n"
                 "i64* count_of(Doc* doc) { return &doc.count; }\n"
                 "i64* first(i64* base) {\n i64* slot = base;\n return pick(base, &slot, 1);\n}\n"
                 "i64* leak_call() {\n i64 local = 3;\n return same(&local);\n}\n"
-                "Doc** leak_slot(Doc* doc) { return &doc; }\n")
+                "Doc** leak_slot(Doc* doc) { return &doc; }\n"
+                "f64* leak_cast() {\n i64 local = 3;\n return reinterpret(&local);\n}\n")
         uri = self.open(text)
         diagnostics = self.session.published(uri, 1)["diagnostics"]
-        self.assertEqual({item["range"]["start"]["line"] for item in diagnostics}, {10, 12})
+        self.assertEqual({item["range"]["start"]["line"] for item in diagnostics}, {11, 13, 16})
         self.assertTrue(all("does not outlive" in item["message"] for item in diagnostics))
 
     def test_shared_values_and_lock_blocks_resolve_to_user_declarations(self):
@@ -1365,6 +1403,19 @@ class NativeLsp(unittest.TestCase):
                  ('trait Echo<T> { T echo(&self, T x) { return x; } }\nimpl Echo<i32> for Counter { }\n'
                   + valid.replace("c.bump(1)", 'c.echo("one")'),
                   ["no overload of method 'echo' on type Counter matches these arguments"]),
+                 # A local named like the type parameter stays a value.
+                 ('trait Marker<T> { i64 number(&self) { i64 T = 7; return T; } }\n'
+                  'impl Marker<i32> for Counter { }\n'
+                  + valid.replace("c.bump(1)", "i64 m = c.number()"), []),
+                 # Every overload of a default the impl lacks is copied.
+                 ('trait Pair { i64 pick(&self, i64 a) { return a; }\n'
+                  ' i64 pick(&self, i64 a, i64 b) { return a + b; } }\nimpl Pair for Counter { }\n'
+                  + valid.replace("c.bump(1)", "i64 m = c.pick(1) + c.pick(2, 3)"), []),
+                 # Defaults come from the cfg-active trait of that name.
+                 ('#[cfg(os.windows)]\ntrait Reset { void other(*self) { } }\n'
+                  '#[cfg(os.linux)]\ntrait Reset { void reset(*self) { } }\n'
+                  'impl Reset for Counter { }\n'
+                  + valid.replace("c.bump(1)", "c.reset()"), []),
                  (valid.replace("return c.n;", "return;"),
                   ["return type mismatch: expected i32, found void"]),
                  (valid, [])]

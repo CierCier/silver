@@ -42,6 +42,12 @@ i64 widen(i64 value) { return value; }
 Ordinal ordinal_from(i64 raw) { return raw; }
 i64 offset_code(Offset offset) { return offset; }
 
+// Global initializers are constants in positional, struct-element, and
+// designated forms, each converted to the declared type.
+Extent origin = { 5, 6 };
+Extent corners[2] = { { .start = 1, .width = 2 }, { 3, 4 } };
+i32 grid[4] = { [0] = 1, [2] = 5 };
+
 i32 main() {
     Result<u8, Error> byte = u8.try_from((i128)255);
     assert_true(byte.unwrap() == (u8)255, "checked byte upper bound");
@@ -108,7 +114,17 @@ i32 main() {
     i32 sparse[6] = { [1]=100, [4]=-2 };
     assert_eq_i64(100, (i64)sparse[1], "designated element is set");
     assert_eq_i64(-2, (i64)sparse[4], "designated negative element is set");
-    assert_eq_i64(0, (i64)sparse[0] + (i64)sparse[5], "undesignated elements stay zero");
+    assert_eq_i64(0, (i64)sparse[0], "element before a designator stays zero");
+    assert_eq_i64(0, (i64)sparse[2], "element between designators stays zero");
+    assert_eq_i64(0, (i64)sparse[3], "element before the next designator stays zero");
+    assert_eq_i64(0, (i64)sparse[5], "element after the last designator stays zero");
+    assert_eq_i64(5, origin.start, "positional global fills the first field");
+    assert_eq_i64(6, (i64)origin.width, "positional global converts to i32");
+    assert_eq_i64(2, (i64)corners[0].width, "named struct element in a global array");
+    assert_eq_i64(3, corners[1].start, "positional struct element in a global array");
+    assert_eq_i64(1, (i64)grid[0], "global array designator sets the first element");
+    assert_eq_i64(0, (i64)grid[1], "global array zero-fills a skipped element");
+    assert_eq_i64(5, (i64)grid[2], "global array designator sets its element");
     u8 high_byte = 200;
     i32 stored = high_byte;
     assert_eq_i64(200, (i64)stored, "u8 widens without sign extension when stored");

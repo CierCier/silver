@@ -2808,7 +2808,11 @@ LLVMOpaqueValue* llvm_emit_struct_lit(LlvmContext* ctx, AstExpr* expr) {
         }
         u32 raw_field_type = ctx.find_field_type(def, field_name_id);
         u32 field_type = mono_resolve_struct_field_type(ctx, named_id, raw_field_type);
+        // A nested literal takes the field's type, not the enclosing one.
+        u32 saved_expected = ctx.expected_type_id;
+        ctx.expected_type_id = field_type;
         LLVMOpaqueValue* val = llvm_emit_expr(ctx, val_id);
+        ctx.expected_type_id = saved_expected;
         if (val == (LLVMOpaqueValue*)0) {
             return (LLVMOpaqueValue*)0;
         }
@@ -3543,8 +3547,10 @@ LLVMOpaqueValue* llvm_emit_launch(LlvmContext* ctx, u32 expr_id) {
         if (user_cast != (LLVMOpaqueValue*)0) {
             value = user_cast;
             actual_arg_type = parameter_type;
-            expected_arg_type = parameter_type;
         }
+        // The parameter type converts the argument as in a free call: an
+        // integer becomes a unit-enum tag.
+        if (parameter_type != TYPE_UNKNOWN) { expected_arg_type = parameter_type; }
         args.push(value);
         arg_types.push(actual_arg_type);
         target_types.push(expected_arg_type);

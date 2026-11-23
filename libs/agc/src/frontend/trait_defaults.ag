@@ -2,6 +2,8 @@
 // receives a copy of every default body it does not define, so checking,
 // codegen and the language server need no separate dispatch for defaults.
 import frontend.ast;
+import frontend.bindings;
+import frontend.cfg;
 import frontend.items;
 import frontend.lambdas;
 import frontend.typecheck_expr;
@@ -42,8 +44,11 @@ void trait_defaults_entries(SyntaxNode* less, Vec<SyntaxNode*>* bounds) {
 /// Replaces each trait type parameter among the siblings from `first` on,
 /// and in their subtrees, with a copy of the impl's argument for it.
 /// `params` and `args` hold matching entries from `trait_defaults_entries`.
+/// A name that one of `locals` declares at that point is a value, not the
+/// type parameter.
 void trait_defaults_substitute(NodePool* pool, SyntaxNode* parent, SyntaxNode* first,
-                               Vec<SyntaxNode*>* params, Vec<SyntaxNode*>* args) {
+                               Vec<SyntaxNode*>* params, Vec<SyntaxNode*>* args,
+                               Vec<Binding>* locals) {
     SyntaxNode* previous = (SyntaxNode*)0;
     SyntaxNode* cursor = first;
     while (cursor != (SyntaxNode*)0) {
@@ -51,7 +56,8 @@ void trait_defaults_substitute(NodePool* pool, SyntaxNode* parent, SyntaxNode* f
         i64 k = params.len();
         bool member = previous != (SyntaxNode*)0 && previous.kind == NodeKind.Token
             && previous.token_kind == TokenKind.Dot;
-        if (node_is_identifier(cursor) && !member) {
+        if (node_is_identifier(cursor) && !member
+            && visible_binding(locals, cursor.text, cursor) == (Binding*)0) {
             k = 0;
             while (k < params.len() && strcmp(params.get(k).text, cursor.text) != 0) {
                 k += 2;
@@ -70,7 +76,7 @@ void trait_defaults_substitute(NodePool* pool, SyntaxNode* parent, SyntaxNode* f
                 cursor = last;
             }
         } else if (cursor.kind != NodeKind.Token) {
-            trait_defaults_substitute(pool, cursor, cursor.first_child, params, args);
+            trait_defaults_substitute(pool, cursor, cursor.first_child, params, args, locals);
         }
         previous = cursor;
         cursor = next;
@@ -93,6 +99,9 @@ void trait_defaults_copy(NodePool* pool, SyntaxNode* impl_item, SyntaxNode* trai
         trait_defaults_entries(trait_name.next_sibling, &args);
     }
     if (params.len() != args.len()) { params.clear(); }
+    // An impl method overrides every default of its name; overloaded
+    // defaults of a name the impl lacks are all copied.
+    Vec<str> copied = Vec<str>.new();
     SyntaxNode* start = trait_block.first_child;
     SyntaxNode* cursor = start;
     while (cursor != (SyntaxNode*)0) {
@@ -106,13 +115,21 @@ void trait_defaults_copy(NodePool* pool, SyntaxNode* impl_item, SyntaxNode* trai
             i64 generic = 0;
             if (name != (SyntaxNode*)0) {
                 typecheck_count_block_methods(impl_item, name.text, &declared, &generic);
-                if (declared == 0) {
+                i64 seen = 0;
+                while (seen < copied.len() && strcmp(copied.get(seen), name.text) != 0) {
+                    seen += 1;
+                }
+                if (declared == 0 || seen < copied.len()) {
                     SyntaxNode* tail = impl_block.last_child;
                     lambda_clone_range(pool, impl_block, start, next.next_sibling);
+                    if (seen == copied.len()) { copied.push(name.text); }
                     if (params.len() > 0) {
+                        Vec<Binding> locals = Vec<Binding>.new();
+                        collect_block_bindings(impl_block.last_child, &locals);
                         trait_defaults_substitute(pool, impl_block,
                             tail == (SyntaxNode*)0 ? impl_block.first_child : tail.next_sibling,
-                            &params, &args);
+                            &params, &args, &locals);
+                        locals.drop();
                     }
                 }
             }
@@ -121,22 +138,38 @@ void trait_defaults_copy(NodePool* pool, SyntaxNode* impl_item, SyntaxNode* trai
         }
         cursor = next;
     }
+    copied.drop();
     args.drop();
     params.drop();
 }
 
-/// Gives every trait impl in `tree` the trait's default methods it lacks.
-void materialize_trait_defaults(SyntaxTree* tree, NodePool* pool) {
-    SyntaxNode* item = tree.root.first_child;
-    while (item != (SyntaxNode*)0) {
-        if (item.kind == NodeKind.Impl) {
-            SyntaxNode* trait_name = typecheck_impl_trait(item);
-            SyntaxNode* trait_item = trait_name == (SyntaxNode*)0 ? (SyntaxNode*)0
-                : find_item_by_name(tree.root, NodeKind.Trait, trait_name.text);
-            if (trait_item != (SyntaxNode*)0) {
-                trait_defaults_copy(pool, item, trait_name, trait_item);
+/// Gives every cfg-active trait impl in `tree` the default methods it lacks
+/// from the cfg-active trait of that name.
+void materialize_trait_defaults(SyntaxTree* tree, NodePool* pool, CfgSet* cfg) {
+    Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
+    cfg_collect_items(tree.root, cfg, (DiagnosticBag*)0, &items);
+    i64 i = 0;
+    while (i < items.len()) {
+        SyntaxNode* item = items.get(i);
+        SyntaxNode* trait_name = item.kind == NodeKind.Impl ? typecheck_impl_trait(item)
+            : (SyntaxNode*)0;
+        SyntaxNode* trait_item = (SyntaxNode*)0;
+        i64 j = 0;
+        while (trait_name != (SyntaxNode*)0 && trait_item == (SyntaxNode*)0
+               && j < items.len()) {
+            SyntaxNode* candidate = items.get(j);
+            SyntaxNode* candidate_name = candidate.kind == NodeKind.Trait
+                ? item_identifier(candidate) : (SyntaxNode*)0;
+            if (candidate_name != (SyntaxNode*)0
+                && strcmp(candidate_name.text, trait_name.text) == 0) {
+                trait_item = candidate;
             }
+            j += 1;
         }
-        item = item.next_sibling;
+        if (trait_item != (SyntaxNode*)0) {
+            trait_defaults_copy(pool, item, trait_name, trait_item);
+        }
+        i += 1;
     }
+    items.drop();
 }

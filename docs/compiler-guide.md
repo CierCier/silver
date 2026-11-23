@@ -423,14 +423,17 @@ pointer layers (`impl Record*`). Codegen binds the same `Self`, so a method may
 return `Self`. Before checking, each `impl Trait for X` receives a copy of every
 trait default method it does not define, so defaults check and build like impl
 methods. The copy replaces the trait's type parameters with the impl's
-arguments: `impl Echo<i64> for X` gives `X` an `echo` that takes `i64`. All three also see the same modules and JSON impls: `@assert`,
-the formatting macros, `@json`, `@from_json`, and `#[serialize]` import their
+arguments: `impl Echo<i64> for X` gives `X` an `echo` that takes `i64`.
+
+All three also see the same modules and JSON impls. `@assert`, `@print`,
+`@println`, `@format`, `@json`, `@from_json`, and `#[serialize]` import their
 library module without an `import` line, as in stage0
-([`collect_implicit_import_names`](../libs/agc/src/frontend/cfg.ag)), and a
-struct used with them receives its synthesized `ToJson` and `FromJson` impls
-before checking. Every error the checker reports fails the command, so `check`
-and `build` agree on semantic acceptance. Link and environment failures
-remain build-only.
+([`collect_implicit_import_names`](../libs/agc/src/frontend/cfg.ag)). A
+non-generic struct used with them receives its synthesized `ToJson` and
+`FromJson` impls before checking; a generic struct needs its own impls.
+Every error the checker reports fails the command, so `check` and `build`
+agree on semantic acceptance. Link and environment failures remain
+build-only.
 
 The checker rejects these invalid core forms with a source diagnostic:
 
