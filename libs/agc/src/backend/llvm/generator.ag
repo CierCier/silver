@@ -771,23 +771,16 @@ LLVMOpaqueValue* llvm_const_literal_value(LlvmContext* ctx,
     return (LLVMOpaqueValue*)0;
 }
 
-/// Advances `*cursor` past one initializer value and its trailing comma.
+/// Advances `*cursor` to the comma after one initializer value. Nested
+/// blocks and call arguments are single nodes, so the value ends at the
+/// next sibling comma.
 void llvm_const_skip_initializer_value(SyntaxNode** cursor) {
     SyntaxNode* current = *cursor;
-    if (current == (SyntaxNode*)0) { return; }
-    SyntaxNode* next = current.next_sibling;
-    if (current.kind == NodeKind.Token && current.token_kind == TokenKind.Minus
-        && next != (SyntaxNode*)0 && next.kind == NodeKind.Token
-        && next.token_kind == TokenKind.IntLiteral) {
-        next = next.next_sibling;
-    } else if (current.kind == NodeKind.Parenthesized
-        && next != (SyntaxNode*)0 && next.kind == NodeKind.Token
-        && (next.token_kind == TokenKind.IntLiteral || next.token_kind == TokenKind.FloatLiteral
-            || next.token_kind == TokenKind.CharLiteral || next.token_kind == TokenKind.StringLiteral
-            || next.token_kind == TokenKind.True || next.token_kind == TokenKind.False)) {
-        next = next.next_sibling;
+    while (current != (SyntaxNode*)0
+        && !(current.kind == NodeKind.Token && current.token_kind == TokenKind.Comma)) {
+        current = current.next_sibling;
     }
-    *cursor = next;
+    *cursor = current;
 }
 
 /// Builds a constant array from a `{ ... }` initializer at `*cursor`,
@@ -827,11 +820,11 @@ LLVMOpaqueValue* llvm_const_array_from_initializer(LlvmContext* ctx,
         if (designated) {
             SyntaxNode* literal = designator.first_child;
             if (literal == (SyntaxNode*)0 || literal.kind != NodeKind.Token
-                || literal.token_kind != TokenKind.IntLiteral) {
+                || literal.token_kind != TokenKind.IntLiteral
+                || !items_parse_enum_tag(literal.text, false, &index)) {
                 const_ok = false;
                 break;
             }
-            index = parse_int_literal(literal.text);
             *cursor = designator.next_sibling.next_sibling;
         }
         if (index < 0 || index >= elem_count || *cursor == (SyntaxNode*)0) {
