@@ -2423,6 +2423,43 @@ MethodDeclarations typecheck_count_methods(TypeTable* types, SyntaxNode* root, s
     return found;
 }
 
+/// Returns the type a method call dispatches on: `receiver_type` behind
+/// any pointers and references.
+u32 typecheck_method_owner_type(TypeTable* types, u32 receiver_type) {
+    u32 owner_type = types.resolve_subst(receiver_type);
+    TypeEntry* owner = types.get(owner_type);
+    while (owner.kind == TypeKind.Pointer || owner.kind == TypeKind.Reference) {
+        owner_type = types.resolve_subst(owner.inner);
+        owner = types.get(owner_type);
+    }
+    return owner_type;
+}
+
+/// Stores the declarations of `method_name` on `owner_type` in `found`.
+/// Returns false when the call is not judged: the owner is not a primitive
+/// or declared struct or enum, or reaches the method another way (`drop`,
+/// primitive `compare`, a blanket impl, or a `str` call that codegen sends
+/// to `Slice<u8>`).
+bool typecheck_judged_methods(TypeTable* types, SyntaxNode* root, u32 owner_type,
+                              str method_name, MethodDeclarations* found) {
+    if (strcmp(method_name, "drop") == 0) { return false; }
+    TypeEntry* owner = types.get(owner_type);
+    bool primitive = owner_type != TYPE_VOID && type_is_primitive(owner_type);
+    if (primitive && strcmp(method_name, "compare") == 0) { return false; }
+    if (!primitive && (owner.kind != TypeKind.Named
+        || typecheck_type_is_unresolved(types, owner_type, 0))) {
+        return false;
+    }
+    str owner_name = primitive ? types.type_name(owner_type) : types.names.get(owner.name_id);
+    if (!primitive && find_item_by_name(root, NodeKind.Struct, owner_name) == (SyntaxNode*)0
+        && find_enum_item(root, owner_name) == (SyntaxNode*)0) {
+        return false;
+    }
+    *found = typecheck_count_methods(types, root, owner_name, method_name);
+    return found.own > 0 || (found.blanket == 0 && !(owner_type == TYPE_STR
+        && typecheck_count_methods(types, root, "Slice", method_name).own > 0));
+}
+
 /// Reports a call to a method that a declared struct or enum receiver
 /// cannot have: no impl declares the name, only a trait default does, or
 /// the owner declares it but no overload accepts the arguments.
@@ -2431,33 +2468,10 @@ void typecheck_method_call_target(AstPool* pool, TypeTable* types, SyntaxNode* r
                                   u32 receiver_type, str method_name, u32 args_start,
                                   bool static_method, Span span,
                                   DiagnosticBag* diagnostics, bool* ok) {
-    u32 owner_type = types.resolve_subst(receiver_type);
-    TypeEntry* owner = types.get(owner_type);
-    while (owner.kind == TypeKind.Pointer || owner.kind == TypeKind.Reference) {
-        owner_type = types.resolve_subst(owner.inner);
-        owner = types.get(owner_type);
-    }
-    if (strcmp(method_name, "drop") == 0) { return; }
-    // Codegen compares primitives itself and sends a `str` method that no
-    // `impl str` declares to `Slice<u8>`.
-    bool primitive = owner_type != TYPE_VOID && type_is_primitive(owner_type);
-    if (primitive && strcmp(method_name, "compare") == 0) { return; }
-    if (!primitive && (owner.kind != TypeKind.Named
-        || typecheck_type_is_unresolved(types, owner_type, 0))) {
-        return;
-    }
-    str owner_name = primitive ? types.type_name(owner_type) : types.names.get(owner.name_id);
-    if (!primitive && find_item_by_name(root, NodeKind.Struct, owner_name) == (SyntaxNode*)0
-        && find_enum_item(root, owner_name) == (SyntaxNode*)0) {
-        return;
-    }
-    MethodDeclarations found = typecheck_count_methods(types, root, owner_name, method_name);
-    if (found.own == 0 && owner_type == TYPE_STR
-        && typecheck_count_methods(types, root, "Slice", method_name).own > 0) {
-        return;
-    }
+    u32 owner_type = typecheck_method_owner_type(types, receiver_type);
+    MethodDeclarations found = { .own = 0, .generic = 0, .blanket = 0 };
+    if (!typecheck_judged_methods(types, root, owner_type, method_name, &found)) { return; }
     if (found.own == 0) {
-        if (found.blanket > 0) { return; }
         diagnostics.error(span, unknown_method(method_name, types.type_name(owner_type)));
         *ok = false;
         return;
@@ -2465,6 +2479,8 @@ void typecheck_method_call_target(AstPool* pool, TypeTable* types, SyntaxNode* r
     // Overload selection does not infer a method's own type parameters.
     if (found.generic > 0) { return; }
     if (args_start >= (u32)pool.args.len()) { return; }
+    str owner_name = type_is_primitive(owner_type) ? types.type_name(owner_type)
+        : types.names.get(types.get(owner_type).name_id);
     SyntaxNode* ret_start = (SyntaxNode*)0;
     SyntaxNode* name = (SyntaxNode*)0;
     // An instance call may also pass its receiver explicitly: `r.get(&r)`.
@@ -2481,6 +2497,86 @@ void typecheck_method_call_target(AstPool* pool, TypeTable* types, SyntaxNode* r
                                                          types.type_name(owner_type)));
         *ok = false;
     }
+}
+
+/// Returns the type parameter `type_args` binds for a callee parameter
+/// declared as `T`, `&T` or `T*`, or unknown. A literal argument does not
+/// bind `T` during inference, so its own default type stands in here.
+u32 typecheck_parameter_bound_type(AstPool* pool, TypeTable* types, CalleeTypeArgs* type_args,
+                                   Binding* param, AstExpr* call, Vec<u32>* arg_types,
+                                   i64 index) {
+    if (binding_is_variadic_parameter(param) || index >= arg_types.len()) { return TYPE_UNKNOWN; }
+    u32 declared = typecheck_parameter_type_id(types, param);
+    TypeEntry* entry = types.get(declared);
+    bool direct = true;
+    while (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) {
+        direct = false;
+        entry = types.get(entry.inner);
+    }
+    if (entry.kind != TypeKind.TypeParam && (entry.kind != TypeKind.Named || entry.count != 0)) {
+        return TYPE_UNKNOWN;
+    }
+    i64 k = 0;
+    while (k < type_args.params.len() && type_args.params.get(k) != entry.name_id) { k += 1; }
+    if (k == type_args.params.len()) { return TYPE_UNKNOWN; }
+    u32 bound = type_args.bound.get(k);
+    u32 argument = arg_types.get(index);
+    if (bound == TYPE_UNKNOWN && direct && type_is_primitive(argument)
+        && expr_is_literal(pool, pool.args.get((i64)call.inner1 + index))) {
+        return argument;
+    }
+    return bound;
+}
+
+/// Reports a generic call whose bound type lacks a method that the callee
+/// body calls directly on a parameter of that type: `value.get()` with
+/// `T value`. A requirement the callee passes on to another generic call,
+/// or a call to a method with its own type parameters, is not judged.
+void typecheck_generic_call_requirements(AstPool* pool, TypeTable* types, SyntaxNode* root,
+                                         SyntaxNode* callee_fn, Vec<Binding>* params,
+                                         CalleeTypeArgs* type_args, AstExpr* call,
+                                         Vec<u32>* arg_types, DiagnosticBag* diagnostics,
+                                         bool* ok) {
+    SyntaxNode* body = function_body(callee_fn);
+    if (body == (SyntaxNode*)0) { return; }
+    Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+    cfg_collect_leaves(body, &leaves);
+    Vec<str> reported = Vec<str>.new();
+    i64 p = 0;
+    while (p < params.len()) {
+        Binding* param = params.get_ptr(p);
+        u32 owner_type = typecheck_method_owner_type(types,
+            typecheck_parameter_bound_type(pool, types, type_args, param, call, arg_types, p));
+        i64 i = 0;
+        while (owner_type != TYPE_UNKNOWN && i + 2 < leaves.len()) {
+            SyntaxNode* receiver = leaves.get(i);
+            SyntaxNode* method = leaves.get(i + 2);
+            // Argument lists are `Parenthesized` nodes, not leaves.
+            bool call_on_parameter = strcmp(receiver.text, param.name) == 0
+                && (i == 0 || !cfg_node_text(leaves.get(i - 1), "."))
+                && cfg_node_text(leaves.get(i + 1), ".") && node_is_identifier(method)
+                && method.next_sibling != (SyntaxNode*)0
+                && method.next_sibling.kind == NodeKind.Parenthesized;
+            i64 seen = 0;
+            while (call_on_parameter && seen < reported.len()
+                   && strcmp(reported.get(seen), method.text) != 0) {
+                seen += 1;
+            }
+            MethodDeclarations found = { .own = 0, .generic = 0, .blanket = 0 };
+            if (call_on_parameter && seen == reported.len()
+                && typecheck_judged_methods(types, root, owner_type, method.text, &found)
+                && found.own == 0) {
+                diagnostics.error(call.span, generic_call_missing_method(
+                    method.text, types.type_name(owner_type)));
+                *ok = false;
+                reported.push(method.text);
+            }
+            i += 1;
+        }
+        p += 1;
+    }
+    reported.drop();
+    leaves.drop();
 }
 
 /// Returns the symbol of the method a call resolves to.
@@ -3635,6 +3731,10 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                         }
                         i += 1;
                     }
+                }
+                if (valid_arity && generic_callee) {
+                    typecheck_generic_call_requirements(pool, types, root, callee_fn, &params,
+                        &type_args, expr, &arg_types, diagnostics, ok);
                 }
                 params.drop();
                 if (valid_arity && !variadic && generic_callee) {

@@ -485,8 +485,11 @@ the generated code fails at run time.
 Remaining limits:
 
 - Overloads of methods with their own type parameters are not judged.
-- The checker does not judge method calls on receivers it cannot resolve, such
-  as a value of an opaque type parameter.
+- A generic body is a template. The checker does not judge a method call on a
+  type-parameter receiver inside the body. Each concrete call instead reports
+  `generic call requires method 'get' on type Box` when the bound type lacks
+  a method the body calls directly on that parameter. A requirement that the
+  body passes on to another generic call is not judged.
 
 ## 7. Diagnostics
 

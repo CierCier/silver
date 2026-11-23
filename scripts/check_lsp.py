@@ -787,6 +787,18 @@ class NativeLsp(unittest.TestCase):
         self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
                          [(3, "type mismatch: expected f64, found str")])
 
+    def test_generic_calls_require_the_methods_their_bodies_call(self):
+        text = ("struct Box { i64 v; }\nstruct Bag { i64 v; }\n"
+                "impl Bag {\n i64 get(&self) { return self.v; }\n}\n"
+                "i64 call_get<T>(&T value) {\n return value.get() + value.get();\n}\n"
+                "i64 unused<T>(T value) {\n return value.missing();\n}\n"
+                "i64 main() {\n Box b = { .v = 1 };\n Bag g = { .v = 2 };\n"
+                " return call_get(&b) + call_get(&g);\n}\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
+                         [(14, "generic call requires method 'get' on type Box")])
+
     def test_returned_pointee_places_and_unrelated_c_results_are_not_local_escapes(self):
         text = ('extern "C" i64* pick(i64* base, i64** slots, i64 count);\n'
                 'extern "C" i64* same(i64* value);\n'
