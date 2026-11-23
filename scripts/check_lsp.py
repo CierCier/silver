@@ -864,15 +864,19 @@ class NativeLsp(unittest.TestCase):
         text = ('extern "C" i64* pick(i64* base, i64** slots, i64 count);\n'
                 'extern "C" i64* same(i64* value);\n'
                 'extern "C" f64* reinterpret(i64* value);\n'
+                'extern "C" &i64 view(i64* value);\n'
+                'extern "C" void* slot_address(void** slot);\n'
                 "struct Doc { i64 count; }\n"
                 "i64* count_of(Doc* doc) { return &doc.count; }\n"
                 "i64* first(i64* base) {\n i64* slot = base;\n return pick(base, &slot, 1);\n}\n"
                 "i64* leak_call() {\n i64 local = 3;\n return same(&local);\n}\n"
                 "Doc** leak_slot(Doc* doc) { return &doc; }\n"
-                "f64* leak_cast() {\n i64 local = 3;\n return reinterpret(&local);\n}\n")
+                "f64* leak_cast() {\n i64 local = 3;\n return reinterpret(&local);\n}\n"
+                "&i64 leak_ref() {\n i64 local = 3;\n return view(&local);\n}\n"
+                "void* leak_address() {\n void* slot = (void*)0;\n return slot_address(&slot);\n}\n")
         uri = self.open(text)
         diagnostics = self.session.published(uri, 1)["diagnostics"]
-        self.assertEqual({item["range"]["start"]["line"] for item in diagnostics}, {11, 13, 16})
+        self.assertEqual({item["range"]["start"]["line"] for item in diagnostics}, {13, 15, 18, 22, 26})
         self.assertTrue(all("does not outlive" in item["message"] for item in diagnostics))
 
     def test_shared_values_and_lock_blocks_resolve_to_user_declarations(self):
