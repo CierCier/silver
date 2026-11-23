@@ -1421,6 +1421,12 @@ class NativeLsp(unittest.TestCase):
                   'impl Fallback for Counter { i64 show(Counter self) { return 1; }\n'
                   ' i64 peek(Counter* self) { return 2; } }\n'
                   + valid.replace("c.bump(1)", "i64 m = c.show() + c.peek()"), []),
+                 # The impl's type, written out or as a trait argument, matches it too.
+                 ('trait Join { i64 join(&self, Counter other) { return self.fallback(); } }\n'
+                  'impl Join for Counter { i64 join(&self, Counter other) { return 1; } }\n'
+                  'trait Meet<T> { i64 meet(&self, T other) { return self.fallback(); } }\n'
+                  'impl Meet<Counter> for Counter { i64 meet(&self, Counter other) { return 2; } }\n'
+                  + valid.replace("c.bump(1)", "i64 m = c.join(*c) + c.meet(*c)"), []),
                  # A parameter named like the type parameter stays a value.
                  ('trait Same<T> { i64 same(&self, i64 T) { return T; } }\n'
                   'impl Same<i32> for Counter { }\n'

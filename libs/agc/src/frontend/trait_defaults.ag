@@ -121,11 +121,24 @@ bool trait_defaults_spells(SyntaxNode* part, Vec<SyntaxNode*>* target) {
     return true;
 }
 
+/// Returns true when the siblings in `[first, end)` spell exactly `target`.
+bool trait_defaults_spells_exactly(SyntaxNode* first, SyntaxNode* end,
+                                   Vec<SyntaxNode*>* target) {
+    i64 count = 0;
+    SyntaxNode* node = first;
+    while (node != (SyntaxNode*)0 && node != end) {
+        count += 1;
+        node = node.next_sibling;
+    }
+    return count == target.len() && trait_defaults_spells(first, target);
+}
+
 /// Appends the parameter types of method parameter list `list`, without
-/// the parameter names. `Self`, the impl's `target` type, and a receiver
-/// shorthand (`self`, `&self`, `*self`) all spell `Self`, so `*self` reads
-/// like `X* self`. A trait type parameter (an entry of `params`) is spelled
-/// as the impl's matching entry of `args`.
+/// the parameter names. `Self`, the impl's `target` type (written out or
+/// passed as a trait argument), and a receiver shorthand (`self`, `&self`,
+/// `*self`) all spell `Self`, so `*self` reads like `X* self`. A trait type
+/// parameter (an entry of `params`) is spelled as the impl's matching entry
+/// of `args`.
 void trait_defaults_signature(SyntaxNode* list, Vec<SyntaxNode*>* target,
                               Vec<SyntaxNode*>* params, Vec<SyntaxNode*>* args,
                               String* out) {
@@ -171,7 +184,10 @@ void trait_defaults_signature(SyntaxNode* list, Vec<SyntaxNode*>* target,
                         && strcmp(params.get(entry).text, part.text) == 0)) {
                 entry += 2;
             }
-            if (entry < params.len()) {
+            if (entry < params.len()
+                && trait_defaults_spells_exactly(args.get(entry), args.get(entry + 1), target)) {
+                parameter.push_str("Self ");
+            } else if (entry < params.len()) {
                 SyntaxNode* arg = args.get(entry);
                 while (arg != (SyntaxNode*)0 && arg != args.get(entry + 1)) {
                     append_node_tokens(arg, &parameter);
@@ -204,7 +220,7 @@ bool trait_defaults_declared(SyntaxNode* impl_item, str name, SyntaxNode* list,
     Vec<SyntaxNode*> target = Vec<SyntaxNode*>.new();
     trait_defaults_target(impl_item, &target);
     String wanted = String.new();
-    trait_defaults_signature(list, &none, params, args, &wanted);
+    trait_defaults_signature(list, &target, params, args, &wanted);
     bool found = false;
     // Bodies are nested blocks, so a direct `name(` or `name<` is a method.
     SyntaxNode* member = block.first_child;
