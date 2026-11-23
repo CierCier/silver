@@ -1135,6 +1135,24 @@ SyntaxNode* typecheck_resolve_free_function(AstPool* pool, TypeTable* types,
     *ambiguous = false;
     *no_match = false;
     *resolved_symbol_id = 0;
+    // Written type arguments select a generic declaration, as codegen does,
+    // even when a plain function of the same name comes first.
+    if (call.generic_args_count > 0) {
+        RootIndex* generic_index = root_index(root);
+        i64 generic_entry = generic_index.find(name);
+        while (generic_entry >= 0) {
+            SyntaxNode* item = generic_index.item(generic_entry);
+            generic_entry = generic_index.after(generic_entry);
+            if (item.kind != NodeKind.Function || !typecheck_is_generic_function(item)) {
+                continue;
+            }
+            Vec<Binding> params = Vec<Binding>.new();
+            collect_parameter_bindings(binding_function_parameters(item), &params);
+            bool fits = params.len() == (i64)call.aux;
+            params.drop();
+            if (fits) { return item; }
+        }
+    }
     if (!typecheck_has_free_overloads(types, root, name)) {
         return find_function_by_name_and_arity(root, name, (i64)call.aux);
     }

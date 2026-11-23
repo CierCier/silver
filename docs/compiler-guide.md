@@ -452,10 +452,11 @@ named types require identical type arguments, so neither a `Cell<str>` nor a
 `Cell<i32>` is a `Cell<i64>`: codegen passes the struct unconverted.
 
 The checker does not judge a type it cannot resolve. It accepts an unknown type
-or an unbound type parameter wherever a type is expected. A generic callee takes
-its explicit type arguments. Otherwise, each non-literal argument binds the
-parameters that appear in its declared type. Parameters left unbound stay
-unknown.
+or an unbound type parameter wherever a type is expected. A call with explicit
+type arguments selects the generic declaration of that name and arity, even
+after a plain function of the same name, and takes those arguments. Otherwise,
+each non-literal argument binds the parameters that appear in its declared type.
+Parameters left unbound stay unknown.
 
 A function body that the checker cannot lower does not pass silently. When
 lowering explains the construct, that diagnostic is reported on its own:
