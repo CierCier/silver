@@ -263,7 +263,7 @@ flowchart TD
 - `init_plan.rs` carries typed owner layouts and resolved places from move
   analysis to LLVM. Concrete generic instances complete their plans through the
   same semantic layout resolver. The native frontend uses `init_plan.ag` and
-  returns owner plans with its ownership result.
+  builds owner plans with `build_owner_plans` before expression checking.
 
 #### 8. Monomorphization (`semantic/monomorph.rs`)
 - Runs a fixpoint generation loop:
@@ -486,6 +486,31 @@ As in C, an entry after `[i]=v` fills index `i + 1`, and nested initializers
 may use designators too. Other array literals, such as a `static` local or a
 function argument, fail with a designator diagnostic because the array
 literal form has no indices.
+
+### Native move and initialization checking
+
+After a body type-checks cleanly, `typecheck_body` runs
+[`move_flow_check`](../libs/agc/src/frontend/move_flow.ag) on the same lowered
+statements, so functions, impl methods, trait defaults, and `cast` blocks share
+one pass. The checker records how each argument is passed while it selects
+overloads: `AstPool.consumed` marks by-value uses, and
+`AstPool.mutable_borrows` marks `*self`, `&mut self`, `&mut x`, and `T*`
+arguments. The pass reads only those facts and the inferred types.
+
+Each owned (non-Copy) local is a tree of places: the local, its struct and
+tuple fields, and the constant-index elements of a fixed-size array. A path
+state records `Init`, `Empty`, or `Maybe` per place, with the cause (moved or
+declared without a value) and its span for the note. Branches fork the state;
+joins mark disagreeing places `Maybe`. A loop repeats its condition and body,
+joining the `continue` states before the step, until the head state is stable.
+Its exit joins the false-condition state with the `break` states. `return`,
+`break`, and `continue` first walk the deferred statements of the scopes they
+leave; a block walks its own defers at its end. A `let` reuses its place on
+each loop pass, so the states converge.
+
+Section 8.2 of [SYNTAX.md](../SYNTAX.md) states the rules the pass enforces.
+`ownership.ag` now only builds owner initialization plans before expression
+checking.
 
 Stage1 is stricter than stage0 in two cases. It rejects a non-exhaustive `match`
 on an enum and an unknown field in a struct literal. Stage0 accepts both, and

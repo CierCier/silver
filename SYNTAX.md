@@ -35,7 +35,7 @@ prove type checking, code generation, or runtime behavior. Stage0 lives under
 | Traits, operators, and casts | [operator traits](std/ops.ag), [stage1 lowering](libs/agc/src/frontend/lower_expr.ag) | [comparison](tests/compare_trait_test.ag), [sequences](tests/sequence_traits_test.ag) |
 | Control flow, matching, and defers | [stage1 statement codegen](libs/agc/src/backend/llvm/stmt.ag) | [iterators](tests/iterator_ergonomics_test.ag), [guards](tests/guard_test.ag) |
 | Macros, attributes, cfg, and static values | [stage1 cfg](libs/agc/src/frontend/cfg.ag), [stage0 parser](bootstrap/stage0/agc/src/parser/prt_parser.rs) | [JSON serialization](tests/json_test.ag), [formatting](tests/fmt_test.ag) |
-| Ownership and borrowing | [stage0 borrow checker](bootstrap/stage0/agc/src/semantic/borrow_check.rs), [stage1 ownership](libs/agc/src/frontend/ownership.ag) | [container cleanup](tests/collection_drop_glue_test.ag), [Box](tests/box_test.ag) |
+| Ownership and borrowing | [stage0 borrow checker](bootstrap/stage0/agc/src/semantic/borrow_check.rs), [stage1 move flow](libs/agc/src/frontend/move_flow.ag) | [container cleanup](tests/collection_drop_glue_test.ag), [Box](tests/box_test.ag) |
 | Threads and channels | [stage1 Send check](libs/agc/src/frontend/send.ag), [borrowed launch](libs/agc/src/frontend/scoped_launch.ag), [`shared` and `lock`](libs/agc/src/frontend/sync_sugar.ag), [channels](std/channel.ag), [Arc](std/mem/arc.ag) | [borrowed launch](tests/scoped_launch_test.ag), [`shared` and `lock`](tests/shared_lock_test.ag), [channels](tests/channel_test.ag), [bounded channels](tests/channel_bounded_test.ag), [Arc](tests/arc_test.ag) |
 | Result and optional values | [Optional](std/optional.ag), [Result](std/result.ag), [syscall errors](std/sys/result.ag) | [structured errors](tests/structured_error_test.ag), [Result cleanup](tests/unwrap_or_err_drop_test.ag) |
 | Allocation, formatting, FFI, and assembly | [allocator](std/mem/alloc.ag), [display](std/display.ag), [stage1 codegen](libs/agc/src/backend/llvm/generator.ag) | [allocation](tests/allocation_bounds_test.ag), [display](tests/display_test.ag), [Rust FFI](tests/rust_ffi_test.ag), [syscalls](tests/syscall_wrapper_test.ag) |
@@ -1071,13 +1071,53 @@ zoo.cage = String.from_str("c"); // reinit — `zoo.cage` is live again
 // move zoo  would invalidate both fields; `zoo.cage` vs `zoo.keeper` are disjoint
 ```
 
-`v[i]` is an `Index` place. Index is conservative: `v` overlaps `v[i]`, and `v[i]` overlaps `v[j]` (different indices) — borrow/move of `v[i]` conflicts with `v[j]` and with `v`.
+An element of a fixed-size array is an `Index` place. Moving `a[i]` out
+empties that element until it is reassigned. Stage1 tracks each constant
+index separately and treats a computed index as possibly any element. Stage0
+treats every index of one array as the same place, so it also rejects a later
+`a[j]`.
 
 ```silver
-Vec<String> v; v.push(String.from_str("a")); v.push(String.from_str("b"));
-String s = move v[0]; // conservatively moves the Index place; later v[1] access is rejected
-// v[0] = String.from_str("c"); // reinit `v[0]` before indexed access
+String a[2];
+a[0] = String.from_str("a");
+a[1] = String.from_str("b");
+String s = move a[0];          // `a[0]` is empty; `a[1]` is still live in stage1
+a[0] = String.from_str("c");   // reinitialize before using `a[0]` or `a`
 ```
+
+A heap container (`Vec<T>`, `Slice<T>`, or any type with `__index_get`)
+still owns its elements, so a non-Copy element cannot be moved out by
+indexing: `move v[i]` and `T x = v[i]` are rejected. Use `v.take(i)`,
+`v.pop()`, `v.swap_remove(i)`, or borrow the element.
+
+### 8.2 Moves Across Control Flow
+
+Each path through a function carries its own record of which places hold a
+value. Where paths meet, after an `if`, a `match`, a `&&` or `||`, a loop, a
+`break`, or a `continue`, a place holds a value only if it holds one on every
+incoming path. Using a place that a move emptied on any incoming path is an
+error:
+
+```silver
+String s = String.from_str("x");
+while (more()) {
+    if (done()) { consume(move s); break; }  // leaves the loop with `s` empty
+}
+print(&s);                                   // error: use of possibly moved value 's'
+```
+
+A loop is checked until its state stops changing, so a move late in the body
+reaches the next iteration's start, and a move in a `while` condition repeats
+on every test. A `defer` runs when its scope exits, on the fall-through path
+and on every `return`, `break`, or `continue` that leaves the scope, and is
+checked against the state at each exit.
+
+A local declared without a value starts as zeroed storage. It must be assigned
+on every path before it is read or moved, unless part of it is assigned: the
+unassigned fields of a value built field by field keep their zero value. A
+method that takes `*self` or `&mut self`, and `&mut x` or `&x` passed to a `T*`
+parameter, may initialize the storage in place, so `Vec<i64> v; v.push(1);`
+is accepted. Such a borrow of a value that was moved out is still rejected.
 
 Borrow origins interact with places: `&x` vs `move x` conflicts; `&x.a` vs `move x.b` is allowed (disjoint fields); `&mut x.a` vs `move x.a` conflicts.
 

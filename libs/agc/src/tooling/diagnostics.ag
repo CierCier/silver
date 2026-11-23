@@ -217,7 +217,9 @@ DiagnosticBag check_snapshot_diagnostics(SyntaxTree* source, Vec<SyntaxTree*>* d
         check_declared_types(&symbols, &scratch.tree, cfg, &declarations);
         diagnostic_append_local(&diagnostics, &declarations);
     }
-    if (diagnostics.is_empty()) { check_ownership(&scratch.tree, &symbols, &diagnostics, cfg); }
+    if (diagnostics.is_empty()) {
+        Vec<InitOwnerPlan> _plans = build_owner_plans(&scratch.tree, &symbols, &diagnostics, cfg);
+    }
     // Expression checking chooses each launch's overload, which the borrow
     // and Send checks then judge.
     if (diagnostics.is_empty()) {

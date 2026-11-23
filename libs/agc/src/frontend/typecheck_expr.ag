@@ -15,6 +15,7 @@ import frontend.symbols;
 import frontend.sync_sugar;
 import frontend.messages;
 import frontend.monomorph;
+import frontend.move_flow;
 import frontend.types;
 import frontend.cfg;
 /// Nesting limit for expression type checking; deeper code reports an error.
@@ -1823,11 +1824,13 @@ u32 typecheck_arm_moved_binding(AstPool* pool, TypeTable* types, SyntaxNode* roo
     return arm.moves_payload ? pool.arm_bindings.get((i64)arm.bindings_start) : 0;
 }
 
-/// Reports moving a field out of a value whose type implements Drop, or a
+/// Records that `place_id` is passed by value, for the move-flow pass, and
+/// reports moving a field out of a value whose type implements Drop, or a
 /// value out of a lock block. Returns true when it reported.
 bool typecheck_reject_partial_drop_move(AstPool* pool, TypeTable* types, SymbolTable* symbols,
                                         SyntaxNode* root, TypeEnv* env, u32 place_id,
                                         DiagnosticBag* diagnostics, bool* ok) {
+    pool.consumed.set((i64)place_id);
     if (typecheck_reject_locked_move(pool, types, symbols, root, place_id, diagnostics, ok)) {
         return true;
     }
@@ -2748,14 +2751,18 @@ String typecheck_method_symbol_for_call(AstPool* pool, SyntaxNode* root,
                                    best_ret_start, best_name, best_params);
 }
 
-/// Returns true when the overload a call selects takes parameter
-/// `parameter_index` (0 is `self` for an instance call) by value. A method
-/// with no local declaration that fits keeps the arity-based answer.
-bool typecheck_selected_parameter_is_value(AstPool* pool, SyntaxNode* root, TypeTable* types,
-                                           u32 receiver_type, str method_name,
-                                           i64 param_count, u32 args_start,
-                                           bool static_method, i64 parameter_index,
-                                           u32 arg_type) {
+/// How a call passes one argument: by value, through a shared borrow, or
+/// through a raw pointer or `&mut` borrow that may initialize its target.
+enum ParameterMode { Value; Shared; Mutable; }
+
+/// The mode in which the overload a call selects takes parameter
+/// `parameter_index` (0 is `self` for an instance call). A method with no
+/// local declaration that fits keeps the arity-based by-value answer.
+ParameterMode typecheck_selected_parameter_mode(AstPool* pool, SyntaxNode* root, TypeTable* types,
+                                                u32 receiver_type, str method_name,
+                                                i64 param_count, u32 args_start,
+                                                bool static_method, i64 parameter_index,
+                                                u32 arg_type) {
     u32 resolved_receiver = types.resolve_subst(receiver_type);
     TypeEntry* receiver = types.get(resolved_receiver);
     while (receiver.kind == TypeKind.Pointer || receiver.kind == TypeKind.Reference) {
@@ -2772,7 +2779,8 @@ bool typecheck_selected_parameter_is_value(AstPool* pool, SyntaxNode* root, Type
     }
     if (params_node == (SyntaxNode*)0) {
         return typecheck_method_parameter_is_value(root, types, receiver_type, method_name,
-                                                   param_count, parameter_index, arg_type);
+                                                   param_count, parameter_index, arg_type)
+            ? ParameterMode.Value : ParameterMode.Shared;
     }
     Vec<Binding> params = Vec<Binding>.new();
     collect_parameter_bindings(params_node, &params);
@@ -2782,14 +2790,18 @@ bool typecheck_selected_parameter_is_value(AstPool* pool, SyntaxNode* root, Type
         && binding_is_variadic_parameter(params.get_ptr(params.len() - 1))) {
         index = params.len() - 1;
     }
-    bool value_parameter = false;
+    ParameterMode mode = ParameterMode.Shared;
     if (index >= 0 && index < params.len()) {
-        Binding* parameter = params.get_ptr(index);
-        value_parameter = parameter.declared_type.kind != ProjectionTypeKind.Pointer
-            && parameter.declared_type.kind != ProjectionTypeKind.Reference;
+        TypeProjection* declared = &params.get_ptr(index).declared_type;
+        if (declared.kind == ProjectionTypeKind.Pointer
+            || (declared.kind == ProjectionTypeKind.Reference && declared.is_mutable)) {
+            mode = ParameterMode.Mutable;
+        } else if (declared.kind != ProjectionTypeKind.Reference) {
+            mode = ParameterMode.Value;
+        }
     }
     params.drop();
-    return value_parameter;
+    return mode;
 }
 
 /// Returns the return type of the method a call resolves to.
@@ -3713,6 +3725,7 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 u32 actual_type = infer_expr(pool, types, symbols, root, env, arg_id, diagnostics, ok);
                 typecheck_char_pointer_argument(types, parameter_type, actual_type,
                     pool.get_expr(arg_id).span, diagnostics, ok);
+                if (parameter_kind == TypeKind.Pointer) { pool.mutable_borrows.set((i64)arg_id); }
                 if (parameter_kind != TypeKind.Pointer
                     && parameter_kind != TypeKind.Reference
                     && pool.get_expr(arg_id).kind != ExprKind.Move) {
@@ -3826,6 +3839,9 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                             pool.get_expr(arg_expr_id).span, diagnostics, ok);
                         TypeEntry* expected_entry = types.get(expected_arg_type);
                         TypeEntry* actual_entry = types.get(types.resolve_subst(actual_arg_type));
+                        if (expected_entry.kind == TypeKind.Pointer) {
+                            pool.mutable_borrows.set((i64)arg_expr_id);
+                        }
                         if (expected_entry.kind != TypeKind.Pointer
                             && expected_entry.kind != TypeKind.Reference
                             && pool.get_expr(arg_expr_id).kind != ExprKind.Move) {
@@ -4067,12 +4083,16 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         }
         // The argument types select the overload, and with it whether the
         // call takes `self` by value.
-        if (!static_method && (strcmp(method_name, "drop") == 0
-             || typecheck_selected_parameter_is_value(pool, root, types, receiver_type,
-                    method_name, total_param_count, expr.inner1, false, 0, receiver_type))
-            && receiver.kind != ExprKind.Move) {
-            typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
-                                               expr.inner0, diagnostics, ok);
+        if (!static_method) {
+            ParameterMode receiver_mode = strcmp(method_name, "drop") == 0 ? ParameterMode.Value
+                : typecheck_selected_parameter_mode(pool, root, types, receiver_type,
+                    method_name, total_param_count, expr.inner1, false, 0, receiver_type);
+            if (receiver_mode == ParameterMode.Value && receiver.kind != ExprKind.Move) {
+                typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
+                                                   expr.inner0, diagnostics, ok);
+            } else if (receiver_mode == ParameterMode.Mutable) {
+                pool.mutable_borrows.set((i64)expr.inner0);
+            }
         }
         if (has_arguments) {
             i64 arg_index = 0;
@@ -4114,14 +4134,26 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                         arg_type = argument.inferred_type;
                     }
                 }
+                ParameterMode arg_mode = variant_constructor ? ParameterMode.Value
+                    : typecheck_selected_parameter_mode(pool, root, types, receiver_type,
+                          method_name, total_param_count, expr.inner1, static_method,
+                          parameter_index, arg_type);
+                AstExpr* payload = pool.get_expr(arg_id);
+                u32 payload_type = types.resolve_subst(payload.inferred_type);
+                // A named owner placed in a variant must say `move`; temporaries need not.
                 if (variant_constructor
-                    || typecheck_selected_parameter_is_value(pool, root, types, receiver_type,
-                           method_name, total_param_count, expr.inner1, static_method,
-                           parameter_index, arg_type)) {
-                    if (pool.get_expr(arg_id).kind != ExprKind.Move) {
-                        typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
-                                                           arg_id, diagnostics, ok);
-                    }
+                    && (payload.kind == ExprKind.Var || payload.kind == ExprKind.Field)
+                    && types.get(payload_type).kind == TypeKind.Named
+                    && !typecheck_type_is_copy(root, types, payload_type)) {
+                    diagnostics.error(payload.span,
+                        payload_must_be_moved(types.type_name(payload_type)));
+                    *ok = false;
+                }
+                if (arg_mode == ParameterMode.Value && pool.get_expr(arg_id).kind != ExprKind.Move) {
+                    typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
+                                                       arg_id, diagnostics, ok);
+                } else if (arg_mode == ParameterMode.Mutable) {
+                    pool.mutable_borrows.set((i64)arg_id);
                 }
                 arg_index += 1;
             }
@@ -4873,12 +4905,28 @@ void typecheck_body(AstPool* pool, TypeTable* types, SymbolTable* symbols, Synta
         stmt_ids.drop();
         return;
     }
+    // Parameters are the outermost locals; capture them before statements add more.
+    Vec<LocalVar> parameter_locals = Vec<LocalVar>.new();
+    i64 local_index = 0;
+    while (local_index < env.locals.len()) {
+        parameter_locals.push(env.locals.get(local_index));
+        local_index += 1;
+    }
+    bool body_ok = true;
     i64 s = 0;
     while (s < stmt_ids.len()) {
         typecheck_statement(pool, types, symbols, root, &env, expected_return, stmt_ids.get(s),
-                            diagnostics, ok);
+                            diagnostics, &body_ok);
         s += 1;
     }
+    // Move flow needs settled types; a body with type errors would only echo them.
+    if (!body_ok) {
+        *ok = false;
+    } else if (!move_flow_check(pool, types, symbols, root, &parameter_locals, &stmt_ids,
+                                diagnostics)) {
+        *ok = false;
+    }
+    parameter_locals.drop();
     stmt_ids.drop();
 }
 

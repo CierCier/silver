@@ -2908,14 +2908,17 @@ impl ExprLowerer {
             || node.token_kind == TokenKind.Star || node.token_kind == TokenKind.BitwiseAnd)) {
             TokenKind op = node.token_kind;
             SyntaxNode* operand_node = node.next_sibling;
-            if (op == TokenKind.BitwiseAnd && operand_node != (SyntaxNode*)0
-                && operand_node.kind == NodeKind.Token && operand_node.token_kind == TokenKind.Mut) {
+            bool mutable = op == TokenKind.BitwiseAnd && operand_node != (SyntaxNode*)0
+                && operand_node.kind == NodeKind.Token && operand_node.token_kind == TokenKind.Mut;
+            if (mutable) {
                 operand_node = operand_node.next_sibling;
             }
             SyntaxNode* after_operand = (SyntaxNode*)0;
             u32 operand_id = self.lower_postfix(operand_node, &after_operand);
             *next_out = after_operand;
-            return self.pool.add_unary(op, operand_id, node.span);
+            u32 unary_id = self.pool.add_unary(op, operand_id, node.span);
+            if (mutable) { self.pool.get_expr(unary_id).inner1 = 1; }
+            return unary_id;
         }
 
         // Check for type cast: (type)operand
