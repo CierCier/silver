@@ -414,9 +414,11 @@ unsupported.
 
 Stage1 `check`, `build`, and the language server run one expression checker
 ([`typecheck_expressions_scoped`](../libs/agc/src/frontend/typecheck_expr.ag))
-over every cfg-active non-generic function and every cfg-active non-generic
-method of an `impl` whose target takes no type arguments (`impl Record`, not
-`impl<T> Box<T>` or `impl Result<i64, Error>`). Every error it reports fails the command, so
+over every cfg-active function and impl method, generic ones included. Inside
+a generic body a type parameter is opaque: it matches only itself, so
+`return w;` with a `W w` fails in a function returning `T`. In an impl, `Self`
+keeps the target's type arguments (`HashMap<K, V>`, `Result<i64, Error>`).
+Every error it reports fails the command, so
 `check` and `build` agree on semantic acceptance. Link and environment failures
 remain build-only.
 
@@ -472,16 +474,10 @@ the generated code fails at run time.
 
 Remaining limits:
 
-- The checker does not check generic function bodies directly. The token-based
-  pre-check in [`hir.ag`](../libs/agc/src/frontend/hir.ag) catches string and
-  non-string conflicts there. Ownership probes of concrete generic calls report
-  only ownership errors.
 - Overloads of methods with their own type parameters are not judged.
 - The checker does not judge method calls on receivers it cannot resolve, or on
   types that are not declared structs or enums.
-- Methods of a generic `impl` (`impl<T> ...` or `impl Box<T>`), of a concrete
-  specialization (`impl Result<i64, Error>`), and methods with their own type
-  parameters are not checked.
+- `cast` blocks are not checked.
 - Two codegen divergences pass checking: stage1 passes a `[a, b]` tuple literal
   argument incorrectly, and it converts `bool b = 1.5;` to `true` where stage0
   produces `false`.
