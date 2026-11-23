@@ -3108,8 +3108,11 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         infer_expr(pool, types, symbols, root, env, expr.inner1, diagnostics, ok);
         if (writer_type != TYPE_UNKNOWN) {
             TypeEntry* writer_entry = types.get(writer_type);
-            if (writer_entry.kind != TypeKind.Pointer
-                || strcmp(types.type_name(writer_entry.inner), "BufWriter") != 0) {
+            // `@println` writes through the `STDOUT` global itself.
+            bool writer_place = pool.get_expr(expr.inner0).kind == ExprKind.Var
+                && strcmp(types.type_name(writer_type), "BufWriter") == 0;
+            if (!writer_place && (writer_entry.kind != TypeKind.Pointer
+                || strcmp(types.type_name(writer_entry.inner), "BufWriter") != 0)) {
                 diagnostics.error(expr.span,
                     String.from_str("@fprint expects a BufWriter* as its first argument"));
                 *ok = false;
@@ -4755,6 +4758,39 @@ void typecheck_impl_methods(AstPool* pool, SymbolTable* symbols, SyntaxNode* roo
     types.pop_subst(1);
 }
 
+/// Lowers global `item` like a local declaration, records its declared type
+/// on the symbol so bodies can read it, and checks its initializer when
+/// `report` is set.
+void typecheck_global(AstPool* pool, SymbolTable* symbols, SyntaxNode* root, SyntaxNode* item,
+                      bool report, DiagnosticBag* diagnostics, bool* ok) {
+    SyntaxNode* start = item.first_child;
+    while (start != (SyntaxNode*)0 && start.kind == NodeKind.Token
+        && (start.token_kind == TokenKind.Private || strcmp(start.text, "#") == 0)) {
+        start = strcmp(start.text, "#") == 0 && start.next_sibling != (SyntaxNode*)0
+            ? start.next_sibling.next_sibling : start.next_sibling;
+    }
+    ExprLowerer lowerer = ExprLowerer.new(pool, &symbols.types, &symbols.names);
+    lowerer.unit_root = root;
+    Vec<u32> stmt_ids = Vec<u32>.new();
+    lowerer.lower_block_range(start, (SyntaxNode*)0, &stmt_ids);
+    if (lowerer.unsupported || stmt_ids.len() != 1
+        || pool.get_stmt(stmt_ids.get(0)).kind != StmtKind.Let) {
+        stmt_ids.drop();
+        return;
+    }
+    AstStmt* stmt = pool.get_stmt(stmt_ids.get(0));
+    SyntaxNode* name = item_identifier(item);
+    if (name != (SyntaxNode*)0 && stmt.inner0 != TYPE_UNKNOWN) {
+        symbols.set_type(name.text, stmt.inner0);
+    }
+    if (report) {
+        TypeEnv env = TypeEnv.new();
+        typecheck_statement(pool, &symbols.types, symbols, root, &env, TYPE_VOID,
+                            stmt_ids.get(0), diagnostics, ok);
+    }
+    stmt_ids.drop();
+}
+
 /// Type-checks cfg-active functions and impl methods, only those from file
 /// `file_id_filter` when it is nonzero. Type parameters stay opaque.
 bool typecheck_expressions_scoped(AstPool* pool, SymbolTable* symbols, SyntaxTree* tree,
@@ -4762,7 +4798,17 @@ bool typecheck_expressions_scoped(AstPool* pool, SymbolTable* symbols, SyntaxTre
     bool ok = true;
     Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
     cfg_collect_items(tree.root, cfg, diagnostics, &items);
+    // Globals are typed first: any body may read one.
     i64 index = 0;
+    while (index < items.len()) {
+        SyntaxNode* item = items.get(index);
+        if (item.kind == NodeKind.Global) {
+            typecheck_global(pool, symbols, tree.root, item,
+                file_id_filter == 0 || item.span.file == (i64)file_id_filter, diagnostics, &ok);
+        }
+        index += 1;
+    }
+    index = 0;
     while (index < items.len()) {
         SyntaxNode* item = items.get(index);
         if (file_id_filter == 0 || item.span.file == (i64)file_id_filter) {

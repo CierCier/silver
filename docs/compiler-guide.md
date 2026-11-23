@@ -432,6 +432,7 @@ The checker rejects these invalid core forms with a source diagnostic:
 | Generic calls | Explicit type argument lists of the wrong length, and arguments and results that conflict with explicit type arguments or with type arguments inferred from non-literal arguments. |
 | Aggregates | Unknown fields in struct literals and field access, and field or array element values that do not convert. |
 | Assignments | Values that do not convert to the target, and undeclared targets. |
+| Globals | Initializers that do not convert to the declared type. Bodies read a global with its declared type, so `str s = g_count;` fails for an `i64 g_count`. |
 | Returns | Values that do not convert to the return type, and `return;` in a function with a resolved non-void return type. |
 
 Implicit conversions follow stage0. Numeric, `char`, and `bool` primitives
