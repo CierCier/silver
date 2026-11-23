@@ -6319,10 +6319,16 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             }
             bool semantic_receiver = receiver_parameter_count > 0
                 && receiver_parameters.get(0) == llvm_reference_type(ctx.ctx);
-            LLVMOpaqueValue* rx_val = semantic_receiver
+            // A `str` receiver becomes a temporary slice, borrowed for `&self`.
+            LLVMOpaqueValue* str_slice = str_slice_receiver
+                ? llvm_emit_str_as_slice_ptr(ctx, expr.inner0) : (LLVMOpaqueValue*)0;
+            LLVMOpaqueValue* rx_val = str_slice_receiver
+                ? (semantic_receiver && str_slice != (LLVMOpaqueValue*)0
+                    ? llvm_reference_build(ctx.ctx, ctx.builder, str_slice,
+                                           llvm_reference_initialized(ctx.ctx))
+                    : str_slice)
+                : semantic_receiver
                 ? llvm_emit_reference_argument(ctx, expr.inner0, ctx.types.get_reference(receiver_type_id, true))
-                : str_slice_receiver
-                ? llvm_emit_str_as_slice_ptr(ctx, expr.inner0)
                 : (rx_is_ptr ? llvm_emit_expr(ctx, expr.inner0) : llvm_emit_lvalue(ctx, expr.inner0));
             if (rx_val == (LLVMOpaqueValue*)0 && !rx_is_ptr) {
                 LLVMOpaqueValue* val = llvm_emit_expr(ctx, expr.inner0);
