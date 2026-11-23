@@ -171,6 +171,47 @@ bool typecheck_is_opaque_name(TypeTable* types, u32 type_id) {
     return true;
 }
 
+/// True when generic type arguments `expected` and `actual` have the same
+/// representation. Codegen passes a `Cell<i32>` unconverted, so it is not
+/// a `Cell<i64>` even though `i32` converts to `i64`. Unresolved arguments
+/// and bare names without struct facts (an unbound parameter, as in
+/// `Optional.none()`) are not judged.
+bool typecheck_same_type_arg(TypeTable* types, u32 expected, u32 actual, i64 depth) {
+    expected = types.resolve_subst(expected);
+    actual = types.resolve_subst(actual);
+    if (expected == actual || typecheck_type_is_unresolved(types, expected, 0)
+        || typecheck_type_is_unresolved(types, actual, 0)
+        || typecheck_is_opaque_name(types, expected) || typecheck_is_opaque_name(types, actual)) {
+        return true;
+    }
+    TypeEntry* exp_entry = types.get(expected);
+    TypeEntry* act_entry = types.get(actual);
+    if (depth > 16 || exp_entry.kind != act_entry.kind || exp_entry.count != act_entry.count) {
+        return false;
+    }
+    if (exp_entry.kind == TypeKind.Pointer || exp_entry.kind == TypeKind.Reference
+        || exp_entry.kind == TypeKind.Array) {
+        return typecheck_same_type_arg(types, exp_entry.inner, act_entry.inner, depth + 1);
+    }
+    if (exp_entry.kind == TypeKind.Tuple
+        || (exp_entry.kind == TypeKind.Named && exp_entry.name_id == act_entry.name_id)) {
+        i64 count = exp_entry.count;
+        u32 exp_start = exp_entry.inner;
+        u32 act_start = act_entry.inner;
+        i64 arg = 0;
+        while (arg < count) {
+            if (!typecheck_same_type_arg(types, types.type_args.get(exp_start + (u32)arg),
+                                         types.type_args.get(act_start + (u32)arg),
+                                         depth + 1)) {
+                return false;
+            }
+            arg += 1;
+        }
+        return true;
+    }
+    return false;
+}
+
 /// Returns true when `actual` is acceptable where `expected` is required.
 /// Unresolved types always match, as do pointers or references where either
 /// side points to `void`. Numeric, `char`, and `bool` primitives convert
@@ -234,24 +275,9 @@ bool types_match(TypeTable* types, u32 expected, u32 actual) {
         if ((exp_name[i] == (u8)0 || exp_name[i] == (u8)60)
             && (act_name[i] == (u8)0 || act_name[i] == (u8)60)) {
             // `Cell<str>` is not a `Cell<i64>`: compare recorded type arguments.
-            // A bare name without struct facts may be an unbound parameter,
-            // as in `Optional.none()`, so it is not judged.
             if (exp_entry.name_id == act_entry.name_id && exp_entry.count > 0
                 && exp_entry.count == act_entry.count) {
-                i64 count = exp_entry.count;
-                u32 exp_start = exp_entry.inner;
-                u32 act_start = act_entry.inner;
-                i64 arg = 0;
-                while (arg < count) {
-                    u32 exp_arg = types.type_args.get(exp_start + (u32)arg);
-                    u32 act_arg = types.type_args.get(act_start + (u32)arg);
-                    if (!typecheck_is_opaque_name(types, exp_arg)
-                        && !typecheck_is_opaque_name(types, act_arg)
-                        && !types_match(types, exp_arg, act_arg)) {
-                        return false;
-                    }
-                    arg += 1;
-                }
+                return typecheck_same_type_arg(types, expected, actual, 0);
             }
             return true;
         }
@@ -797,6 +823,16 @@ void typecheck_infer_type_args(TypeTable* types, CalleeTypeArgs* args, u32 decla
     } else if (declared_entry.kind == TypeKind.Array && actual_entry.kind == TypeKind.Array) {
         typecheck_infer_type_args(types, args, declared_entry.inner, actual_entry.inner,
                                   depth + 1);
+    } else if (declared_entry.kind == TypeKind.Tuple && actual_entry.kind == TypeKind.Array
+               && declared_entry.count == actual_entry.count) {
+        // `["a", "b"]` is typed as an array until it fills the tuple.
+        i64 i = 0;
+        while (i < declared_entry.count) {
+            typecheck_infer_type_args(types, args,
+                types.type_args.get(declared_entry.inner + (u32)i), actual_entry.inner,
+                depth + 1);
+            i += 1;
+        }
     } else if (declared_entry.count == actual_entry.count
                && ((declared_entry.kind == TypeKind.Tuple && actual_entry.kind == TypeKind.Tuple)
                    || (declared_entry.kind == TypeKind.Named
