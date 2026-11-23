@@ -2746,6 +2746,17 @@ LLVMOpaqueValue* llvm_emit_struct_lit(LlvmContext* ctx, AstExpr* expr) {
         struct_name = ctx.names.get(expr.inner0);
         named_id = ctx.types.get_named(struct_name);
     }
+    // A nested literal in a generic field is named after the field's type
+    // parameter (`T` in `Cell<T>`); the assignment target's type names it.
+    if (expr.inner0 != 0 && ctx.find_struct_by_str(struct_name) == (LlvmStructDef*)0
+        && ctx.expected_type_id != TYPE_UNKNOWN) {
+        u32 expected_id = ctx.types.resolve_subst(ctx.expected_type_id);
+        TypeEntry* expected = ctx.types.get(expected_id);
+        if (expected.kind == TypeKind.Named) {
+            named_id = expected_id;
+            struct_name = ctx.types.names.get(expected.name_id);
+        }
+    }
     LlvmStructDef* def = ctx.find_struct_by_str(struct_name);
     if (def == (LlvmStructDef*)0 || named_id == TYPE_UNKNOWN) {
         ctx.note_unresolved("struct-lit", struct_name);
