@@ -439,7 +439,8 @@ these conversions but not a user `cast` block, because element stores do not
 run one. A user `cast` block also converts
 implicitly, and `&r` of a reference `r` reborrows through it. Overload selection
 ranks a scalar or `cast` conversion below a numeric match, so `f(1)` picks
-`f(i64)` over `f(bool)`, and `f(bool)` over `f(str)`.
+`f(i64)` over `f(bool)`, and `f(bool)` over `f(str)`. `launch f(x)` runs the
+same `cast` block as `f(x)` before packing the argument for the task.
 
 A value passed to an immutable `&T` parameter is borrowed implicitly. In
 overload selection an implicit borrow costs two conversions, as in stage0, so

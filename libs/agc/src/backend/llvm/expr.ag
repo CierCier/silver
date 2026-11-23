@@ -3454,16 +3454,31 @@ LLVMOpaqueValue* llvm_emit_launch(LlvmContext* ctx, u32 expr_id) {
     SyntaxNode* c_extern_params = c_abi_call
         ? item_c_extern_function_parameters(ctx.root, ctx.names.get(callee_expr.aux))
         : (SyntaxNode*)0;
+    // A plain Silver callee's parameter types tell which `cast` blocks the
+    // arguments need, as in an ordinary call.
+    SyntaxNode* declaration = selected;
+    if (declaration == (SyntaxNode*)0 && !c_abi_call && call.generic_args_count == 0) {
+        declaration = find_function_by_name_and_arity(ctx.root, callee_name, (i64)call.aux);
+    }
+    SyntaxNode* silver_params = declaration != (SyntaxNode*)0
+        && !typecheck_is_generic_function(declaration)
+        ? binding_function_parameters(declaration) : (SyntaxNode*)0;
     i = 0;
     while (i < (i64)call.aux) {
         u32 arg_id = ctx.pool.args.get((i64)call.inner1 + i);
         u32 expected_arg_type = TYPE_UNKNOWN;
+        u32 parameter_type = TYPE_UNKNOWN;
         Vec<Binding> params = Vec<Binding>.new();
         if (c_extern_params != (SyntaxNode*)0) {
             collect_parameter_bindings(c_extern_params, &params);
             if (i < params.len()) {
                 expected_arg_type = typecheck_parameter_type_id(
                     ctx.types, params.get_ptr(i));
+            }
+        } else if (silver_params != (SyntaxNode*)0) {
+            collect_parameter_bindings(silver_params, &params);
+            if (i < params.len()) {
+                parameter_type = typecheck_parameter_type_id(ctx.types, params.get_ptr(i));
             }
         }
         params.drop();
@@ -3475,11 +3490,18 @@ LLVMOpaqueValue* llvm_emit_launch(LlvmContext* ctx, u32 expr_id) {
             ctx.note_unresolved("launch-argument", "expression");
             value = LLVMConstNull(param_types.get(i));
         }
-        args.push(value);
         u32 actual_arg_type = llvm_expr_type(ctx, arg_id);
         if (actual_arg_type == TYPE_UNKNOWN && c_abi_call) {
             actual_arg_type = expected_arg_type;
         }
+        LLVMOpaqueValue* user_cast = llvm_try_apply_user_cast(
+            ctx, value, actual_arg_type, parameter_type);
+        if (user_cast != (LLVMOpaqueValue*)0) {
+            value = user_cast;
+            actual_arg_type = parameter_type;
+            expected_arg_type = parameter_type;
+        }
+        args.push(value);
         arg_types.push(actual_arg_type);
         target_types.push(expected_arg_type);
         i += 1;
