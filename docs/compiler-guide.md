@@ -417,9 +417,10 @@ Stage1 `check`, `build`, and the language server run one expression checker
 over every cfg-active function and impl method, generic ones included. Inside
 a generic body a type parameter is opaque: it matches only itself, so
 `return w;` with a `W w` fails in a function returning `T`. In an impl, `Self`
-keeps the target's type arguments (`HashMap<K, V>`, `Result<i64, Error>`).
-Every error it reports fails the command, so
-`check` and `build` agree on semantic acceptance. Link and environment failures
+keeps the target's type arguments (`HashMap<K, V>`, `Result<i64, Error>`) and
+pointer layers (`impl Record*`). Codegen binds the same `Self`, so a method may
+return `Self`. Every error the checker reports fails the command, so `check`
+and `build` agree on semantic acceptance. Link and environment failures
 remain build-only.
 
 The checker rejects these invalid core forms with a source diagnostic:

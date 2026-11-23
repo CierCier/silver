@@ -1559,7 +1559,9 @@ impl LlvmGenerator {
                                             rscan = rscan.next_sibling;
                                         }
                                     }
-                                    u32 ret_type_id = type_id_from_text(types, ret_str.to_str());
+                                    u32 ret_type_id = strcmp(ret_str.to_str(), "Self") == 0
+                                        ? typecheck_impl_self_type(types, item)
+                                        : type_id_from_text(types, ret_str.to_str());
                                     ret_str.drop();
                                     if (!is_cast) {
                                         String method_symbol = typecheck_method_symbol(
@@ -2277,7 +2279,9 @@ impl LlvmGenerator {
                                             rscan = rscan.next_sibling;
                                         }
                                     }
-                                    u32 ret_type_id = type_id_from_text(types, ret_str.to_str());
+                                    u32 ret_type_id = strcmp(ret_str.to_str(), "Self") == 0
+                                        ? typecheck_impl_self_type(types, item)
+                                        : type_id_from_text(types, ret_str.to_str());
                                     ret_str.drop();
                                     if (!is_cast) {
                                         String method_symbol = typecheck_method_symbol(
@@ -2301,6 +2305,9 @@ impl LlvmGenerator {
                                         LLVMOpaqueBasicBlock* entry_bb = LLVMAppendBasicBlockInContext(self.ctx, fn_val, "entry");
                                         LLVMPositionBuilderAtEnd(self.builder, entry_bb);
                                         ctx.push_scope();
+                                        u32 method_self_type = typecheck_impl_self_type(types, item);
+                                        types.push_subst(types.names.intern("Self"), method_self_type);
+                                        ctx.push_type_binding("Self", method_self_type);
 
                                         Vec<Binding> params = Vec<Binding>.new();
                                         collect_parameter_bindings(params_node, &params);
@@ -2386,6 +2393,7 @@ impl LlvmGenerator {
                                                 LLVMBuildRet(self.builder, LLVMConstNull(ret_llvm_type));
                                             }
                                         }
+                                        types.pop_subst(1);
                                         ctx.pop_scope();
                                     }
                                 }
