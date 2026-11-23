@@ -96,5 +96,11 @@ i32 main() {
     assert_eq_i64(3, window.extent.start, "positional initializer fills fields in order");
     assert_eq_i64(4, (i64)window.extent.width, "nested positional value converts to i32");
     assert_eq_i64(1, (i64)window.depth, "positional value converts to u8");
+    Extent extents[2] = { { 7, 8 }, { 9, 10 } };
+    assert_eq_i64(10, (i64)extents[1].width, "nested braces fill struct array elements");
+    i32 sparse[6] = { [1]=100, [4]=-2 };
+    assert_eq_i64(100, (i64)sparse[1], "designated element is set");
+    assert_eq_i64(-2, (i64)sparse[4], "designated negative element is set");
+    assert_eq_i64(0, (i64)sparse[0] + (i64)sparse[5], "undesignated elements stay zero");
     return done();
 }

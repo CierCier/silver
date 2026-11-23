@@ -273,10 +273,11 @@ String unchecked_function_body(str name) {
     return @format("cannot check the body of '{}': it uses a construct the stage1 checker does not support yet", name);
 }
 
-/// Diagnostic text: "designated array initializers (`[index] = value`) are
-/// not supported by stage1 yet". Returns an owned string.
+/// Diagnostic text: "stage1 supports designated array initializers
+/// (`[index] = value`) only in a local array declaration". Returns an owned
+/// string.
 String designated_array_initializer_unsupported() {
-    return String.from_str("designated array initializers (`[index] = value`) are not supported by stage1 yet");
+    return String.from_str("stage1 supports designated array initializers (`[index] = value`) only in a local array declaration");
 }
 
 /// Diagnostic text: "void function cannot return a value". Returns static

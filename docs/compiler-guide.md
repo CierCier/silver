@@ -472,11 +472,16 @@ each non-literal argument binds the parameters that appear in its declared type.
 Parameters left unbound stay unknown.
 
 A function body that the checker cannot lower does not pass silently. When
-lowering explains the construct, that diagnostic is reported on its own:
-designated array initializers (`i32 a[4] = { [1]=7 };`) fail with a specific
-diagnostic, at the macro call when a macro body contains one. Otherwise the
-body fails with `cannot check the body of '<name>'`. Native codegen does
-not implement them, and it previously wrote the wrong elements.
+lowering explains the construct, that diagnostic is reported on its own, at
+the macro call when a macro body contains it. Otherwise the body fails with
+`cannot check the body of '<name>'`.
+
+A local array declaration with designators (`i32 a[4] = { [1]=7, 8 };`)
+lowers to a zero-filled array followed by one element assignment per entry.
+As in C, an entry after `[i]=v` fills index `i + 1`, and nested initializers
+may use designators too. Other array literals, such as a `static` local or a
+function argument, fail with a designator diagnostic because the array
+literal form has no indices.
 
 Stage1 is stricter than stage0 in two cases. It rejects a non-exhaustive `match`
 on an enum and an unknown field in a struct literal. Stage0 accepts both, and
