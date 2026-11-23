@@ -2590,6 +2590,8 @@ void typecheck_body_requirements(TypeTable* types, SyntaxNode* root, SyntaxNode*
     if (body == (SyntaxNode*)0 || depth > 8) { return; }
     Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
     cfg_collect_leaves(body, &leaves);
+    Vec<Binding> bindings = Vec<Binding>.new();
+    collect_function_bindings(function, &bindings);
     i64 p = 0;
     while (p < params.len()) {
         str name = params.get_ptr(p).name;
@@ -2599,6 +2601,11 @@ void typecheck_body_requirements(TypeTable* types, SyntaxNode* root, SyntaxNode*
             SyntaxNode* receiver = leaves.get(i);
             bool parameter = strcmp(receiver.text, name) == 0
                 && (i == 0 || !cfg_node_text(leaves.get(i - 1), "."));
+            // A local of the same name shadows the parameter.
+            if (parameter) {
+                Binding* visible = visible_binding(&bindings, name, receiver);
+                parameter = visible != (Binding*)0 && visible.kind == BindingKind.Parameter;
+            }
             SyntaxNode* method = i + 2 < leaves.len() ? leaves.get(i + 2) : (SyntaxNode*)0;
             // Argument lists are `Parenthesized` nodes, not leaves. A `lock`
             // block's synthesized `.lock()` has an empty span; the lock
@@ -2630,6 +2637,7 @@ void typecheck_body_requirements(TypeTable* types, SyntaxNode* root, SyntaxNode*
         }
         p += 1;
     }
+    bindings.drop();
     leaves.drop();
 }
 

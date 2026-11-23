@@ -490,8 +490,9 @@ the generated code fails at run time.
 A generic body is a template, so the checker does not judge a method call on
 a type-parameter receiver inside it. Each concrete call instead reports
 `generic call requires method 'get' on type Box` when the bound type lacks a
-method that the body calls on that parameter. The check follows a parameter
-that the body passes whole to another generic function. A call to a method
+method that the body calls on that parameter. A local of the same name
+shadows the parameter. The check follows a parameter that the body passes
+whole to another generic function. A call to a method
 with its own type parameters fails when no declaration takes that many
 arguments, or when monomorphization cannot infer the method's type arguments.
 
