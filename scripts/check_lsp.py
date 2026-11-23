@@ -1415,6 +1415,16 @@ class NativeLsp(unittest.TestCase):
                  ('trait Pair { i64 pick(&self, i64 a) { return a; }\n'
                   ' i64 pick(&self, i64 a, i64 b) { return a + b; } }\nimpl Pair for Counter { }\n'
                   + valid.replace("c.bump(1)", "i64 m = c.pick(1) + c.pick(2, 3)"), []),
+                 # `X self` and `X* self` override `Self self` and `*self`.
+                 ('trait Fallback { i64 show(Self self) { return self.fallback(); }\n'
+                  ' i64 peek(*self) { return self.fallback(); } }\n'
+                  'impl Fallback for Counter { i64 show(Counter self) { return 1; }\n'
+                  ' i64 peek(Counter* self) { return 2; } }\n'
+                  + valid.replace("c.bump(1)", "i64 m = c.show() + c.peek()"), []),
+                 # A parameter named like the type parameter stays a value.
+                 ('trait Same<T> { i64 same(&self, i64 T) { return T; } }\n'
+                  'impl Same<i32> for Counter { }\n'
+                  + valid.replace("c.bump(1)", "i64 m = c.same(4)"), []),
                  # An impl overload replaces only the default with its parameter types.
                  ('trait Both<T> { T both(&self, T x) { return x; }\n'
                   ' i64 both(&self, str s) { return 9; } }\n'
