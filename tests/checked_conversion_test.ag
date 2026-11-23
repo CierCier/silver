@@ -102,5 +102,10 @@ i32 main() {
     assert_eq_i64(100, (i64)sparse[1], "designated element is set");
     assert_eq_i64(-2, (i64)sparse[4], "designated negative element is set");
     assert_eq_i64(0, (i64)sparse[0] + (i64)sparse[5], "undesignated elements stay zero");
+    u8 high_byte = 200;
+    i32 stored = high_byte;
+    assert_eq_i64(200, (i64)stored, "u8 widens without sign extension when stored");
+    u16 high_half = 60000;
+    assert_eq_i64(60000, widen(high_half), "u16 widens without sign extension as an argument");
     return done();
 }

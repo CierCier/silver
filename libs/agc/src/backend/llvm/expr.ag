@@ -1345,7 +1345,14 @@ LLVMOpaqueValue* llvm_compat_value(LlvmContext* ctx, LLVMOpaqueValue* val,
             return val;
         }
         if (vw < tw) {
-            if (llvm_type_is_signed(ctx.types, target_type_id)) {
+            // Widening keeps the value, so the source picks the extension:
+            // `u8 200` stays 200 in an i32, and a bool is 0 or 1. Only an
+            // untyped source falls back to the target's signedness.
+            u32 source_id = ctx.types.resolve_subst(source_type_id);
+            bool signed_source = vw > 1 && (llvm_type_is_signed(ctx.types, source_id)
+                || (!llvm_type_is_unsigned(ctx.types, source_id)
+                    && llvm_type_is_signed(ctx.types, target_type_id)));
+            if (signed_source) {
                 return LLVMBuildSExt(ctx.builder, val, target_ty, "compat_sext");
             }
             return LLVMBuildZExt(ctx.builder, val, target_ty, "compat_zext");
@@ -1457,7 +1464,15 @@ void llvm_prepare_call_args(LlvmContext* ctx, LLVMOpaqueType* fn_type,
             } else if (exp_kind == (u32)8 && act_kind == (u32)12) {
                 call_args.set(pi, LLVMBuildPtrToInt(ctx.builder, arg_v, exp_ty, "arg_to_int"));
             } else if (exp_kind == (u32)8 && act_kind == (u32)8 && exp_ty != act_ty) {
-                call_args.set(pi, LLVMBuildIntCast(ctx.builder, arg_v, exp_ty, "arg_int_cast"));
+                // A widened `u16 60000` must stay 60000; only signed sources
+                // sign-extend, and a bool is 0 or 1.
+                bool widen = LLVMGetIntTypeWidth(act_ty) < LLVMGetIntTypeWidth(exp_ty);
+                bool sign = LLVMGetIntTypeWidth(act_ty) > 1
+                    && !llvm_type_is_unsigned(ctx.types, ctx.types.resolve_subst(source_type));
+                call_args.set(pi, !widen
+                    ? LLVMBuildTrunc(ctx.builder, arg_v, exp_ty, "arg_int_trunc")
+                    : sign ? LLVMBuildSExt(ctx.builder, arg_v, exp_ty, "arg_int_sext")
+                    : LLVMBuildZExt(ctx.builder, arg_v, exp_ty, "arg_int_zext"));
             } else if ((exp_kind == (u32)2 || exp_kind == (u32)3) && act_kind == (u32)8) {
                 u32 source_type = TYPE_UNKNOWN;
                 if (pi < source_types.len()) { source_type = source_types.get(pi); }
