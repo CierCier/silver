@@ -388,7 +388,7 @@ bool workspace_plan_from_manifest(str manifest_path, TargetKind kind, bool has_e
 }
 
 /// Sets `*path` to `./silver.toml` when it exists; false otherwise.
-bool workspace_default_manifest(str* path) {
+bool workspace_default_manifest(String* path) {
     String cwd = current_dir();
     String candidate = path_join(cwd.to_str(), MANIFEST_FILE);
     cwd.drop();

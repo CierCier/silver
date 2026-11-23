@@ -21,6 +21,7 @@
 //      rest, for a declared or an inferred `let` Vec.
 //   9. A `#[safe]` struct holding a raw pointer, guarded by its own lock,
 //      is shared by several tasks.
+//  10. A unit-enum argument reaches an integer parameter as its tag.
 //
 // Exit 0 on success; distinct non-zero codes per failure.
 
@@ -97,8 +98,14 @@ void slow_add(&AtomicI64 counter) {
     counter.fetch_add(1);
 }
 
+enum Level { Low; Mid; High; }
+
 i64 twice(i64 value) {
     return value * 2;
+}
+
+i64 level_code(Level level) {
+    return level;
 }
 
 i64 leave_early(bool early) {
@@ -218,6 +225,13 @@ i64 main() {
         }
     }
     if (storage != 4000) { return 13; }
+
+    // 10. Launch arguments convert like direct call arguments.
+    Task<i64> tagged = launch twice(Level.High);
+    if (wait tagged != 4) { return 17; }
+    i64 ordinal = 2;
+    Task<i64> coded = launch level_code(ordinal);
+    if (wait coded != 2) { return 18; }
 
     out.drop();
     values.drop();

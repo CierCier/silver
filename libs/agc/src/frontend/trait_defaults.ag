@@ -1,0 +1,341 @@
+// Trait default methods as ordinary impl methods: each `impl Trait for X`
+// receives a copy of every default body it does not define, so checking,
+// codegen and the language server need no separate dispatch for defaults.
+import frontend.ast;
+import frontend.bindings;
+import frontend.cfg;
+import frontend.items;
+import frontend.lambdas;
+import frontend.typecheck_expr;
+
+/// Returns the `{ ... }` block of an impl or trait item, or null.
+SyntaxNode* trait_defaults_block(SyntaxNode* item) {
+    SyntaxNode* block = item.first_child;
+    while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+        block = block.next_sibling;
+    }
+    return block;
+}
+
+/// Pushes the first and end node of each top-level entry of the `<...>`
+/// list that opens at `less`: `T` and `U` in `<T, U>`, `Vec<u8>` in `<Vec<u8>>`.
+void trait_defaults_entries(SyntaxNode* less, Vec<SyntaxNode*>* bounds) {
+    if (less == (SyntaxNode*)0 || less.kind != NodeKind.Token
+        || less.token_kind != TokenKind.Less) {
+        return;
+    }
+    i64 depth = 1;
+    SyntaxNode* first = less.next_sibling;
+    SyntaxNode* cursor = first;
+    while (cursor != (SyntaxNode*)0 && depth > 0) {
+        if (cursor.kind == NodeKind.Token) {
+            if (cursor.token_kind == TokenKind.Less) { depth += 1; }
+            if (cursor.token_kind == TokenKind.Greater) { depth -= 1; }
+            if (depth == 0 || (depth == 1 && cursor.token_kind == TokenKind.Comma)) {
+                bounds.push(first);
+                bounds.push(cursor);
+                first = cursor.next_sibling;
+            }
+        }
+        cursor = cursor.next_sibling;
+    }
+}
+
+/// Replaces each trait type parameter among the siblings from `first` on,
+/// and in their subtrees, with a copy of the impl's argument for it.
+/// `params` and `args` hold matching entries from `trait_defaults_entries`.
+/// A name that one of `locals` declares at that point, or that names one
+/// of the method's `parameters`, is a value, not the type parameter.
+void trait_defaults_substitute(NodePool* pool, SyntaxNode* parent, SyntaxNode* first,
+                               Vec<SyntaxNode*>* params, Vec<SyntaxNode*>* args,
+                               Vec<Binding>* locals, Vec<str>* parameters) {
+    SyntaxNode* previous = (SyntaxNode*)0;
+    SyntaxNode* cursor = first;
+    while (cursor != (SyntaxNode*)0) {
+        SyntaxNode* next = cursor.next_sibling;
+        i64 k = params.len();
+        bool member = previous != (SyntaxNode*)0 && previous.kind == NodeKind.Token
+            && previous.token_kind == TokenKind.Dot;
+        bool parameter = false;
+        i64 p = 0;
+        while (!parameter && p < parameters.len()) {
+            parameter = strcmp(parameters.get(p), cursor.text) == 0;
+            p += 1;
+        }
+        if (node_is_identifier(cursor) && !member && !parameter
+            && visible_binding(locals, cursor.text, cursor) == (Binding*)0) {
+            k = 0;
+            while (k < params.len() && strcmp(params.get(k).text, cursor.text) != 0) {
+                k += 2;
+            }
+        }
+        if (k < params.len()) {
+            SyntaxNode* holder = pool.create(NodeKind.Type, cursor.span, "");
+            SyntaxNode* token = args.get(k);
+            while (token != args.get(k + 1)) {
+                append_child(holder, lambda_clone_node(pool, token, false));
+                token = token.next_sibling;
+            }
+            if (holder.first_child != (SyntaxNode*)0) {
+                SyntaxNode* last = holder.last_child;
+                lambda_replace_range(parent, cursor, next, holder);
+                cursor = last;
+            }
+        } else if (cursor.kind != NodeKind.Token) {
+            trait_defaults_substitute(pool, cursor, cursor.first_child, params, args, locals,
+                parameters);
+        }
+        previous = cursor;
+        cursor = next;
+    }
+}
+
+/// Pushes the tokens of the type an impl implements its trait for (`Box<i64>`
+/// in `impl Show for Box<i64>`).
+void trait_defaults_target(SyntaxNode* impl_item, Vec<SyntaxNode*>* target) {
+    bool after_for = false;
+    SyntaxNode* child = impl_item.first_child;
+    while (child != (SyntaxNode*)0 && child.kind != NodeKind.Block) {
+        if (after_for) { target.push(child); }
+        if (child.kind == NodeKind.Token
+            && (child.token_kind == TokenKind.For || strcmp(child.text, "for") == 0)) {
+            after_for = true;
+        }
+        child = child.next_sibling;
+    }
+}
+
+/// Returns true when `nodes` spells `target` from index `at` on.
+bool trait_defaults_spells(Vec<SyntaxNode*>* nodes, i64 at, Vec<SyntaxNode*>* target) {
+    if (target.len() == 0 || at + target.len() > nodes.len()) { return false; }
+    i64 i = 0;
+    while (i < target.len()) {
+        SyntaxNode* node = nodes.get(at + i);
+        SyntaxNode* expected = target.get(i);
+        if (node.kind != NodeKind.Token || expected.kind != NodeKind.Token
+            || strcmp(node.text, expected.text) != 0) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+/// Appends one parameter's type `nodes`, spelling the impl's `target` type
+/// as `Self`. A receiver shorthand (`self`, `&self`, `*self`) also spells
+/// `Self`, so `*self` reads like `X* self`.
+void trait_defaults_append_type(Vec<SyntaxNode*>* nodes, SyntaxNode* name,
+                                Vec<SyntaxNode*>* target, String* out) {
+    bool receiver = strcmp(name.text, "self") == 0;
+    if (receiver && nodes.len() == 1 && nodes.get(0).kind == NodeKind.Token
+        && nodes.get(0).token_kind == TokenKind.Star) {
+        out.push_str("Self * ");
+        return;
+    }
+    bool typed = false;
+    i64 i = 0;
+    while (i < nodes.len()) {
+        SyntaxNode* node = nodes.get(i);
+        if (trait_defaults_spells(nodes, i, target)) {
+            out.push_str("Self ");
+            typed = true;
+            i += target.len();
+        } else {
+            append_node_tokens(node, out);
+            out.push((u8)' ');
+            if (!(node.kind == NodeKind.Token
+                  && (node.token_kind == TokenKind.BitwiseAnd || node.token_kind == TokenKind.Star
+                      || node.token_kind == TokenKind.Mut))) {
+                typed = true;
+            }
+            i += 1;
+        }
+    }
+    if (!typed && receiver) { out.push_str("Self "); }
+}
+
+/// Appends the parameter types of method parameter list `list`, without
+/// the parameter names. A trait type parameter (an entry of `params`) is
+/// first replaced with the impl's matching entry of `args`; then the impl's
+/// `target` type spells `Self`, wherever it came from.
+void trait_defaults_signature(SyntaxNode* list, Vec<SyntaxNode*>* target,
+                              Vec<SyntaxNode*>* params, Vec<SyntaxNode*>* args,
+                              String* out) {
+    i64 angle_depth = 0;
+    Vec<SyntaxNode*> nodes = Vec<SyntaxNode*>.new();
+    SyntaxNode* part = list.first_child;
+    while (part != (SyntaxNode*)0) {
+        SyntaxNode* next = part.next_sibling;
+        if (part.kind == NodeKind.Token && part.token_kind == TokenKind.Less) { angle_depth += 1; }
+        if (part.kind == NodeKind.Token && part.token_kind == TokenKind.Greater) { angle_depth -= 1; }
+        // The node before a separator or the list's end is a parameter name.
+        bool name = angle_depth == 0 && (next == (SyntaxNode*)0
+            || (next.kind == NodeKind.Token && next.token_kind == TokenKind.Comma));
+        if (angle_depth == 0 && part.kind == NodeKind.Token
+            && part.token_kind == TokenKind.Comma) {
+            out.push_str(",");
+        } else if (name) {
+            trait_defaults_append_type(&nodes, part, target, out);
+            nodes.clear();
+        } else {
+            i64 entry = 0;
+            while (entry < params.len()
+                   && !(part.kind == NodeKind.Token
+                        && strcmp(params.get(entry).text, part.text) == 0)) {
+                entry += 2;
+            }
+            if (entry < params.len()) {
+                SyntaxNode* arg = args.get(entry);
+                while (arg != (SyntaxNode*)0 && arg != args.get(entry + 1)) {
+                    nodes.push(arg);
+                    arg = arg.next_sibling;
+                }
+            } else {
+                nodes.push(part);
+            }
+        }
+        part = next;
+    }
+    nodes.drop();
+}
+
+/// Returns true when `impl_item` declares method `name` with the parameter
+/// types of the trait default whose parameter list is `list`. A generic
+/// method of that name counts as a declaration.
+bool trait_defaults_declared(SyntaxNode* impl_item, str name, SyntaxNode* list,
+                             Vec<SyntaxNode*>* params, Vec<SyntaxNode*>* args) {
+    SyntaxNode* block = trait_defaults_block(impl_item);
+    if (block == (SyntaxNode*)0) { return false; }
+    Vec<SyntaxNode*> none = Vec<SyntaxNode*>.new();
+    Vec<SyntaxNode*> target = Vec<SyntaxNode*>.new();
+    trait_defaults_target(impl_item, &target);
+    String wanted = String.new();
+    trait_defaults_signature(list, &target, params, args, &wanted);
+    bool found = false;
+    // Bodies are nested blocks, so a direct `name(` or `name<` is a method.
+    SyntaxNode* member = block.first_child;
+    while (member != (SyntaxNode*)0 && !found) {
+        SyntaxNode* next = member.next_sibling;
+        if (member.kind == NodeKind.Token && member.token_kind == TokenKind.Identifier
+            && strcmp(member.text, name) == 0 && next != (SyntaxNode*)0) {
+            if (next.kind == NodeKind.Token && next.token_kind == TokenKind.Less) {
+                found = true;
+            } else if (next.kind == NodeKind.Parenthesized) {
+                String declared = String.new();
+                trait_defaults_signature(next, &target, &none, &none, &declared);
+                found = declared.equals(wanted.to_str());
+                declared.drop();
+            }
+        }
+        member = next;
+    }
+    wanted.drop();
+    target.drop();
+    none.drop();
+    return found;
+}
+
+/// Pushes the parameter names of method parameter list `list`.
+void trait_defaults_parameter_names(SyntaxNode* list, Vec<str>* names) {
+    i64 angle_depth = 0;
+    SyntaxNode* part = list.first_child;
+    while (part != (SyntaxNode*)0) {
+        SyntaxNode* next = part.next_sibling;
+        if (part.kind == NodeKind.Token && part.token_kind == TokenKind.Less) { angle_depth += 1; }
+        if (part.kind == NodeKind.Token && part.token_kind == TokenKind.Greater) { angle_depth -= 1; }
+        if (angle_depth == 0 && node_is_identifier(part) && (next == (SyntaxNode*)0
+            || (next.kind == NodeKind.Token && next.token_kind == TokenKind.Comma))) {
+            names.push(part.text);
+        }
+        part = next;
+    }
+}
+
+/// Copies into `impl_item` the default methods of `trait_item` that it does
+/// not declare with the same parameter types. A copy keeps the trait's
+/// spans, binds `Self` to the impl and the trait's type parameters to the
+/// impl's arguments (`impl Echo<i64>`).
+void trait_defaults_copy(NodePool* pool, SyntaxNode* impl_item, SyntaxNode* trait_name,
+                         SyntaxNode* trait_item) {
+    SyntaxNode* impl_block = trait_defaults_block(impl_item);
+    SyntaxNode* trait_block = trait_defaults_block(trait_item);
+    if (impl_block == (SyntaxNode*)0 || trait_block == (SyntaxNode*)0) { return; }
+    Vec<SyntaxNode*> params = Vec<SyntaxNode*>.new();
+    Vec<SyntaxNode*> args = Vec<SyntaxNode*>.new();
+    SyntaxNode* trait_identifier = item_identifier(trait_item);
+    if (trait_identifier != (SyntaxNode*)0) {
+        trait_defaults_entries(trait_identifier.next_sibling, &params);
+        trait_defaults_entries(trait_name.next_sibling, &args);
+    }
+    if (params.len() != args.len()) { params.clear(); }
+    SyntaxNode* start = trait_block.first_child;
+    SyntaxNode* cursor = start;
+    while (cursor != (SyntaxNode*)0) {
+        SyntaxNode* next = cursor.next_sibling;
+        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
+            start = next;
+        } else if (cursor.kind == NodeKind.Parenthesized && next != (SyntaxNode*)0
+                   && next.kind == NodeKind.Block) {
+            SyntaxNode* name = item_method_name(start, cursor);
+            if (name != (SyntaxNode*)0
+                && !trait_defaults_declared(impl_item, name.text, cursor, &params, &args)) {
+                SyntaxNode* tail = impl_block.last_child;
+                lambda_clone_range(pool, impl_block, start, next.next_sibling);
+                if (params.len() > 0) {
+                    SyntaxNode* copy = tail == (SyntaxNode*)0
+                        ? impl_block.first_child : tail.next_sibling;
+                    Vec<str> parameters = Vec<str>.new();
+                    SyntaxNode* list = copy;
+                    while (list != (SyntaxNode*)0 && list.next_sibling != impl_block.last_child) {
+                        list = list.next_sibling;
+                    }
+                    if (list != (SyntaxNode*)0 && list.kind == NodeKind.Parenthesized) {
+                        trait_defaults_parameter_names(list, &parameters);
+                    }
+                    Vec<Binding> locals = Vec<Binding>.new();
+                    collect_block_bindings(impl_block.last_child, &locals);
+                    trait_defaults_substitute(pool, impl_block, copy, &params, &args, &locals,
+                        &parameters);
+                    locals.drop();
+                    parameters.drop();
+                }
+            }
+            next = next.next_sibling;
+            start = next;
+        }
+        cursor = next;
+    }
+    args.drop();
+    params.drop();
+}
+
+/// Gives every cfg-active trait impl in `tree` the default methods it lacks
+/// from the cfg-active trait of that name.
+void materialize_trait_defaults(SyntaxTree* tree, NodePool* pool, CfgSet* cfg) {
+    Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
+    cfg_collect_items(tree.root, cfg, (DiagnosticBag*)0, &items);
+    i64 i = 0;
+    while (i < items.len()) {
+        SyntaxNode* item = items.get(i);
+        SyntaxNode* trait_name = item.kind == NodeKind.Impl ? typecheck_impl_trait(item)
+            : (SyntaxNode*)0;
+        SyntaxNode* trait_item = (SyntaxNode*)0;
+        i64 j = 0;
+        while (trait_name != (SyntaxNode*)0 && trait_item == (SyntaxNode*)0
+               && j < items.len()) {
+            SyntaxNode* candidate = items.get(j);
+            SyntaxNode* candidate_name = candidate.kind == NodeKind.Trait
+                ? item_identifier(candidate) : (SyntaxNode*)0;
+            if (candidate_name != (SyntaxNode*)0
+                && strcmp(candidate_name.text, trait_name.text) == 0) {
+                trait_item = candidate;
+            }
+            j += 1;
+        }
+        if (trait_item != (SyntaxNode*)0) {
+            trait_defaults_copy(pool, item, trait_name, trait_item);
+        }
+        i += 1;
+    }
+    items.drop();
+}

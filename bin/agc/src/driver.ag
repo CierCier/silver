@@ -15,6 +15,7 @@ import native_backend;
 import workspace;
 import frontend.ownership;
 import frontend.send;
+import frontend.serialize;
 import agsm;
 import cli;
 
@@ -109,6 +110,9 @@ str token_kind_name(TokenKind kind) {
         TokenKind.BitwiseXorAssign : "BitwiseXorAssign",
         TokenKind.LeftShiftAssign : "LeftShiftAssign",
         TokenKind.RightShiftAssign : "RightShiftAssign",
+        TokenKind.LeftShift : "LeftShift",
+        TokenKind.RightShift : "RightShift",
+        TokenKind.FatArrow : "FatArrow",
         TokenKind.BitwiseAnd : "BitwiseAnd",
         TokenKind.BitwiseOr : "BitwiseOr",
         TokenKind.BitwiseXor : "BitwiseXor",
@@ -263,6 +267,15 @@ str node_kind_name(NodeKind kind) {
         NodeKind.Parenthesized : "Parenthesized",
         NodeKind.Bracket : "Bracket",
         NodeKind.Statement : "Statement",
+        NodeKind.Let : "Let",
+        NodeKind.Return : "Return",
+        NodeKind.Break : "Break",
+        NodeKind.Continue : "Continue",
+        NodeKind.If : "If",
+        NodeKind.While : "While",
+        NodeKind.For : "For",
+        NodeKind.Match : "Match",
+        NodeKind.Defer : "Defer",
         NodeKind.Expression : "Expression",
         NodeKind.Token : "Token",
     };
@@ -369,12 +382,10 @@ i32 emit_check(str path, CfgSet* cfg, Vec<String>* include_dirs, LintConfig* lin
         NodePool pool = NodePool.new();
         SyntaxTree tree;
         parse(&stream, &diagnostics, &pool, &tree);
-        profiler_end_phase("parse");
         if (diagnostics.is_empty()) {
-            profiler_begin_phase("hir");
-            check_hir(&tree, cfg, &diagnostics);
-            profiler_end_phase("hir");
+            serialize_augment_tree(&source_copy, &stream, &pool, &tree, &diagnostics);
         }
+        profiler_end_phase("parse");
         if (diagnostics.is_empty()) {
             profiler_begin_phase("symbol_table");
             SymbolTable symbols = SymbolTable.new();
@@ -393,6 +404,7 @@ i32 emit_check(str path, CfgSet* cfg, Vec<String>* include_dirs, LintConfig* lin
             }
             if (diagnostics.is_empty()) {
                 profiler_begin_phase("lambda lowering");
+                materialize_trait_defaults(&tree, &pool, cfg);
                 lower_lambdas(&tree, &pool, &symbols, &diagnostics, cfg);
                 profiler_end_phase("lambda lowering");
             }

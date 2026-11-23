@@ -23,6 +23,34 @@ impl<T: TryFrom<i128>> Converter<T> {
     i64 describe_text<U: Describes<String>>(&self, &U value) { return value.describe(); }
 }
 
+// Unit enums and integers convert implicitly through the enum's tag.
+enum Ordinal { First; Second; Third; }
+enum Offset { Minus = -2; Plus = 2; }
+struct OrdinalBox { Ordinal ordinal; }
+struct Slot<T> { T value; i32 tag; }
+struct Extent { i64 start; i32 width; }
+impl Extent {
+    cast i64(Extent self) { return self.start * 100; }
+    i64 offset(&self, i64 by) { return self.start + by; }
+    i64 scaled(i64 value) { return value; }
+}
+struct Window { Extent extent; u8 depth; }
+impl OrdinalBox {
+    void set(*self, Ordinal ordinal) { self.ordinal = ordinal; }
+}
+i64 ordinal_code(Ordinal ordinal) { return ordinal; }
+i64 widen(i64 value) { return value; }
+Ordinal ordinal_from(i64 raw) { return raw; }
+i64 offset_code(Offset offset) { return offset; }
+
+// Global initializers are constants in positional, struct-element, and
+// designated forms, each converted to the declared type.
+Extent origin = { 5, 6 };
+Extent corners[2] = { { .start = 1, .width = 2 }, { 3, 4 } };
+Extent shifted = { (i64)-2, 3 };
+Slot<i64> large_slot = { 5000000000, 2 };
+i32 grid[4] = { [0] = 1, [0b10] = 5 };
+
 i32 main() {
     Result<u8, Error> byte = u8.try_from((i128)255);
     assert_true(byte.unwrap() == (u8)255, "checked byte upper bound");
@@ -65,5 +93,49 @@ i32 main() {
     assert_true(surrogate.is_err(), "surrogates rejected");
     Result<char, Error> invalid = char.try_from((i128)0x110000);
     assert_true(invalid.is_err(), "codepoint overflow rejected");
+
+    u32 raw = 2;
+    assert_eq_i64(2, ordinal_code(raw), "integer argument becomes a unit enum tag");
+    assert_eq_i64(2, widen(Ordinal.Third), "unit enum argument becomes an integer");
+    assert_eq_i64(1, (i64)ordinal_from(1), "returned integer becomes a unit enum");
+    OrdinalBox box = { .ordinal = Ordinal.First };
+    i8 two = 2;
+    box.set(two);
+    assert_eq_i64(2, (i64)box.ordinal, "method argument becomes a unit enum tag");
+    i8 minus = -2;
+    assert_eq_i64(-2, offset_code(minus), "negative integer keeps its sign as a tag");
+    assert_eq_i64(-2, widen(Offset.Minus), "negative tag widens with its sign");
+
+    Window window = { { 3, 4 }, 1 };
+    assert_eq_i64(3, window.extent.start, "positional initializer fills fields in order");
+    assert_eq_i64(4, (i64)window.extent.width, "nested positional value converts to i32");
+    assert_eq_i64(1, (i64)window.depth, "positional value converts to u8");
+    Extent extents[2] = { { 7, 8 }, { 9, 10 } };
+    assert_eq_i64(10, (i64)extents[1].width, "nested braces fill struct array elements");
+    assert_eq_i64(707, extents[0].offset(extents[0]), "method argument runs its cast block");
+    assert_eq_i64(900, Extent.scaled(extents[1]), "static method argument runs its cast block");
+    i32 sparse[6] = { [1]=100, [4]=-2 };
+    assert_eq_i64(100, (i64)sparse[1], "designated element is set");
+    assert_eq_i64(-2, (i64)sparse[4], "designated negative element is set");
+    assert_eq_i64(0, (i64)sparse[0], "element before a designator stays zero");
+    assert_eq_i64(0, (i64)sparse[2], "element between designators stays zero");
+    assert_eq_i64(0, (i64)sparse[3], "element before the next designator stays zero");
+    assert_eq_i64(0, (i64)sparse[5], "element after the last designator stays zero");
+    assert_eq_i64(5, origin.start, "positional global fills the first field");
+    assert_eq_i64(6, (i64)origin.width, "positional global converts to i32");
+    assert_eq_i64(2, (i64)corners[0].width, "named struct element in a global array");
+    assert_eq_i64(3, corners[1].start, "positional struct element in a global array");
+    assert_eq_i64(1, (i64)grid[0], "global array designator sets the first element");
+    assert_eq_i64(0, (i64)grid[1], "global array zero-fills a skipped element");
+    assert_eq_i64(5, (i64)grid[2], "binary global array designator sets its element");
+    assert_eq_i64(-2, shifted.start, "cast negative fills the first field");
+    assert_eq_i64(3, (i64)shifted.width, "field after a cast negative keeps its value");
+    assert_eq_i64(5000000000, large_slot.value, "generic global field takes the instance type");
+    assert_eq_i64(2, (i64)large_slot.tag, "field after a generic field keeps its value");
+    u8 high_byte = 200;
+    i32 stored = high_byte;
+    assert_eq_i64(200, (i64)stored, "u8 widens without sign extension when stored");
+    u16 high_half = 60000;
+    assert_eq_i64(60000, widen(high_half), "u16 widens without sign extension as an argument");
     return done();
 }

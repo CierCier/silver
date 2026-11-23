@@ -558,6 +558,31 @@ bool mono_resolve_generic_method(AstPool* pool, SyntaxNode* root, TypeTable* typ
         args_start, static_method, template, param_ids, arg_ids, failure, true);
 }
 
+/// Returns true when `type_id` names one of `params` anywhere inside it.
+bool mono_mentions_type_param(TypeTable* types, u32 type_id, Vec<u32>* params, i64 depth) {
+    if (depth > 16 || (i64)type_id >= types.types.len()) { return false; }
+    TypeEntry* entry = types.get(type_id);
+    if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference
+        || entry.kind == TypeKind.Array || entry.kind == TypeKind.Slice) {
+        return mono_mentions_type_param(types, entry.inner, params, depth + 1);
+    }
+    if (entry.kind == TypeKind.TypeParam || (entry.kind == TypeKind.Named && entry.count == 0)) {
+        return mono_contains_type_param(params, entry.name_id);
+    }
+    // A function type stores its result and then its parameters.
+    i64 count = entry.kind == TypeKind.Function ? entry.count + 1
+        : entry.kind == TypeKind.Named || entry.kind == TypeKind.Tuple ? entry.count : 0;
+    i64 i = 0;
+    while (i < count) {
+        if (mono_mentions_type_param(types, types.type_args.get(entry.inner + (u32)i), params,
+                                     depth + 1)) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
 /// Scores how concrete `type_id` is (0 for a bare method type parameter),
 /// used to prefer the most specific candidate impl.
 i64 mono_type_specificity(TypeTable* types, u32 type_id, Vec<u32>* method_params) {
@@ -633,7 +658,7 @@ i64 mono_match_method_call(AstPool* pool, SyntaxNode* root, TypeTable* types,
         }
         u32 actual_id = pool.args.get((i64)args_start + 1 + i);
         specificity += mono_type_specificity(types, formal, &method_params);
-        if (method_params.len() == 0) {
+        if (!mono_mentions_type_param(types, formal, &method_params, 0)) {
             i64 argument_score = 0;
             matched = typecheck_method_argument_score(pool, types, root, receiver_type,
                 actual_id, formal, &argument_score);

@@ -757,6 +757,128 @@ class NativeLsp(unittest.TestCase):
         self.assertEqual(session.result("textDocument/definition", {**document,
             "position": position(text, at)}), before)
 
+    def test_json_macros_check_against_implicit_std_json_and_synthesized_impls(self):
+        repo = Path(__file__).resolve().parent.parent
+        example = (repo / "examples" / "struct_attributes.ag").read_text()
+        env = os.environ.copy()
+        env["SILVER_SYSROOT"] = str(repo)
+        session = Session(self.binary, self.root, env=env)
+        self.addCleanup(session.close)
+        session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {
+            "textDocument": {"diagnostic": {}}}})
+        session.send("initialized", {})
+        broken = example.replace("i32 main() {\n", "i32 main() {\n    i32 wrong = \"text\";\n", 1)
+        cases = [("attributes.ag", example, []),
+                 ("primitive.ag", "i32 main() {\n    @println(\"{}\", @json(5));\n    return 0;\n}\n", []),
+                 ("broken.ag", broken, ["type mismatch: expected i32, found str"])]
+        for name, text, expected in cases:
+            uri = (self.root / name).as_uri()
+            session.send("textDocument/didOpen", {"textDocument": {
+                "uri": uri, "languageId": "silver", "version": 1, "text": text}})
+            report = session.result("textDocument/diagnostic", {"textDocument": {"uri": uri}})
+            self.assertEqual([item["message"] for item in report["items"]], expected, name)
+
+    def test_cast_block_bodies_are_checked_like_methods(self):
+        text = ("struct Point { f64 x; f64 y; }\nimpl Point {\n"
+                " cast f64(Point self) {\n  return \"far\";\n }\n"
+                " cast i64(Point self) {\n  return (i64)self.x;\n }\n}\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
+                         [(3, "type mismatch: expected f64, found str")])
+
+    def test_generic_calls_require_the_methods_their_bodies_call(self):
+        text = ("struct Box { i64 v; }\nstruct Bag { i64 v; }\n"
+                "impl Bag {\n i64 get(&self) { return self.v; }\n}\n"
+                "i64 call_get<T>(&T value) {\n return value.get() + value.get();\n}\n"
+                "i64 unused<T>(T value) {\n return value.missing();\n}\n"
+                "i64 outer<U>(U value) {\n return call_get(&value);\n}\n"
+                "i64 shadowed<T>(T value) {\n {\n  Bag value = { .v = 3 };\n  return value.get();\n }\n}\n"
+                "i64 main() {\n Box b = { .v = 1 };\n Bag g = { .v = 2 };\n"
+                " i64 direct = call_get(&b) + call_get(&g);\n"
+                " return direct + outer(b) + outer(g) + shadowed(b);\n}\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
+                         [(23, "generic call requires method 'get' on type Box"),
+                          (24, "generic call requires method 'get' on type Box")])
+
+    def test_generic_method_calls_check_arity_and_concrete_parameters(self):
+        text = ("struct Box { i64 v; }\nimpl Box {\n"
+                " i64 put<U>(&self, U value, i64 extra) { return self.v + extra; }\n}\n"
+                "i64 main() {\n Box b = { .v = 1 };\n"
+                " i64 fits = b.put(3, 2) + b.put(\"x\", 4);\n"
+                " return fits + b.put(3);\n}\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
+                         [(7, "no overload of method 'put' on type Box matches these arguments")])
+
+    def test_global_and_designated_initializers_match_build(self):
+        # Each initializer that `build` cannot emit fails `check` too.
+        text = ("struct P { i64 x; i64 y; i64 z; }\n"
+                "i64 second = 3;\n"
+                "i64 first = second;\n"
+                "i64 sum = 1 + 2;\n"
+                "P mixed = { .y = 1, 2 };\n"
+                "P typed = { .x = \"x\" };\n"
+                "P ordered = { 1, 2, 3 };\n"
+                "i32 grid[4] = { 1, [2] = 5, 6 };\n"
+                "i64 calls() { return 1; }\n"
+                "i64 main() {\n"
+                " i32 past[2] = { [1] = 7, 8 };\n"
+                " return first + sum + ordered.x + (i64)grid[2] + (i64)past[1];\n}\n"
+                "i64 dynamic() {\n i32 slots[4] = { [calls()] = 7 };\n return (i64)slots[1];\n}\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
+                         [(2, "global initializer must be a compile-time constant expression"),
+                          (3, "global initializer must be a compile-time constant expression"),
+                          (4, "cannot mix positional/indexed items with named struct initializer"),
+                          (5, "type mismatch: expected i64, found str"),
+                          (10, "array initializer index 2 is out of bounds for 2 elements"),
+                          (14, "array initializer index must be a constant integer")])
+
+    def test_self_parameters_in_pointer_impls_take_the_pointer_type(self):
+        text = ("struct Record { i64 v; }\nimpl Record* {\n"
+                " Self pick(Self self, Self other) { return other; }\n"
+                " i64 get(Self self) { return self.v; }\n}\n"
+                "i64 main() {\n Record r = { .v = 3 };\n Record s = { .v = 5 };\n"
+                " Record* p = &r;\n Record* q = p.pick(&s);\n return q.v + p.get();\n}\n")
+        uri = self.open(text)
+        self.assertEqual(self.session.published(uri, 1)["diagnostics"], [])
+
+    def test_positional_and_self_struct_literals_are_checked(self):
+        text = ("struct P { i64 x; str y; }\nimpl P {\n"
+                " Self make(i64 v) {\n  Self r = { .x = v, .y = 1 };\n  return r;\n }\n}\n"
+                "i64 main() {\n P ok = { 1, \"a\" };\n P bad = { 1, 2 };\n return ok.x + bad.x;\n}\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
+                         [(3, "type mismatch: expected str, found i32"),
+                          (9, "type mismatch: expected str, found i32")])
+
+    def test_returned_pointee_places_and_unrelated_c_results_are_not_local_escapes(self):
+        # A result of the parameter's pointee type (`i64*` from `i64**`) is a
+        # loaded value; any other pointer result may view the argument.
+        text = ('extern "C" i64* pick(i64* base, i64** slots, i64 count);\n'
+                'extern "C" i64* same(i64* value);\n'
+                'extern "C" f64* reinterpret(i64* value);\n'
+                'extern "C" &i64 view(i64* value);\n'
+                'extern "C" void* slot_address(void** slot);\n'
+                "struct Doc { i64 count; }\n"
+                "i64* count_of(Doc* doc) { return &doc.count; }\n"
+                "i64* first(i64* base) {\n i64* slot = base;\n return pick(base, &slot, 1);\n}\n"
+                "i64* leak_call() {\n i64 local = 3;\n return same(&local);\n}\n"
+                "Doc** leak_slot(Doc* doc) { return &doc; }\n"
+                "f64* leak_cast() {\n i64 local = 3;\n return reinterpret(&local);\n}\n"
+                "&i64 leak_ref() {\n i64 local = 3;\n return view(&local);\n}\n"
+                "void* leak_address() {\n void* slot = (void*)0;\n return slot_address(&slot);\n}\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual({item["range"]["start"]["line"] for item in diagnostics}, {13, 15, 18, 22, 26})
+        self.assertTrue(all("does not outlive" in item["message"] for item in diagnostics))
+
     def test_shared_values_and_lock_blocks_resolve_to_user_declarations(self):
         repo = Path(__file__).resolve().parent.parent
         text = ("import std.sync;\n"
@@ -970,7 +1092,7 @@ class NativeLsp(unittest.TestCase):
                  " owner.field = 2;\n return wait t;\n}\n",
                  [("cannot assign to 'owner.field' because it is borrowed", 4)]),
                 # A borrowed global's own type decides Send for a generic `&T`.
-                ("import std.mem.rc;\nRc<i64> counter = Rc<i64>.new(1);\nvoid peek<T>(&T _v) { }\ni64 main() {\n"
+                ("import std.mem.rc;\nRc<i64> counter;\nvoid peek<T>(&T _v) { }\ni64 main() {\n"
                  " Task<void> t = launch peek(&counter);\n wait t;\n return 0;\n}\n",
                  [("launch argument of type &Rc<i64> is not Send: Rc<T> carries a shared non-atomic reference count", 4)]),
                 # Only the borrowed field crosses into the task, not its whole owner.
@@ -1066,10 +1188,15 @@ class NativeLsp(unittest.TestCase):
                  "i64 main() {\n Vec<i64> data = Vec<i64>.new();\n Task<i64> t = launch inspect(&data);\n"
                  " i64 n = consume(data);\n return wait t + n;\n}\n",
                  [("cannot move 'data' because it is borrowed", 7)]),
-                # A `&mut` parameter borrows a plain argument mutably.
+                # A `&mut` parameter needs `&mut place`; a plain argument is
+                # rejected before it could write through a task's loan.
                 ("import std.mem.vec;\ni64 inspect(&Vec<i64> data) { return data.len(); }\n"
                  "void mutate(&mut Vec<i64> data) { data.push(1); }\ni64 main() {\n Vec<i64> data = Vec<i64>.new();\n"
                  " Task<i64> t = launch inspect(&data);\n mutate(data);\n return wait t;\n}\n",
+                 [("type mismatch in argument 1: expected &mut Vec<i64>, found Vec<i64>", 6)]),
+                ("import std.mem.vec;\ni64 inspect(&Vec<i64> data) { return data.len(); }\n"
+                 "void mutate(&mut Vec<i64> data) { data.push(1); }\ni64 main() {\n Vec<i64> data = Vec<i64>.new();\n"
+                 " Task<i64> t = launch inspect(&data);\n mutate(&mut data);\n return wait t;\n}\n",
                  [("cannot borrow 'data' as mutable because it is already borrowed as shared", 6)]),
                 # A method's `&T` parameter borrows a plain argument too.
                 ("import std.mem.vec;\nstruct Reader { i64 base; }\nimpl Reader {\n"
@@ -1252,6 +1379,91 @@ class NativeLsp(unittest.TestCase):
                                                        "source": "silver", "message": message}]
                 self.assertEqual(errors, expected)
 
+    def test_push_diagnostics_report_core_type_errors_and_clear_after_fixes(self):
+        # The editor shares `agc check`'s expression checker, so a core type
+        # error it once filtered out now reaches the document.
+        valid = ('struct Counter { i32 n; }\n'
+                 'impl Counter { void bump(Counter* self, i32 by) { self.n = self.n + by; } }\n'
+                 'i32 total(Counter* c) { c.bump(1); return c.n; }\n')
+        uri = (self.root / "push-core-types.ag").as_uri()
+        cases = [(valid, []),
+                 (valid.replace("c.bump(1)", 'c.bump("one")'),
+                  ["no overload of method 'bump' on type Counter matches these arguments"]),
+                 (valid.replace("c.bump(1)", "c.reset()"), ["unknown method 'reset' on type Counter"]),
+                 # A trait Counter does not implement cannot supply `reset`.
+                 ('trait Reset { void reset(*self) { } }\nstruct Other { i32 n; }\n'
+                  'impl Reset for Other { }\n' + valid.replace("c.bump(1)", "c.reset()"),
+                  ["unknown method 'reset' on type Counter"]),
+                 # An impl for a primitive is not a blanket impl.
+                 ('trait Reset { void reset(*self) { } }\nimpl Reset for i32 { }\n'
+                  + valid.replace("c.bump(1)", "c.reset()"),
+                  ["unknown method 'reset' on type Counter"]),
+                 # An implemented trait's default body is an impl method.
+                 ('trait Reset { void reset(*self) { } }\nimpl Reset for Counter { }\n'
+                  + valid.replace("c.bump(1)", "c.reset()"), []),
+                 # A generic trait's default takes the impl's type arguments.
+                 ('trait Echo<T> { T echo(&self, T x) { return x; } }\nimpl Echo<i32> for Counter { }\n'
+                  + valid.replace("c.bump(1)", "i32 e = c.echo(c.n)"), []),
+                 ('trait Echo<T> { T echo(&self, T x) { return x; } }\nimpl Echo<i32> for Counter { }\n'
+                  + valid.replace("c.bump(1)", 'c.echo("one")'),
+                  ["no overload of method 'echo' on type Counter matches these arguments"]),
+                 # A local named like the type parameter stays a value.
+                 ('trait Marker<T> { i64 number(&self) { i64 T = 7; return T; } }\n'
+                  'impl Marker<i32> for Counter { }\n'
+                  + valid.replace("c.bump(1)", "i64 m = c.number()"), []),
+                 # Every overload of a default the impl lacks is copied.
+                 ('trait Pair { i64 pick(&self, i64 a) { return a; }\n'
+                  ' i64 pick(&self, i64 a, i64 b) { return a + b; } }\nimpl Pair for Counter { }\n'
+                  + valid.replace("c.bump(1)", "i64 m = c.pick(1) + c.pick(2, 3)"), []),
+                 # `X self` and `X* self` override `Self self` and `*self`.
+                 ('trait Fallback { i64 show(Self self) { return self.fallback(); }\n'
+                  ' i64 peek(*self) { return self.fallback(); } }\n'
+                  'impl Fallback for Counter { i64 show(Counter self) { return 1; }\n'
+                  ' i64 peek(Counter* self) { return 2; } }\n'
+                  + valid.replace("c.bump(1)", "i64 m = c.show() + c.peek()"), []),
+                 # The impl's type, written out or as a trait argument, matches it too.
+                 ('trait Join { i64 join(&self, Counter other) { return self.fallback(); } }\n'
+                  'impl Join for Counter { i64 join(&self, Counter other) { return 1; } }\n'
+                  'trait Meet<T> { i64 meet(&self, T other) { return self.fallback(); } }\n'
+                  'impl Meet<Counter> for Counter { i64 meet(&self, Counter other) { return 2; } }\n'
+                  + valid.replace("c.bump(1)", "i64 m = c.join(*c) + c.meet(*c)"), []),
+                 # Trait arguments apply before the impl's type reads as `Self`.
+                 ('trait Reach<T> { i64 reach(&self, T other) { return self.fallback(); } }\n'
+                  'impl Reach<Counter*> for Counter { i64 reach(&self, Counter* other) { return 3; } }\n'
+                  'struct T { i64 n; }\n'
+                  'trait Hold<T> { i64 hold(&self, T x) { return self.fallback(); } }\n'
+                  'impl Hold<i64> for T { i64 hold(&self, i64 x) { return x; } }\n'
+                  + valid.replace("c.bump(1)", "i64 m = c.reach(c)"), []),
+                 # A parameter named like the type parameter stays a value.
+                 ('trait Same<T> { i64 same(&self, i64 T) { return T; } }\n'
+                  'impl Same<i32> for Counter { }\n'
+                  + valid.replace("c.bump(1)", "i64 m = c.same(4)"), []),
+                 # An impl overload replaces only the default with its parameter types.
+                 ('trait Both<T> { T both(&self, T x) { return x; }\n'
+                  ' i64 both(&self, str s) { return 9; } }\n'
+                  'impl Both<i64> for Counter { i64 both(&self, i64 x) { return x + 1; } }\n'
+                  + valid.replace("c.bump(1)", 'i64 m = c.both(1) + c.both("s")'), []),
+                 # Defaults come from the cfg-active trait of that name.
+                 ('#[cfg(os.windows)]\ntrait Reset { void other(*self) { } }\n'
+                  '#[cfg(os.linux)]\ntrait Reset { void reset(*self) { } }\n'
+                  'impl Reset for Counter { }\n'
+                  + valid.replace("c.bump(1)", "c.reset()"), []),
+                 (valid.replace("return c.n;", "return;"),
+                  ["return type mismatch: expected i32, found void"]),
+                 (valid, [])]
+        for version, (text, messages) in enumerate(cases, 1):
+            if version == 1:
+                self.session.send("textDocument/didOpen", {"textDocument": {
+                    "uri": uri, "languageId": "silver", "version": version, "text": text}})
+            else:
+                self.session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": version},
+                    "contentChanges": [{"text": text}]})
+            with self.subTest(version=version):
+                published = self.session.published(uri, version)
+                self.assertEqual(published["version"], version)
+                errors = [item["message"] for item in published["diagnostics"] if item["severity"] == 1]
+                self.assertEqual(errors, messages)
+
     def test_lambda_diagnostics_use_unsaved_imported_methods_and_invalidate_dependencies(self):
         disk = 'struct Gauge { i32 value; }\nimpl Gauge { i32 read(&self) { return self.value; } }\n'
         helper_path = self.root / "gauge.ag"
@@ -1306,8 +1518,11 @@ class NativeLsp(unittest.TestCase):
                 self.assertCountEqual([item for item in imported["items"] if item["severity"] == 1], [{
                     "range": location(helper, token), "severity": 1, "source": "silver",
                     "message": f"unknown identifier '{token}'"} for token in tokens])
-                expected = [] if version != 3 else [{"range": location(text, "(&Gauge item)"), "severity": 1,
-                    "source": "silver", "message": "cannot infer lambda return type"}]
+                expected = [] if version != 3 else [
+                    {"range": location(text, "()", text.index("read();")), "severity": 1,
+                     "source": "silver", "message": "unknown method 'read' on type Gauge"},
+                    {"range": location(text, "(&Gauge item)"), "severity": 1,
+                     "source": "silver", "message": "cannot infer lambda return type"}]
                 self.assertEqual([item for item in report["items"] if item["severity"] == 1], expected)
             previous = report["resultId"]
 

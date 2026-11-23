@@ -140,7 +140,7 @@ implements. An accepted spelling alone does not establish behavior.
 | --- | --- |
 | `--help`, `-h`, `--version`, `-V` | Print the stage1 help/version and exit. |
 | `build`/`b`, `run`/`r`, direct source paths | Build native code; `run` executes the result. Use the command form rather than hidden `--run`. |
-| `check`/`c`, `lex`, `parse`, `ast` | Local frontend commands. `check` has partial typed checking; syntax acceptance is not a complete semantic guarantee. |
+| `check`/`c`, `lex`, `parse`, `ast` | Local frontend commands. `check` runs the same expression checker as `build` and the language server; see [native expression checking](#native-expression-checking) for what it judges and its limits. |
 | `--manifest PATH`, `--bin NAME`, `--lib NAME` | Select supported package/workspace targets. Git dependencies remain unsupported. See the [workspace implementation](../bin/agc/src/workspace.ag). |
 | `-o FILE`, `--output FILE`, `--output=FILE` | Select the output path. |
 | `--emit=exe` or no emit option | Produce an executable. |
@@ -409,6 +409,96 @@ drop-glue fixture checks owned Vec captures and transfers, and the HTTP server
 fixture exercises the local routing predicates in `std.net.http`. Generic
 lambda scopes and capturing callbacks through generic callable APIs remain
 unsupported.
+
+### Native expression checking
+
+Stage1 `check`, `build`, and the language server run one expression checker
+([`typecheck_expressions_scoped`](../libs/agc/src/frontend/typecheck_expr.ag))
+over every cfg-active function, impl method, and `cast` block, generic ones
+included. A `cast T(Owner self)` block checks like a method returning `T`. Inside
+a generic body a type parameter is opaque: it matches only itself, so
+`return w;` with a `W w` fails in a function returning `T`. In an impl, `Self`
+keeps the target's type arguments (`HashMap<K, V>`, `Result<i64, Error>`) and
+pointer layers (`impl Record*`). Codegen binds the same `Self`, so a method may
+return `Self`. Before checking, each `impl Trait for X` receives a copy of every
+trait default method it does not define, so defaults check and build like impl
+methods. The copy replaces the trait's type parameters with the impl's
+arguments: `impl Echo<i64> for X` gives `X` an `echo` that takes `i64`.
+
+All three also see the same modules and JSON impls. `@assert`, `@print`,
+`@println`, `@format`, `@json`, `@from_json`, and `#[serialize]` import their
+library module without an `import` line, as in stage0
+([`collect_implicit_import_names`](../libs/agc/src/frontend/cfg.ag)). A
+non-generic struct used with them receives its synthesized `ToJson` and
+`FromJson` impls before checking; a generic struct needs its own impls.
+Every error the checker reports fails the command, so `check` and `build`
+agree on semantic acceptance. Link and environment failures remain
+build-only.
+
+The checker rejects these invalid core forms with a source diagnostic:
+
+| Family | Rejected |
+| --- | --- |
+| Literals | A literal of the wrong kind for its declared type, such as `str s = 42;`. |
+| Calls | Unknown functions, wrong argument counts, and argument types that do not convert. |
+| Methods | On a declared struct, enum, or primitive type (`i64`, `str`), a name that neither its impls nor a blanket impl declares, and arguments that fit no non-generic overload. A `str` also takes the methods of `Slice<u8>`. |
+| Generic calls | Explicit type argument lists of the wrong length, and arguments and results that conflict with explicit type arguments or with type arguments inferred from non-literal arguments. |
+| Aggregates | Unknown fields in struct literals and field access, and field or array element values that do not convert. |
+| Assignments | Values that do not convert to the target, and undeclared targets. |
+| Globals | Initializers that do not convert to the declared type. Bodies read a global with its declared type, so `str s = g_count;` fails for an `i64 g_count`. |
+| Returns | Values that do not convert to the return type, and `return;` in a function with a resolved non-void return type. |
+
+Implicit conversions follow stage0. Numeric, `char`, and `bool` primitives
+convert to each other. Unit enums (enums without payloads) convert to and from
+integers, `char`, `bool`, and other unit enums. Array and tuple elements take
+these conversions but not a user `cast` block, because element stores do not
+run one. A user `cast` block also converts
+implicitly, and `&r` of a reference `r` reborrows through it. Overload selection
+ranks a scalar or `cast` conversion below a numeric match, so `f(1)` picks
+`f(i64)` over `f(bool)`, and `f(bool)` over `f(str)`. `launch f(x)` runs the
+same `cast` block as `f(x)` before packing the argument for the task.
+
+A value passed to an immutable `&T` parameter is borrowed implicitly. In
+overload selection an implicit borrow costs two conversions, as in stage0, so
+`f(x)` picks `f(i64)` over `f(&i64)` for an `i64 x`. A `&mut T` parameter
+needs `&mut place`. In `launch f(x)`, the scoped-launch pass reports a bare
+local or parameter for a reference parameter with its own diagnostic. A
+`[a, b]` literal fills a tuple type in a declaration, an assignment, a
+`return`, or an argument, so `[i64, i64] p = [1, 2];` is accepted. Generic
+named types require identical type arguments, so neither a `Cell<str>` nor a
+`Cell<i32>` is a `Cell<i64>`: codegen passes the struct unconverted.
+
+The checker does not judge a type it cannot resolve. It accepts an unknown type
+or an unbound type parameter wherever a type is expected. A call with explicit
+type arguments selects the generic declaration of that name and arity, even
+after a plain function of the same name, and takes those arguments. Otherwise,
+each non-literal argument binds the parameters that appear in its declared type.
+Parameters left unbound stay unknown.
+
+A function body that the checker cannot lower does not pass silently. When
+lowering explains the construct, that diagnostic is reported on its own, at
+the macro call when a macro body contains it. Otherwise the body fails with
+`cannot check the body of '<name>'`.
+
+A local array declaration with designators (`i32 a[4] = { [1]=7, 8 };`)
+lowers to a zero-filled array followed by one element assignment per entry.
+As in C, an entry after `[i]=v` fills index `i + 1`, and nested initializers
+may use designators too. Other array literals, such as a `static` local or a
+function argument, fail with a designator diagnostic because the array
+literal form has no indices.
+
+Stage1 is stricter than stage0 in two cases. It rejects a non-exhaustive `match`
+on an enum and an unknown field in a struct literal. Stage0 accepts both, and
+the generated code fails at run time.
+
+A generic body is a template, so the checker does not judge a method call on
+a type-parameter receiver inside it. Each concrete call instead reports
+`generic call requires method 'get' on type Box` when the bound type lacks a
+method that the body calls on that parameter. A local of the same name
+shadows the parameter. The check follows a parameter that the body passes
+whole to another generic function. A call to a method
+with its own type parameters fails when no declaration takes that many
+arguments, or when monomorphization cannot infer the method's type arguments.
 
 ## 7. Diagnostics
 

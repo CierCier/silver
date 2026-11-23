@@ -76,6 +76,12 @@ String lambda_generic_scope() {
     return String.from_str("lambdas inside generic functions or impls are not supported yet");
 }
 
+/// Diagnostic text: "'{}' takes {} type arguments, given {}". Returns an
+/// owned string.
+String type_argument_count_mismatch(str name, i64 expected, i64 given) {
+    return @format("'{}' takes {} type arguments, given {}", name, expected, given);
+}
+
 /// Diagnostic text: "lambda parameter count mismatch: expected {}, found {}".
 /// Returns an owned string.
 String lambda_parameter_count(i64 expected, i64 actual) {
@@ -205,6 +211,12 @@ String type_mismatch(str expected, str found) {
     return move s;
 }
 
+/// Diagnostic text: "type mismatch in argument {}: expected {}, found {}",
+/// with a 1-based argument number. Returns an owned string.
+String argument_type_mismatch(i64 number, str expected, str found) {
+    return @format("type mismatch in argument {}: expected {}, found {}", number, expected, found);
+}
+
 /// Diagnostic text: "pointer argument type mismatch: expected {}, found {}".
 /// Returns an owned string.
 String pointer_argument_type_mismatch(str expected, str found) {
@@ -253,6 +265,49 @@ String return_type_mismatch(str expected, str found) {
     s.push_str(", found ");
     s.push_str(found);
     return move s;
+}
+
+/// Diagnostic text: "cannot check the body of '{}': it uses a construct the
+/// stage1 checker does not support yet". Returns an owned string.
+String unchecked_function_body(str name) {
+    return @format("cannot check the body of '{}': it uses a construct the stage1 checker does not support yet", name);
+}
+
+/// Diagnostic text: "cannot check the initializer of '{}': it uses a
+/// construct the stage1 checker does not support yet". Returns an owned string.
+String unchecked_global_initializer(str name) {
+    return @format("cannot check the initializer of '{}': it uses a construct the stage1 checker does not support yet", name);
+}
+
+/// Diagnostic text: "global initializer must be a compile-time constant
+/// expression". Returns static text.
+str global_initializer_not_constant() {
+    return "global initializer must be a compile-time constant expression";
+}
+
+/// Diagnostic text: "stage1 supports designated array initializers
+/// (`[index] = value`) only in a global or non-static local array
+/// declaration". Returns an owned string.
+String designated_array_initializer_unsupported() {
+    return String.from_str("stage1 supports designated array initializers (`[index] = value`) only in a global or non-static local array declaration");
+}
+
+/// Diagnostic text: "array initializer index must be a constant integer".
+/// Returns static text.
+str array_designator_not_constant() {
+    return "array initializer index must be a constant integer";
+}
+
+/// Diagnostic text: "array initializer index {} is out of bounds for {}
+/// elements". Returns an owned string.
+String array_designator_out_of_bounds(i64 index, i64 count) {
+    return @format("array initializer index {} is out of bounds for {} elements", index, count);
+}
+
+/// Diagnostic text: "cannot mix positional/indexed items with named struct
+/// initializer". Returns static text.
+str struct_initializer_mixed_entries() {
+    return "cannot mix positional/indexed items with named struct initializer";
 }
 
 /// Diagnostic text: "void function cannot return a value". Returns static
@@ -551,6 +606,24 @@ str send_reason_reference_value() {
 /// started()". Returns an owned string.
 String unknown_task_method(str method) {
     return @format("Task has no method '{}'; its only method is started()", method);
+}
+
+/// Diagnostic text: "unknown method '{}' on type {}". Returns an owned
+/// string.
+String unknown_method(str method, str type_name) {
+    return @format("unknown method '{}' on type {}", method, type_name);
+}
+
+/// Diagnostic text: "generic call requires method '{}' on type {}". Returns
+/// an owned string.
+String generic_call_missing_method(str method, str type_name) {
+    return @format("generic call requires method '{}' on type {}", method, type_name);
+}
+
+/// Diagnostic text: "no overload of method '{}' on type {} matches these
+/// arguments". Returns an owned string.
+String method_overload_mismatch(str method, str type_name) {
+    return @format("no overload of method '{}' on type {} matches these arguments", method, type_name);
 }
 
 /// Diagnostic text: "task handle consumed by wait". Returns static text.
