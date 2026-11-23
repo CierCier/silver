@@ -2600,9 +2600,12 @@ void typecheck_body_requirements(TypeTable* types, SyntaxNode* root, SyntaxNode*
             bool parameter = strcmp(receiver.text, name) == 0
                 && (i == 0 || !cfg_node_text(leaves.get(i - 1), "."));
             SyntaxNode* method = i + 2 < leaves.len() ? leaves.get(i + 2) : (SyntaxNode*)0;
-            // Argument lists are `Parenthesized` nodes, not leaves.
+            // Argument lists are `Parenthesized` nodes, not leaves. A `lock`
+            // block's synthesized `.lock()` has an empty span; the lock
+            // check reports a place that is not shared.
             bool method_call = parameter && method != (SyntaxNode*)0
                 && cfg_node_text(leaves.get(i + 1), ".") && node_is_identifier(method)
+                && method.span.end > method.span.start
                 && method.next_sibling != (SyntaxNode*)0
                 && method.next_sibling.kind == NodeKind.Parenthesized;
             i64 seen = 0;
