@@ -10,6 +10,8 @@ import frontend.send;
 import frontend.ownership;
 import frontend.lint;
 import frontend.lambdas;
+import frontend.lexer;
+import frontend.serialize;
 import frontend.trait_defaults;
 import frontend.symbols;
 import frontend.typecheck;
@@ -119,12 +121,14 @@ SyntaxNode* diagnostic_signature_root(NodePool* pool, SyntaxTree* dependency, i6
 }
 
 /// Adds a dependency snapshot's signatures to the scratch tree as file
-/// `file`, reporting its own errors to `report`.
+/// `file`, reporting its own errors to `report`. With `retain_text`, the
+/// copies no longer borrow the dependency's tokens.
 void diagnostic_add_snapshot(DiagnosticTree* scratch, SyntaxTree* dependency,
                              i64 file, SymbolTable* symbols, CfgSet* cfg,
-                             DiagnosticBag* report) {
+                             DiagnosticBag* report, bool retain_text) {
     SyntaxTree signatures;
-    signatures.root = diagnostic_signature_root(&scratch.pool, dependency, file, cfg, false);
+    signatures.root = diagnostic_signature_root(&scratch.pool, dependency, file, cfg,
+                                                retain_text);
     collect_symbols(symbols, report, &signatures, cfg);
     SyntaxNode* item = signatures.root.first_child;
     while (item != (SyntaxNode*)0) {
@@ -135,6 +139,30 @@ void diagnostic_add_snapshot(DiagnosticTree* scratch, SyntaxTree* dependency,
     drop_root_index(signatures.root);
     signatures.root.first_child = (SyntaxNode*)0;
     signatures.root.last_child = (SyntaxNode*)0;
+}
+
+/// Adds, as file `file`, the signatures of the JSON impls that `#[serialize]`
+/// and `@json` uses in `source` need, as the native build synthesizes them.
+/// Their spans never point into the local document.
+void diagnostic_add_json_impls(DiagnosticTree* scratch, SyntaxTree* source, i64 file,
+                               SymbolTable* symbols, CfgSet* cfg, DiagnosticBag* report) {
+    String generated = serialize_synthesize_json(source.root);
+    if (generated.len() == 0) {
+        generated.drop();
+        return;
+    }
+    TokenStream tokens = TokenStream.new();
+    DiagnosticBag parsing = DiagnosticBag.new();
+    lex(move generated, &tokens, &parsing);
+    NodePool pool = NodePool.new();
+    SyntaxTree impls;
+    impls.root = (SyntaxNode*)0;
+    if (parsing.is_empty()) { parse(&tokens, &parsing, &pool, &impls); }
+    if (parsing.is_empty() && impls.root != (SyntaxNode*)0) {
+        diagnostic_add_snapshot(scratch, &impls, file, symbols, cfg, report, true);
+    }
+    pool.destroy();
+    tokens.tokens.drop();
 }
 
 /// Appends the diagnostics of `checked` that belong to the local file.
@@ -167,9 +195,11 @@ DiagnosticBag check_snapshot_diagnostics(SyntaxTree* source, Vec<SyntaxTree*>* d
     while (i < dependencies.len()) {
         // Lexer snapshots all start at file 1. Reserve it for local subjects.
         diagnostic_add_snapshot(&scratch, dependencies.get(i), i + 2, &symbols, cfg,
-                                &ignored_imports);
+                                &ignored_imports, false);
         i += 1;
     }
+    diagnostic_add_json_impls(&scratch, source, dependencies.len() + 2, &symbols, cfg,
+                              &ignored_imports);
     diagnostic_register_types(&symbols, &scratch.tree, cfg);
     ImportedDeclarations imported = ImportedDeclarations.new();
     imported.loaded = true;
@@ -294,10 +324,13 @@ ImportOverloadSafety diagnostic_probe_import_overloads(
     i64 dependency = 0;
     while (dependency < dependencies.len()) {
         diagnostic_add_snapshot(&scratch, dependencies.get(dependency), dependency + 2,
-                                &symbols, cfg, &preparation);
+                                &symbols, cfg, &preparation, false);
         if (!preparation.is_empty()) { return ImportOverloadSafety.Inconclusive; }
         dependency += 1;
     }
+    diagnostic_add_json_impls(&scratch, source, dependencies.len() + 2, &symbols, cfg,
+                              &preparation);
+    if (!preparation.is_empty()) { return ImportOverloadSafety.Inconclusive; }
     diagnostic_register_types(&symbols, &scratch.tree, cfg);
     DiagnosticBag lowering = DiagnosticBag.new();
     materialize_trait_defaults(&scratch.tree, &scratch.pool);

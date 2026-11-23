@@ -2,6 +2,7 @@
 import std.mem.vec;
 import std.string;
 import frontend.ast;
+import frontend.diagnostics;
 import frontend.items;
 import frontend.lexer;
 
@@ -573,4 +574,40 @@ String serialize_synthesize_json(SyntaxNode* root) {
     disposal_selected.drop();
     selected.drop();
     return generated;
+}
+
+/// Re-parses `source` with the JSON impls its `#[serialize]` and `@json`
+/// uses need appended, replacing `stream`, `pool` and `tree`. The impls follow
+/// the original text, so earlier spans stay valid. Without needed impls,
+/// nothing changes. Returns false with `diagnostics` set when the augmented
+/// source fails to lex or parse; the original tree is then kept.
+bool serialize_augment_tree(String* source, TokenStream* stream, NodePool* pool,
+                            SyntaxTree* tree, DiagnosticBag* diagnostics) {
+    String synthesized = serialize_synthesize_json(tree.root);
+    if (synthesized.len() == 0) {
+        synthesized.drop();
+        return true;
+    }
+    source.push_str("\n");
+    source.push_str(synthesized.to_str());
+    synthesized.drop();
+    TokenStream augmented_stream = TokenStream.new();
+    lex(source.clone(), &augmented_stream, diagnostics);
+    NodePool augmented_pool = NodePool.new();
+    SyntaxTree augmented_tree;
+    augmented_tree.root = (SyntaxNode*)0;
+    if (diagnostics.is_empty()) {
+        parse(&augmented_stream, diagnostics, &augmented_pool, &augmented_tree);
+    }
+    if (!diagnostics.is_empty() || augmented_tree.root == (SyntaxNode*)0) {
+        augmented_pool.destroy();
+        augmented_stream.tokens.drop();
+        return false;
+    }
+    pool.destroy();
+    stream.tokens.drop();
+    *pool = move augmented_pool;
+    *stream = move augmented_stream;
+    *tree = augmented_tree;
+    return true;
 }

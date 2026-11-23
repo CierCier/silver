@@ -369,6 +369,7 @@ bool resolve_names(SymbolTable* symbols, DiagnosticBag* diagnostics, SyntaxTree*
     NameResolver resolver = NameResolver.new(symbols, diagnostics);
     Vec<String> import_names = Vec<String>.new();
     cfg_collect_import_names(tree.root, cfg, &import_names);
+    collect_implicit_import_names(tree.root, &import_names);
     resolver.has_imports = import_names.len() > 0;
     import_names.drop();
     if (resolver.has_imports

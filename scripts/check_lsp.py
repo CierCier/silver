@@ -757,6 +757,27 @@ class NativeLsp(unittest.TestCase):
         self.assertEqual(session.result("textDocument/definition", {**document,
             "position": position(text, at)}), before)
 
+    def test_json_macros_check_against_implicit_std_json_and_synthesized_impls(self):
+        repo = Path(__file__).resolve().parent.parent
+        example = (repo / "examples" / "struct_attributes.ag").read_text()
+        env = os.environ.copy()
+        env["SILVER_SYSROOT"] = str(repo)
+        session = Session(self.binary, self.root, env=env)
+        self.addCleanup(session.close)
+        session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {
+            "textDocument": {"diagnostic": {}}}})
+        session.send("initialized", {})
+        broken = example.replace("i32 main() {\n", "i32 main() {\n    i32 wrong = \"text\";\n", 1)
+        cases = [("attributes.ag", example, []),
+                 ("primitive.ag", "i32 main() {\n    @println(\"{}\", @json(5));\n    return 0;\n}\n", []),
+                 ("broken.ag", broken, ["type mismatch: expected i32, found str"])]
+        for name, text, expected in cases:
+            uri = (self.root / name).as_uri()
+            session.send("textDocument/didOpen", {"textDocument": {
+                "uri": uri, "languageId": "silver", "version": 1, "text": text}})
+            report = session.result("textDocument/diagnostic", {"textDocument": {"uri": uri}})
+            self.assertEqual([item["message"] for item in report["items"]], expected, name)
+
     def test_shared_values_and_lock_blocks_resolve_to_user_declarations(self):
         repo = Path(__file__).resolve().parent.parent
         text = ("import std.sync;\n"

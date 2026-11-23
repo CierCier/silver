@@ -15,6 +15,7 @@ import native_backend;
 import workspace;
 import frontend.ownership;
 import frontend.send;
+import frontend.serialize;
 import agsm;
 import cli;
 
@@ -381,6 +382,9 @@ i32 emit_check(str path, CfgSet* cfg, Vec<String>* include_dirs, LintConfig* lin
         NodePool pool = NodePool.new();
         SyntaxTree tree;
         parse(&stream, &diagnostics, &pool, &tree);
+        if (diagnostics.is_empty()) {
+            serialize_augment_tree(&source_copy, &stream, &pool, &tree, &diagnostics);
+        }
         profiler_end_phase("parse");
         if (diagnostics.is_empty()) {
             profiler_begin_phase("symbol_table");

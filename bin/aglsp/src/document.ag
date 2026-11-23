@@ -5,6 +5,7 @@ import std.string;
 import std.path;
 import std.fs;
 import std.hash;
+import frontend.cfg;
 import frontend.module_loader;
 import tooling.index;
 import positions;
@@ -373,15 +374,25 @@ impl DocumentStore {
             if (!doc.open) { self.closed_dirtied = true; }
             Vec<Document*> next = Vec<Document*>.new();
             if (doc.path.len() > 0) {
+                // Implicit imports load like explicit ones but are not
+                // reported when unresolved: the source never names them.
+                Vec<String> names = Vec<String>.new();
                 i64 j = 0;
                 while (j < doc.analysis.imports.len()) {
-                    String path = resolve_document_import(self, doc, doc.analysis.imports.get_ptr(j).to_str());
+                    names.push(doc.analysis.imports.get_ptr(j).clone());
+                    j += 1;
+                }
+                collect_implicit_import_names(doc.analysis.tree.root, &names);
+                j = 0;
+                while (j < names.len()) {
+                    String path = resolve_document_import(self, doc, names.get_ptr(j).to_str());
                     if (path.len() > 0 && !path.ends_with(".agm")) {
                         Document* imported = self.load(path.to_str());
                         if (imported != (Document*)0 && imported != doc) { next.push(imported); }
                     }
                     j += 1;
                 }
+                names.drop();
             }
             set_dependencies(doc, &next);
             i += 1;

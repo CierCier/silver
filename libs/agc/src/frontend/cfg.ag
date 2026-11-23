@@ -884,3 +884,49 @@ void cfg_collect_import_names_at(SyntaxNode* parent, CfgSet* cfg, Vec<String>* n
 void cfg_collect_import_names(SyntaxNode* parent, CfgSet* cfg, Vec<String>* names) {
     cfg_collect_import_names_at(parent, cfg, names, 0);
 }
+
+/// Returns the module that macro `@name` (or attribute `#[name]`) expands
+/// into calls of, or "" when it needs none.
+str implicit_import_module(str name, bool attribute) {
+    if (attribute) {
+        return strcmp(name, "serialize") == 0 || strcmp(name, "serialise") == 0
+            ? "std.json" : "";
+    }
+    if (strcmp(name, "assert") == 0) { return "std.mem.memory"; }
+    if (strcmp(name, "println") == 0 || strcmp(name, "print") == 0
+        || strcmp(name, "format") == 0) {
+        return "std.string";
+    }
+    if (strcmp(name, "json") == 0 || strcmp(name, "from_json") == 0) { return "std.json"; }
+    return "";
+}
+
+/// Appends, once each, the modules that macros and attributes under `node`
+/// use without an import, as stage0's import hook does. Check and build
+/// share this list so both see the same declarations.
+void collect_implicit_import_names(SyntaxNode* node, Vec<String>* names) {
+    SyntaxNode* child = node == (SyntaxNode*)0 ? (SyntaxNode*)0 : node.first_child;
+    while (child != (SyntaxNode*)0) {
+        SyntaxNode* next = child.next_sibling;
+        str module_name = "";
+        if (child.kind == NodeKind.Token && next != (SyntaxNode*)0) {
+            if (child.token_kind == TokenKind.At && next.kind == NodeKind.Token) {
+                module_name = implicit_import_module(next.text, false);
+            } else if (child.text == "#" && next.kind == NodeKind.Bracket
+                       && next.first_child != (SyntaxNode*)0) {
+                module_name = implicit_import_module(next.first_child.text, true);
+            }
+        }
+        if (strlen(module_name) > 0) {
+            bool listed = false;
+            i64 i = 0;
+            while (!listed && i < names.len()) {
+                listed = strcmp(names.get_ptr(i).to_str(), module_name) == 0;
+                i += 1;
+            }
+            if (!listed) { names.push(String.from_str(module_name)); }
+        }
+        collect_implicit_import_names(child, names);
+        child = next;
+    }
+}

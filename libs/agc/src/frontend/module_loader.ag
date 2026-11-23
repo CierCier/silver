@@ -1205,6 +1205,7 @@ void load_source_module(ModuleLoader* loader, DiagnosticBag* diagnostics, str pa
     bindings.drop();
     Vec<String> imports = Vec<String>.new();
     cfg_collect_import_names(tree.root, cfg, &imports);
+    collect_implicit_import_names(tree.root, &imports);
     i64 i = 0;
     while (i < imports.len()) {
         String* module_name = imports.get_ptr(i);
@@ -1261,6 +1262,7 @@ bool load_imported_declarations(SymbolTable* symbols, DiagnosticBag* diagnostics
     String root = module_root(owner_path);
     Vec<String> imports = Vec<String>.new();
     cfg_collect_import_names(tree.root, cfg, &imports);
+    collect_implicit_import_names(tree.root, &imports);
     i64 i = 0;
     while (i < imports.len()) {
         String* module_name = imports.get_ptr(i);
