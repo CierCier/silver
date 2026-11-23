@@ -3627,11 +3627,9 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                                 expr_is_literal(pool, arg_expr_id))
                             && !typecheck_tuple_literal_fits(pool, root, types, expected_arg_type, arg_expr_id)
                             && !typecheck_implicit_cast(root, types, actual_arg_type, expected_arg_type)) {
-                            String message = String.from_str("type mismatch: expected ");
-                            message.push_str(types.type_name(expected_arg_type));
-                            message.push_str(", found ");
-                            message.push_str(types.type_name(actual_arg_type));
-                            diagnostics.error(pool.get_expr(arg_expr_id).span, move message);
+                            diagnostics.error(pool.get_expr(arg_expr_id).span,
+                                argument_type_mismatch(i + 1, types.type_name(expected_arg_type),
+                                    types.type_name(actual_arg_type)));
                             *ok = false;
                         }
                         i += 1;

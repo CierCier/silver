@@ -2,7 +2,6 @@
 // is rewritten; token text remains borrowed until the check returns.
 import frontend.ast;
 import frontend.cfg;
-import frontend.hir;
 import frontend.items;
 import frontend.lower_expr;
 import frontend.names;
@@ -160,8 +159,6 @@ DiagnosticBag check_snapshot_diagnostics(SyntaxTree* source, Vec<SyntaxTree*>* d
                                          CfgSet* cfg, str path, Vec<String>* include_dirs) {
     DiagnosticBag diagnostics = DiagnosticBag.new();
     DiagnosticTree scratch = DiagnosticTree.new(source);
-    check_hir(&scratch.tree, cfg, &diagnostics);
-    if (!diagnostics.is_empty()) { return move diagnostics; }
     SymbolTable symbols = SymbolTable.new();
     collect_symbols(&symbols, &diagnostics, &scratch.tree, cfg);
     DiagnosticBag ignored_imports = DiagnosticBag.new();

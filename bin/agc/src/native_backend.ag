@@ -3000,9 +3000,6 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     }
     sysroot_dirs.drop();
 
-    profiler_begin_phase("hir");
-    check_hir(&tree, &cfg, &diagnostics);
-    profiler_end_phase("hir");
     if (!diagnostics.is_empty()) {
         i64 i = 0;
         while (i < diagnostics.len()) {

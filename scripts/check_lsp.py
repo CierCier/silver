@@ -1071,7 +1071,7 @@ class NativeLsp(unittest.TestCase):
                 ("import std.mem.vec;\ni64 inspect(&Vec<i64> data) { return data.len(); }\n"
                  "void mutate(&mut Vec<i64> data) { data.push(1); }\ni64 main() {\n Vec<i64> data = Vec<i64>.new();\n"
                  " Task<i64> t = launch inspect(&data);\n mutate(data);\n return wait t;\n}\n",
-                 [("type mismatch: expected &mut Vec<i64>, found Vec<i64>", 6)]),
+                 [("type mismatch in argument 1: expected &mut Vec<i64>, found Vec<i64>", 6)]),
                 ("import std.mem.vec;\ni64 inspect(&Vec<i64> data) { return data.len(); }\n"
                  "void mutate(&mut Vec<i64> data) { data.push(1); }\ni64 main() {\n Vec<i64> data = Vec<i64>.new();\n"
                  " Task<i64> t = launch inspect(&data);\n mutate(&mut data);\n return wait t;\n}\n",

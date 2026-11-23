@@ -383,11 +383,6 @@ i32 emit_check(str path, CfgSet* cfg, Vec<String>* include_dirs, LintConfig* lin
         parse(&stream, &diagnostics, &pool, &tree);
         profiler_end_phase("parse");
         if (diagnostics.is_empty()) {
-            profiler_begin_phase("hir");
-            check_hir(&tree, cfg, &diagnostics);
-            profiler_end_phase("hir");
-        }
-        if (diagnostics.is_empty()) {
             profiler_begin_phase("symbol_table");
             SymbolTable symbols = SymbolTable.new();
             ImportedDeclarations imported = ImportedDeclarations.new();

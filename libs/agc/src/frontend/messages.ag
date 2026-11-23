@@ -211,6 +211,12 @@ String type_mismatch(str expected, str found) {
     return move s;
 }
 
+/// Diagnostic text: "type mismatch in argument {}: expected {}, found {}",
+/// with a 1-based argument number. Returns an owned string.
+String argument_type_mismatch(i64 number, str expected, str found) {
+    return @format("type mismatch in argument {}: expected {}, found {}", number, expected, found);
+}
+
 /// Diagnostic text: "pointer argument type mismatch: expected {}, found {}".
 /// Returns an owned string.
 String pointer_argument_type_mismatch(str expected, str found) {
