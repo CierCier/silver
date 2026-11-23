@@ -10,6 +10,7 @@ import frontend.send;
 import frontend.ownership;
 import frontend.lint;
 import frontend.lambdas;
+import frontend.trait_defaults;
 import frontend.symbols;
 import frontend.typecheck;
 import frontend.typecheck_expr;
@@ -172,7 +173,10 @@ DiagnosticBag check_snapshot_diagnostics(SyntaxTree* source, Vec<SyntaxTree*>* d
     diagnostic_register_types(&symbols, &scratch.tree, cfg);
     ImportedDeclarations imported = ImportedDeclarations.new();
     imported.loaded = true;
-    if (diagnostics.is_empty()) { lower_lambdas(&scratch.tree, &scratch.pool, &symbols, &diagnostics, cfg); }
+    if (diagnostics.is_empty()) {
+        materialize_trait_defaults(&scratch.tree, &scratch.pool);
+        lower_lambdas(&scratch.tree, &scratch.pool, &symbols, &diagnostics, cfg);
+    }
     if (diagnostics.is_empty()) {
         resolve_names(&symbols, &diagnostics, &scratch.tree, path, cfg, include_dirs, &imported);
     }
@@ -296,6 +300,7 @@ ImportOverloadSafety diagnostic_probe_import_overloads(
     }
     diagnostic_register_types(&symbols, &scratch.tree, cfg);
     DiagnosticBag lowering = DiagnosticBag.new();
+    materialize_trait_defaults(&scratch.tree, &scratch.pool);
     lower_lambdas(&scratch.tree, &scratch.pool, &symbols, &lowering, cfg);
     if (!lowering.is_empty()) { return ImportOverloadSafety.Inconclusive; }
 

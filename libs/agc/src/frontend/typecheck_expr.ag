@@ -2380,14 +2380,13 @@ SyntaxNode* typecheck_impl_trait(SyntaxNode* impl_item) {
 }
 
 /// Where `method_name` is declared for a receiver type: `own` impls
-/// (`generic` counts those with their own type parameters), `blanket`
-/// impls (`impl<T> Show for T`), and members of traits an impl applies to
-/// the type (`trait_member`), which neither compiler can call yet.
+/// (`generic` counts those with their own type parameters) and `blanket`
+/// impls (`impl<T> Show for T`). Trait defaults are already copied into
+/// each impl by `materialize_trait_defaults`.
 struct MethodDeclarations {
     i64 own;
     i64 generic;
     i64 blanket;
-    i64 trait_member;
 }
 
 /// Whether `impl_item` targets its own type parameter (`impl<T> Show for
@@ -2403,7 +2402,7 @@ bool typecheck_impl_is_blanket(TypeTable* types, SyntaxNode* impl_item, SyntaxNo
 /// Counts the declarations of `method_name` that `owner_name` can reach.
 MethodDeclarations typecheck_count_methods(TypeTable* types, SyntaxNode* root, str owner_name,
                                            str method_name) {
-    MethodDeclarations found = { .own = 0, .generic = 0, .blanket = 0, .trait_member = 0 };
+    MethodDeclarations found = { .own = 0, .generic = 0, .blanket = 0 };
     i64 ignored_generic = 0;
     SyntaxNode* item = root.first_child;
     while (item != (SyntaxNode*)0) {
@@ -2417,12 +2416,6 @@ MethodDeclarations typecheck_count_methods(TypeTable* types, SyntaxNode* root, s
             } else if (blanket) {
                 typecheck_count_block_methods(item, method_name, &found.blanket,
                                               &ignored_generic);
-            }
-            SyntaxNode* trait_name = typecheck_impl_trait(item);
-            if ((own || blanket) && trait_name != (SyntaxNode*)0) {
-                typecheck_count_block_methods(
-                    find_item_by_name(root, NodeKind.Trait, trait_name.text),
-                    method_name, &found.trait_member, &ignored_generic);
             }
         }
         item = item.next_sibling;
@@ -2465,11 +2458,7 @@ void typecheck_method_call_target(AstPool* pool, TypeTable* types, SyntaxNode* r
     }
     if (found.own == 0) {
         if (found.blanket > 0) { return; }
-        // Codegen emits only methods an impl block defines, so a trait
-        // default is reported rather than accepted and failed in build.
-        diagnostics.error(span, found.trait_member > 0
-            ? trait_default_method_call(method_name, types.type_name(owner_type))
-            : unknown_method(method_name, types.type_name(owner_type)));
+        diagnostics.error(span, unknown_method(method_name, types.type_name(owner_type)));
         *ok = false;
         return;
     }

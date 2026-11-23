@@ -1,0 +1,62 @@
+// Trait default methods as ordinary impl methods: each `impl Trait for X`
+// receives a copy of every default body it does not define, so checking,
+// codegen and the language server need no separate dispatch for defaults.
+import frontend.ast;
+import frontend.items;
+import frontend.lambdas;
+import frontend.typecheck_expr;
+
+/// Returns the `{ ... }` block of an impl or trait item, or null.
+SyntaxNode* trait_defaults_block(SyntaxNode* item) {
+    SyntaxNode* block = item.first_child;
+    while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+        block = block.next_sibling;
+    }
+    return block;
+}
+
+/// Copies into `impl_item` the default methods of `trait_item` that it does
+/// not declare. A copy keeps the trait's spans and binds `Self` to the impl.
+void trait_defaults_copy(NodePool* pool, SyntaxNode* impl_item, SyntaxNode* trait_item) {
+    SyntaxNode* impl_block = trait_defaults_block(impl_item);
+    SyntaxNode* trait_block = trait_defaults_block(trait_item);
+    if (impl_block == (SyntaxNode*)0 || trait_block == (SyntaxNode*)0) { return; }
+    SyntaxNode* start = trait_block.first_child;
+    SyntaxNode* cursor = start;
+    while (cursor != (SyntaxNode*)0) {
+        SyntaxNode* next = cursor.next_sibling;
+        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
+            start = next;
+        } else if (cursor.kind == NodeKind.Parenthesized && next != (SyntaxNode*)0
+                   && next.kind == NodeKind.Block) {
+            SyntaxNode* name = item_method_name(start, cursor);
+            i64 declared = 0;
+            i64 generic = 0;
+            if (name != (SyntaxNode*)0) {
+                typecheck_count_block_methods(impl_item, name.text, &declared, &generic);
+                if (declared == 0) {
+                    lambda_clone_range(pool, impl_block, start, next.next_sibling);
+                }
+            }
+            next = next.next_sibling;
+            start = next;
+        }
+        cursor = next;
+    }
+}
+
+/// Gives every trait impl in `tree` the trait's default methods it lacks.
+void materialize_trait_defaults(SyntaxTree* tree, NodePool* pool) {
+    SyntaxNode* item = tree.root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Impl) {
+            SyntaxNode* trait_name = typecheck_impl_trait(item);
+            SyntaxNode* trait_item = trait_name == (SyntaxNode*)0 ? (SyntaxNode*)0
+                : find_item_by_name(tree.root, NodeKind.Trait, trait_name.text);
+            if (trait_item != (SyntaxNode*)0) {
+                trait_defaults_copy(pool, item, trait_item);
+            }
+        }
+        item = item.next_sibling;
+    }
+}

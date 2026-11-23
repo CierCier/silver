@@ -419,7 +419,9 @@ a generic body a type parameter is opaque: it matches only itself, so
 `return w;` with a `W w` fails in a function returning `T`. In an impl, `Self`
 keeps the target's type arguments (`HashMap<K, V>`, `Result<i64, Error>`) and
 pointer layers (`impl Record*`). Codegen binds the same `Self`, so a method may
-return `Self`. Every error the checker reports fails the command, so `check`
+return `Self`. Before checking, each `impl Trait for X` receives a copy of every
+trait default method it does not define, so defaults check and build like impl
+methods. Every error the checker reports fails the command, so `check`
 and `build` agree on semantic acceptance. Link and environment failures
 remain build-only.
 
@@ -429,7 +431,7 @@ The checker rejects these invalid core forms with a source diagnostic:
 | --- | --- |
 | Literals | A literal of the wrong kind for its declared type, such as `str s = 42;`. |
 | Calls | Unknown functions, wrong argument counts, and argument types that do not convert. |
-| Methods | On a declared struct, enum, or primitive type (`i64`, `str`), a name that neither its impls nor a blanket impl declares, a call that only a trait default would answer (codegen emits only impl methods), and arguments that fit no non-generic overload. A `str` also takes the methods of `Slice<u8>`. |
+| Methods | On a declared struct, enum, or primitive type (`i64`, `str`), a name that neither its impls nor a blanket impl declares, and arguments that fit no non-generic overload. A `str` also takes the methods of `Slice<u8>`. |
 | Generic calls | Explicit type argument lists of the wrong length, and arguments and results that conflict with explicit type arguments or with type arguments inferred from non-literal arguments. |
 | Aggregates | Unknown fields in struct literals and field access, and field or array element values that do not convert. |
 | Assignments | Values that do not convert to the target, and undeclared targets. |

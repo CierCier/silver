@@ -1268,8 +1268,7 @@ class NativeLsp(unittest.TestCase):
                  (valid.replace("c.bump(1)", 'c.bump("one")'),
                   ["no overload of method 'bump' on type Counter matches these arguments"]),
                  (valid.replace("c.bump(1)", "c.reset()"), ["unknown method 'reset' on type Counter"]),
-                 # A trait Counter does not implement cannot supply `reset`;
-                 # neither compiler can call the default of one it implements.
+                 # A trait Counter does not implement cannot supply `reset`.
                  ('trait Reset { void reset(*self) { } }\nstruct Other { i32 n; }\n'
                   'impl Reset for Other { }\n' + valid.replace("c.bump(1)", "c.reset()"),
                   ["unknown method 'reset' on type Counter"]),
@@ -1277,10 +1276,9 @@ class NativeLsp(unittest.TestCase):
                  ('trait Reset { void reset(*self) { } }\nimpl Reset for i32 { }\n'
                   + valid.replace("c.bump(1)", "c.reset()"),
                   ["unknown method 'reset' on type Counter"]),
+                 # An implemented trait's default body is an impl method.
                  ('trait Reset { void reset(*self) { } }\nimpl Reset for Counter { }\n'
-                  + valid.replace("c.bump(1)", "c.reset()"),
-                  ["cannot call trait default method 'reset' on type Counter; "
-                   "define it in the impl"]),
+                  + valid.replace("c.bump(1)", "c.reset()"), []),
                  (valid.replace("return c.n;", "return;"),
                   ["return type mismatch: expected i32, found void"]),
                  (valid, [])]
