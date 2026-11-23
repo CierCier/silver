@@ -482,13 +482,13 @@ Stage1 is stricter than stage0 in two cases. It rejects a non-exhaustive `match`
 on an enum and an unknown field in a struct literal. Stage0 accepts both, and
 the generated code fails at run time.
 
-Remaining limits:
-
-- A generic body is a template. The checker does not judge a method call on a
-  type-parameter receiver inside the body. Each concrete call instead reports
-  `generic call requires method 'get' on type Box` when the bound type lacks
-  a method the body calls directly on that parameter. A requirement that the
-  body passes on to another generic call is not judged.
+A generic body is a template, so the checker does not judge a method call on
+a type-parameter receiver inside it. Each concrete call instead reports
+`generic call requires method 'get' on type Box` when the bound type lacks a
+method that the body calls on that parameter. The check follows a parameter
+that the body passes whole to another generic function. A call to a method
+with its own type parameters fails when no declaration takes that many
+arguments, or when monomorphization cannot infer the method's type arguments.
 
 ## 7. Diagnostics
 

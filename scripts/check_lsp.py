@@ -792,12 +792,15 @@ class NativeLsp(unittest.TestCase):
                 "impl Bag {\n i64 get(&self) { return self.v; }\n}\n"
                 "i64 call_get<T>(&T value) {\n return value.get() + value.get();\n}\n"
                 "i64 unused<T>(T value) {\n return value.missing();\n}\n"
+                "i64 outer<U>(U value) {\n return call_get(&value);\n}\n"
                 "i64 main() {\n Box b = { .v = 1 };\n Bag g = { .v = 2 };\n"
-                " return call_get(&b) + call_get(&g);\n}\n")
+                " i64 direct = call_get(&b) + call_get(&g);\n"
+                " return direct + outer(b) + outer(g);\n}\n")
         uri = self.open(text)
         diagnostics = self.session.published(uri, 1)["diagnostics"]
         self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
-                         [(14, "generic call requires method 'get' on type Box")])
+                         [(17, "generic call requires method 'get' on type Box"),
+                          (18, "generic call requires method 'get' on type Box")])
 
     def test_generic_method_calls_check_arity_and_concrete_parameters(self):
         text = ("struct Box { i64 v; }\nimpl Box {\n"

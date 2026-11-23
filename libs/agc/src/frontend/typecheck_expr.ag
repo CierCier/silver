@@ -2556,54 +2556,142 @@ u32 typecheck_parameter_bound_type(AstPool* pool, TypeTable* types, CalleeTypeAr
 }
 
 /// Reports a generic call whose bound type lacks a method that the callee
-/// body calls directly on a parameter of that type: `value.get()` with
-/// `T value`. A requirement the callee passes on to another generic call,
-/// or a call to a method with its own type parameters, is not judged.
+/// body calls on a parameter of that type: `value.get()` with `T value`.
+/// A parameter passed whole (`inner(value)` or `inner(&value)`) to another
+/// generic function carries its type into that body. A call to a method
+/// with its own type parameters is judged where the method is called.
 void typecheck_generic_call_requirements(AstPool* pool, TypeTable* types, SyntaxNode* root,
                                          SyntaxNode* callee_fn, Vec<Binding>* params,
                                          CalleeTypeArgs* type_args, AstExpr* call,
                                          Vec<u32>* arg_types, DiagnosticBag* diagnostics,
                                          bool* ok) {
-    SyntaxNode* body = function_body(callee_fn);
-    if (body == (SyntaxNode*)0) { return; }
-    Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
-    cfg_collect_leaves(body, &leaves);
-    Vec<str> reported = Vec<str>.new();
+    Vec<u32> owners = Vec<u32>.new();
     i64 p = 0;
     while (p < params.len()) {
-        Binding* param = params.get_ptr(p);
-        u32 owner_type = typecheck_method_owner_type(types,
-            typecheck_parameter_bound_type(pool, types, type_args, param, call, arg_types, p));
+        owners.push(typecheck_method_owner_type(types, typecheck_parameter_bound_type(
+            pool, types, type_args, params.get_ptr(p), call, arg_types, p)));
+        p += 1;
+    }
+    Vec<str> reported = Vec<str>.new();
+    typecheck_body_requirements(types, root, callee_fn, params, &owners, call.span, 0,
+                                &reported, diagnostics, ok);
+    reported.drop();
+    owners.drop();
+}
+
+/// Checks the methods `function`'s body calls on each parameter whose
+/// `owners` entry is a concrete type, reporting each missing method once
+/// at the outer call's `span`.
+void typecheck_body_requirements(TypeTable* types, SyntaxNode* root, SyntaxNode* function,
+                                 Vec<Binding>* params, Vec<u32>* owners, Span span, i64 depth,
+                                 Vec<str>* reported, DiagnosticBag* diagnostics, bool* ok) {
+    SyntaxNode* body = function_body(function);
+    // Recursive generic functions pass the same types around forever.
+    if (body == (SyntaxNode*)0 || depth > 8) { return; }
+    Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+    cfg_collect_leaves(body, &leaves);
+    i64 p = 0;
+    while (p < params.len()) {
+        str name = params.get_ptr(p).name;
+        u32 owner_type = owners.get(p);
         i64 i = 0;
-        while (owner_type != TYPE_UNKNOWN && i + 2 < leaves.len()) {
+        while (owner_type != TYPE_UNKNOWN && i < leaves.len()) {
             SyntaxNode* receiver = leaves.get(i);
-            SyntaxNode* method = leaves.get(i + 2);
+            bool parameter = strcmp(receiver.text, name) == 0
+                && (i == 0 || !cfg_node_text(leaves.get(i - 1), "."));
+            SyntaxNode* method = i + 2 < leaves.len() ? leaves.get(i + 2) : (SyntaxNode*)0;
             // Argument lists are `Parenthesized` nodes, not leaves.
-            bool call_on_parameter = strcmp(receiver.text, param.name) == 0
-                && (i == 0 || !cfg_node_text(leaves.get(i - 1), "."))
+            bool method_call = parameter && method != (SyntaxNode*)0
                 && cfg_node_text(leaves.get(i + 1), ".") && node_is_identifier(method)
                 && method.next_sibling != (SyntaxNode*)0
                 && method.next_sibling.kind == NodeKind.Parenthesized;
             i64 seen = 0;
-            while (call_on_parameter && seen < reported.len()
+            while (method_call && seen < reported.len()
                    && strcmp(reported.get(seen), method.text) != 0) {
                 seen += 1;
             }
             MethodDeclarations found = { .own = 0, .generic = 0, .blanket = 0 };
-            if (call_on_parameter && seen == reported.len()
+            if (method_call && seen == reported.len()
                 && typecheck_judged_methods(types, root, owner_type, method.text, &found)
                 && found.own == 0) {
-                diagnostics.error(call.span, generic_call_missing_method(
+                diagnostics.error(span, generic_call_missing_method(
                     method.text, types.type_name(owner_type)));
                 *ok = false;
                 reported.push(method.text);
+            }
+            if (parameter && !method_call) {
+                typecheck_forward_requirements(types, root, receiver, owner_type, span, depth,
+                                               reported, diagnostics, ok);
             }
             i += 1;
         }
         p += 1;
     }
-    reported.drop();
     leaves.drop();
+}
+
+/// When parameter token `use` is a whole argument of a call to a generic
+/// function (`inner(value)` or `inner(&value)`), checks that function's
+/// body with `owner_type` bound to the matching parameter.
+void typecheck_forward_requirements(TypeTable* types, SyntaxNode* root, SyntaxNode* use,
+                                    u32 owner_type, Span span, i64 depth, Vec<str>* reported,
+                                    DiagnosticBag* diagnostics, bool* ok) {
+    SyntaxNode* group = use.parent;
+    if (group == (SyntaxNode*)0 || group.kind != NodeKind.Parenthesized) { return; }
+    SyntaxNode* callee_name = binding_previous_sibling(group);
+    if (callee_name == (SyntaxNode*)0 || !node_is_identifier(callee_name)
+        || cfg_node_text(binding_previous_sibling(callee_name), ".")) {
+        return;
+    }
+    SyntaxNode* before = binding_previous_sibling(use);
+    if (cfg_node_text(before, "&")) { before = binding_previous_sibling(before); }
+    if ((before != (SyntaxNode*)0 && !cfg_node_text(before, ","))
+        || (use.next_sibling != (SyntaxNode*)0 && !cfg_node_text(use.next_sibling, ","))) {
+        return;
+    }
+    i64 index = 0;
+    SyntaxNode* child = group.first_child;
+    while (child != use) {
+        if (cfg_node_text(child, ",")) { index += 1; }
+        child = child.next_sibling;
+    }
+    // Overloads would need argument types to pick the body.
+    RootIndex* items = root_index(root);
+    SyntaxNode* callee = (SyntaxNode*)0;
+    i64 entry = items.find(callee_name.text);
+    while (entry >= 0) {
+        SyntaxNode* item = items.item(entry);
+        entry = items.after(entry);
+        if (item.kind == NodeKind.Function) {
+            if (callee != (SyntaxNode*)0) { return; }
+            callee = item;
+        }
+    }
+    SyntaxNode* id = callee == (SyntaxNode*)0 ? (SyntaxNode*)0 : function_identifier(callee);
+    if (id == (SyntaxNode*)0 || !typecheck_is_generic_function(callee)) { return; }
+    Vec<Binding> params = Vec<Binding>.new();
+    collect_parameter_bindings(binding_function_parameters(callee), &params);
+    Vec<u32> type_params = Vec<u32>.new();
+    mono_collect_generic_parameters(id.next_sibling, types, &type_params);
+    Vec<u32> owners = Vec<u32>.new();
+    i64 p = 0;
+    while (p < params.len()) {
+        TypeEntry* entry_type = types.get(typecheck_parameter_type_id(types, params.get_ptr(p)));
+        while (entry_type.kind == TypeKind.Pointer || entry_type.kind == TypeKind.Reference) {
+            entry_type = types.get(entry_type.inner);
+        }
+        bool type_param = entry_type.kind == TypeKind.TypeParam
+            || (entry_type.kind == TypeKind.Named && entry_type.count == 0);
+        owners.push(p == index && !binding_is_variadic_parameter(params.get_ptr(p)) && type_param
+            && mono_contains_type_param(&type_params, entry_type.name_id)
+            ? owner_type : TYPE_UNKNOWN);
+        p += 1;
+    }
+    typecheck_body_requirements(types, root, callee, &params, &owners, span, depth + 1,
+                                reported, diagnostics, ok);
+    owners.drop();
+    type_params.drop();
+    params.drop();
 }
 
 /// Returns the symbol of the method a call resolves to.
