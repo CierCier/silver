@@ -12,6 +12,7 @@ import std.mem.memory;
 import std.net.inet;
 import std.net.socket;
 import std.net.tcp;
+import std.process;
 import std.sys.epoll;
 import std.sys.eventfd;
 import std.sys.io_vec;
@@ -201,6 +202,40 @@ void test_zero_copy_sendfile() {
     sys_unlink((i64)path);
 }
 
+/// A duplicated eventfd descriptor and a forked child's writes reach the
+/// same counter.
+void test_eventfd_dup_and_fork() {
+    Result<EventFd, Error> efd_res = EventFd.new(0, true);
+    @assert(efd_res.is_ok());
+    EventFd efd = efd_res.unwrap();
+
+    i64 dup_fd = sys_dup((i64)efd.fd);
+    @assert(dup_fd >= 0);
+    u64 two = 2;
+    @assert(sys_write(dup_fd, (i64)&two, 8) == 8);
+    Result<u64, Error> via_dup = efd.read_val();
+    @assert(via_dup.is_ok());
+    @assert(via_dup.unwrap() == 2);
+
+    i64 pid = sys_fork();
+    @assert(pid >= 0);
+    if (pid == 0) {
+        u64 five = 5;
+        sys_exit_group(sys_write((i64)efd.fd, (i64)&five, 8) == 8 ? (i64)0 : (i64)1);
+    }
+    Child child;
+    child.pid = pid;
+    child.handle = 0;
+    ExitStatus status = child.wait_status();
+    @assert(status.success());
+    Result<u64, Error> via_child = efd.read_val();
+    @assert(via_child.is_ok());
+    @assert(via_child.unwrap() == 5);
+
+    sys_close(dup_fd);
+    efd.close();
+}
+
 /// An eventfd that lands on descriptor 0 (stdin closed) still behaves as an
 /// eventfd. Runs last: it leaves stdin closed.
 void test_eventfd_on_descriptor_zero() {
@@ -222,6 +257,7 @@ i32 main() {
     test_vectorized_io();
     test_socket_tuning_and_reuseport();
     test_zero_copy_sendfile();
+    test_eventfd_dup_and_fork();
     test_eventfd_on_descriptor_zero();
     return 0;
 }

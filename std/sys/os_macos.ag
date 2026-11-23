@@ -538,10 +538,13 @@ i64 sys_fcntl(i64 fd, i64 cmd, i64 arg) {
         return mac_ret((i64)mac_fcntl((i32)fd, (i32)cmd, mflags));
     }
     if (cmd == LINUX_F_DUPFD_CLOEXEC) {
-        return mac_ret((i64)mac_fcntl((i32)fd, MAC_F_DUPFD_CLOEXEC, (i32)arg));
+        return mac_eventfd_dup(fd, mac_ret((i64)mac_fcntl((i32)fd, MAC_F_DUPFD_CLOEXEC, (i32)arg)));
     }
-    if (cmd >= 0 && cmd <= 2) {
-        // F_DUPFD, F_GETFD, F_SETFD.
+    if (cmd == 0) { // F_DUPFD
+        return mac_eventfd_dup(fd, mac_ret((i64)mac_fcntl((i32)fd, 0, (i32)arg)));
+    }
+    if (cmd >= 1 && cmd <= 2) {
+        // F_GETFD, F_SETFD.
         return mac_ret((i64)mac_fcntl((i32)fd, (i32)cmd, (i32)arg));
     }
     return -22; // EINVAL: no other command is part of the seam
@@ -729,15 +732,22 @@ i64 sys_pipe(i64 fds) {
     return sys_pipe2(fds, 0);
 }
 
-/// Seam: dup(2). Returns the new fd or -errno.
+/// Seam: dup(2). Returns the new fd or -errno. A duplicate of an eventfd
+/// is the same eventfd.
 i64 sys_dup(i64 fd) {
-    return mac_ret((i64)mac_dup((i32)fd));
+    return mac_eventfd_dup(fd, mac_ret((i64)mac_dup((i32)fd)));
 }
 
 /// Seam: dup2(2): makes `new_fd` a copy of `old_fd`. Returns `new_fd` or
-/// -errno.
+/// -errno. Replacing an eventfd descriptor drops its eventfd entry first.
 i64 sys_dup2(i64 old_fd, i64 new_fd) {
-    return mac_ret((i64)mac_dup2((i32)old_fd, (i32)new_fd));
+    if (old_fd != new_fd && mac_fd_is_open(old_fd)) {
+        MacEventFd* replaced = mac_eventfd_find(new_fd);
+        if (replaced != (MacEventFd*)0) {
+            mac_eventfd_forget(replaced);
+        }
+    }
+    return mac_eventfd_dup(old_fd, mac_ret((i64)mac_dup2((i32)old_fd, (i32)new_fd)));
 }
 
 /// Seam: dup3(2). Equal fds are EINVAL as on Linux; O_CLOEXEC is the only
@@ -2278,28 +2288,39 @@ bool mac_fd_is_socket(i64 fd) {
 // ---------------------------------------------------------------------------
 // eventfd over a pipe. The eventfd is the pipe's read end, so it polls
 // readable exactly when the counter is nonzero; the seam's read, write, and
-// close route eventfds to the counter kept here.
+// close route eventfds to the counter. The counter lives in MAP_SHARED
+// memory, so a forked child and its parent share it as they share the pipe,
+// and every duplicate of the descriptor (dup, dup2, dup3, F_DUPFD) maps to
+// the same state. An exec'd program sees a plain pipe: the table does not
+// survive exec.
 // ---------------------------------------------------------------------------
 
 /// Linux eventfd flags.
 const i64 LINUX_EFD_SEMAPHORE = 1;
-/// Most eventfds alive at once.
+/// Most eventfd descriptors (duplicates included) alive at once.
 const i64 MAC_EVENTFD_MAX = 64;
 
-/// One emulated eventfd: its slot key (the read end + 1; 0 = free, -1 =
-/// being filled, so descriptor 0 can be an eventfd), the read end the caller
-/// holds, the pipe's write end, the 64-bit counter, and the Linux flags.
-struct MacEventFd {
-    i64 key;
-    i64 fd;
-    i64 write_fd;
+/// State one eventfd's descriptors share, in MAP_SHARED memory: the 64-bit
+/// counter, the pipe's write end (the same number in every process that
+/// inherits it), and the Linux flags.
+struct MacEventState {
     u64 counter;
+    i64 write_fd;
     i64 flags;
 }
 
-/// Emulated eventfd table.
+/// One eventfd descriptor: its slot key (fd + 1; 0 = free, -1 = being
+/// filled, so descriptor 0 can be an eventfd), the descriptor (a read end of
+/// the pipe), and the shared state.
+struct MacEventFd {
+    i64 key;
+    i64 fd;
+    MacEventState* state;
+}
+
+/// Emulated eventfd descriptor table.
 MacEventFd g_mac_eventfds[64];
-/// Number of live eventfds; read/write skip the table lookup while 0.
+/// Number of live eventfd descriptors; read/write skip the lookup while 0.
 i64 g_mac_eventfd_live;
 
 /// The table entry for `fd`, or null when `fd` is not an eventfd.
@@ -2317,12 +2338,36 @@ MacEventFd* mac_eventfd_find(i64 fd) {
     return (MacEventFd*)0;
 }
 
+/// Records `fd` as a descriptor of the eventfd with `state`. Returns false
+/// when the table is full.
+bool mac_eventfd_add(i64 fd, MacEventState* state) {
+    i64 i = 0;
+    while (i < MAC_EVENTFD_MAX) {
+        if (__atomic_cmpxchg_i64(&g_mac_eventfds[i].key, 0, -1, ATOMIC_SEQ_CST, ATOMIC_ACQUIRE)) {
+            MacEventFd* e = &g_mac_eventfds[i];
+            e.fd = fd;
+            e.state = state;
+            __atomic_fetch_add_i64(&g_mac_eventfd_live, 1, ATOMIC_ACQ_REL);
+            __atomic_store_i64(&e.key, fd + 1, ATOMIC_RELEASE);
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
 /// Seam: eventfd2(2). EFD_CLOEXEC, EFD_NONBLOCK, and EFD_SEMAPHORE match
 /// Linux's behavior.
 i64 sys_eventfd2(i64 initval, i64 flags) {
+    i64 shared = sys_mmap(0, @size(MacEventState), PROT_READ | PROT_WRITE,
+        MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (shared < 0) {
+        return shared;
+    }
     i32 fds[2];
     i64 r = sys_pipe2((i64)&fds[0], O_CLOEXEC);
     if (r < 0) {
+        sys_munmap(shared, @size(MacEventState));
         return r;
     }
     // Both ends stay non-blocking inside; EFD_NONBLOCK is enforced here.
@@ -2331,27 +2376,21 @@ i64 sys_eventfd2(i64 initval, i64 flags) {
     if ((flags & O_CLOEXEC) == 0) {
         mac_fcntl(fds[0], 2, 0); // F_SETFD: inheritable, as requested
     }
-    i64 i = 0;
-    while (i < MAC_EVENTFD_MAX) {
-        if (__atomic_cmpxchg_i64(&g_mac_eventfds[i].key, 0, -1, ATOMIC_SEQ_CST, ATOMIC_ACQUIRE)) {
-            MacEventFd* e = &g_mac_eventfds[i];
-            e.fd = (i64)fds[0];
-            e.write_fd = (i64)fds[1];
-            e.counter = (u64)initval;
-            e.flags = flags;
-            if (initval != 0) {
-                u8 one = (u8)1;
-                mac_write(fds[1], (i64)&one, 1);
-            }
-            __atomic_fetch_add_i64(&g_mac_eventfd_live, 1, ATOMIC_ACQ_REL);
-            __atomic_store_i64(&e.key, (i64)fds[0] + 1, ATOMIC_RELEASE);
-            return (i64)fds[0];
-        }
-        i += 1;
+    MacEventState* state = (MacEventState*)shared;
+    state.counter = (u64)initval;
+    state.write_fd = (i64)fds[1];
+    state.flags = flags;
+    if (initval != 0) {
+        u8 one = (u8)1;
+        mac_write(fds[1], (i64)&one, 1);
     }
-    mac_close(fds[0]);
-    mac_close(fds[1]);
-    return -24; // EMFILE
+    if (!mac_eventfd_add((i64)fds[0], state)) {
+        mac_close(fds[0]);
+        mac_close(fds[1]);
+        sys_munmap(shared, @size(MacEventState));
+        return -24; // EMFILE
+    }
+    return (i64)fds[0];
 }
 
 /// Seam: eventfd(2), the flagless form.
@@ -2365,25 +2404,27 @@ i64 mac_eventfd_read(MacEventFd* e, i64 buf, i64 len) {
     if (len < 8) {
         return -22;
     }
+    MacEventState* state = e.state;
+    i64* counter = (i64*)&state.counter;
     while (true) {
-        u64 c = (u64)__atomic_load_i64((i64*)&e.counter, ATOMIC_ACQUIRE);
+        u64 c = (u64)__atomic_load_i64(counter, ATOMIC_ACQUIRE);
         if (c == (u64)0) {
-            if ((e.flags & O_NONBLOCK) != 0) {
+            if ((state.flags & O_NONBLOCK) != 0) {
                 return -11; // EAGAIN
             }
             sys_wait_readable(e.fd, -1);
             continue;
         }
-        u64 taken = (e.flags & LINUX_EFD_SEMAPHORE) != 0 ? (u64)1 : c;
-        if (__atomic_cmpxchg_i64((i64*)&e.counter, (i64)c, (i64)(c - taken), ATOMIC_SEQ_CST, ATOMIC_ACQUIRE)) {
+        u64 taken = (state.flags & LINUX_EFD_SEMAPHORE) != 0 ? (u64)1 : c;
+        if (__atomic_cmpxchg_i64(counter, (i64)c, (i64)(c - taken), ATOMIC_SEQ_CST, ATOMIC_ACQUIRE)) {
             if (c == taken) {
                 // Counter is zero: drain the wakeup byte(s) so polls block.
                 u8 sink[16];
                 mac_read((i32)e.fd, (i64)&sink[0], 16);
-                if (__atomic_load_i64((i64*)&e.counter, ATOMIC_ACQUIRE) != 0) {
+                if (__atomic_load_i64(counter, ATOMIC_ACQUIRE) != 0) {
                     // A writer raced the drain: keep the fd readable.
                     u8 one = (u8)1;
-                    mac_write((i32)e.write_fd, (i64)&one, 1);
+                    mac_write((i32)state.write_fd, (i64)&one, 1);
                 }
             }
             *(u64*)buf = taken;
@@ -2402,21 +2443,57 @@ i64 mac_eventfd_write(MacEventFd* e, i64 buf, i64 len) {
     if (add == (u64)0xFFFFFFFFFFFFFFFF) {
         return -22;
     }
-    i64 old = __atomic_fetch_add_i64((i64*)&e.counter, (i64)add, ATOMIC_ACQ_REL);
+    MacEventState* state = e.state;
+    i64 old = __atomic_fetch_add_i64((i64*)&state.counter, (i64)add, ATOMIC_ACQ_REL);
     if (old == 0 && add != (u64)0) {
         u8 one = (u8)1;
-        mac_write((i32)e.write_fd, (i64)&one, 1);
+        mac_write((i32)state.write_fd, (i64)&one, 1);
     }
     return 8;
 }
 
-/// Closes an emulated eventfd and frees its slot.
-i64 mac_eventfd_close(MacEventFd* e) {
-    i64 fd = e.fd;
-    mac_close((i32)e.write_fd);
+/// Frees `e`'s slot; when it was this process's last descriptor of the
+/// eventfd, also closes the write end and unmaps the shared state. The
+/// descriptor itself stays open.
+void mac_eventfd_forget(MacEventFd* e) {
+    MacEventState* state = e.state;
     __atomic_store_i64(&e.key, 0, ATOMIC_RELEASE);
     __atomic_fetch_sub_i64(&g_mac_eventfd_live, 1, ATOMIC_ACQ_REL);
+    i64 i = 0;
+    while (i < MAC_EVENTFD_MAX) {
+        if (__atomic_load_i64(&g_mac_eventfds[i].key, ATOMIC_ACQUIRE) > 0
+            && g_mac_eventfds[i].state == state) {
+            return; // another descriptor still uses the state
+        }
+        i += 1;
+    }
+    mac_close((i32)state.write_fd);
+    sys_munmap((i64)state, @size(MacEventState));
+}
+
+/// Closes an eventfd descriptor.
+i64 mac_eventfd_close(MacEventFd* e) {
+    i64 fd = e.fd;
+    mac_eventfd_forget(e);
     return mac_ret((i64)mac_close((i32)fd));
+}
+
+/// After `new_fd` became a duplicate of `old_fd`, makes it the same eventfd
+/// when `old_fd` is one. Returns `new_fd`, or -EMFILE (closing `new_fd`)
+/// when the table is full.
+i64 mac_eventfd_dup(i64 old_fd, i64 new_fd) {
+    if (new_fd < 0 || old_fd == new_fd) {
+        return new_fd;
+    }
+    MacEventFd* e = mac_eventfd_find(old_fd);
+    if (e == (MacEventFd*)0) {
+        return new_fd;
+    }
+    if (!mac_eventfd_add(new_fd, e.state)) {
+        mac_close((i32)new_fd);
+        return -24;
+    }
+    return new_fd;
 }
 
 // ---------------------------------------------------------------------------
