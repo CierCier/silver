@@ -5493,7 +5493,11 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                     &slice_temp_ptr, &slice_temp_type);
             } else {
                 u32 saved_expected = ctx.expected_type_id;
-                if (c_abi_call) { ctx.expected_type_id = expected_arg_type; }
+                // A `[a, b]` literal fills a tuple parameter, as in a declaration.
+                bool tuple_parameter = expected_arg_type != TYPE_UNKNOWN
+                    && ctx.types.get(ctx.types.resolve_subst(expected_arg_type)).kind
+                        == TypeKind.Tuple;
+                if (c_abi_call || tuple_parameter) { ctx.expected_type_id = expected_arg_type; }
                 a_val = llvm_emit_expr(ctx, arg_id);
                 ctx.expected_type_id = saved_expected;
             }

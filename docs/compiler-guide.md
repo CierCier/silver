@@ -480,9 +480,6 @@ Remaining limits:
 - The checker does not judge method calls on receivers it cannot resolve, such
   as a value of an opaque type parameter.
 - `cast` blocks are not checked.
-- Two codegen divergences pass checking: stage1 passes a `[a, b]` tuple literal
-  argument incorrectly, and it converts `bool b = 1.5;` to `true` where stage0
-  produces `false`.
 
 ## 7. Diagnostics
 
