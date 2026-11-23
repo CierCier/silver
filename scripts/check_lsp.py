@@ -799,6 +799,17 @@ class NativeLsp(unittest.TestCase):
         self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
                          [(14, "generic call requires method 'get' on type Box")])
 
+    def test_generic_method_calls_check_arity_and_concrete_parameters(self):
+        text = ("struct Box { i64 v; }\nimpl Box {\n"
+                " i64 put<U>(&self, U value, i64 extra) { return self.v + extra; }\n}\n"
+                "i64 main() {\n Box b = { .v = 1 };\n"
+                " i64 fits = b.put(3, 2) + b.put(\"x\", 4);\n"
+                " return fits + b.put(3);\n}\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
+                         [(7, "no overload of method 'put' on type Box matches these arguments")])
+
     def test_returned_pointee_places_and_unrelated_c_results_are_not_local_escapes(self):
         text = ('extern "C" i64* pick(i64* base, i64** slots, i64 count);\n'
                 'extern "C" i64* same(i64* value);\n'

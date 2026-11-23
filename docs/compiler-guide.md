@@ -484,7 +484,6 @@ the generated code fails at run time.
 
 Remaining limits:
 
-- Overloads of methods with their own type parameters are not judged.
 - A generic body is a template. The checker does not judge a method call on a
   type-parameter receiver inside the body. Each concrete call instead reports
   `generic call requires method 'get' on type Box` when the bound type lacks

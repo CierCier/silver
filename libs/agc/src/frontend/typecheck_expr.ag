@@ -1105,6 +1105,20 @@ bool typecheck_arguments_known(AstPool* pool, AstExpr* call) {
     return true;
 }
 
+/// Returns true when every argument of the method call whose arguments
+/// start at `args_start` has an inferred type.
+bool typecheck_method_arguments_known(AstPool* pool, u32 args_start) {
+    i64 count = (i64)pool.args.get((i64)args_start);
+    i64 i = 0;
+    while (i < count) {
+        if (pool.get_expr(pool.args.get((i64)args_start + 1 + i)).inferred_type == TYPE_UNKNOWN) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
 /// Returns the non-generic overload of `name` whose symbol is `symbol_id`,
 /// or null.
 SyntaxNode* typecheck_overload_by_symbol(TypeTable* types, Interner* names, SyntaxNode* root,
@@ -2476,8 +2490,6 @@ void typecheck_method_call_target(AstPool* pool, TypeTable* types, SyntaxNode* r
         *ok = false;
         return;
     }
-    // Overload selection does not infer a method's own type parameters.
-    if (found.generic > 0) { return; }
     if (args_start >= (u32)pool.args.len()) { return; }
     str owner_name = type_is_primitive(owner_type) ? types.type_name(owner_type)
         : types.names.get(types.get(owner_type).name_id);
@@ -2492,6 +2504,21 @@ void typecheck_method_call_target(AstPool* pool, TypeTable* types, SyntaxNode* r
                                        args_start, true, &ret_start, &name)
                 != (SyntaxNode*)0);
     types.pop_subst(1);
+    // Overload selection does not infer a method's own type parameters. A
+    // generic declaration whose arity fits is matched by monomorphization,
+    // which reports its own failure where the call's type is inferred.
+    if (!selected && found.generic > 0) {
+        MonoMethodTemplate template;
+        Vec<u32> param_ids = Vec<u32>.new();
+        Vec<u32> arg_ids = Vec<u32>.new();
+        String failure = String.new();
+        selected = mono_resolve_generic_method(pool, root, types, receiver_type, method_name,
+                args_start, static_method, &template, &param_ids, &arg_ids, &failure)
+            || !typecheck_method_arguments_known(pool, args_start);
+        failure.drop();
+        arg_ids.drop();
+        param_ids.drop();
+    }
     if (!selected) {
         diagnostics.error(span, method_overload_mismatch(method_name,
                                                          types.type_name(owner_type)));
