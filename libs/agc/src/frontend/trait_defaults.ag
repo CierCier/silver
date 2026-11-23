@@ -105,78 +105,78 @@ void trait_defaults_target(SyntaxNode* impl_item, Vec<SyntaxNode*>* target) {
     }
 }
 
-/// Returns true when the siblings from `part` on spell `target`.
-bool trait_defaults_spells(SyntaxNode* part, Vec<SyntaxNode*>* target) {
-    if (target.len() == 0) { return false; }
+/// Returns true when `nodes` spells `target` from index `at` on.
+bool trait_defaults_spells(Vec<SyntaxNode*>* nodes, i64 at, Vec<SyntaxNode*>* target) {
+    if (target.len() == 0 || at + target.len() > nodes.len()) { return false; }
     i64 i = 0;
     while (i < target.len()) {
+        SyntaxNode* node = nodes.get(at + i);
         SyntaxNode* expected = target.get(i);
-        if (part == (SyntaxNode*)0 || part.kind != NodeKind.Token
-            || expected.kind != NodeKind.Token || strcmp(part.text, expected.text) != 0) {
+        if (node.kind != NodeKind.Token || expected.kind != NodeKind.Token
+            || strcmp(node.text, expected.text) != 0) {
             return false;
         }
-        part = part.next_sibling;
         i += 1;
     }
     return true;
 }
 
-/// Returns true when the siblings in `[first, end)` spell exactly `target`.
-bool trait_defaults_spells_exactly(SyntaxNode* first, SyntaxNode* end,
-                                   Vec<SyntaxNode*>* target) {
-    i64 count = 0;
-    SyntaxNode* node = first;
-    while (node != (SyntaxNode*)0 && node != end) {
-        count += 1;
-        node = node.next_sibling;
+/// Appends one parameter's type `nodes`, spelling the impl's `target` type
+/// as `Self`. A receiver shorthand (`self`, `&self`, `*self`) also spells
+/// `Self`, so `*self` reads like `X* self`.
+void trait_defaults_append_type(Vec<SyntaxNode*>* nodes, SyntaxNode* name,
+                                Vec<SyntaxNode*>* target, String* out) {
+    bool receiver = strcmp(name.text, "self") == 0;
+    if (receiver && nodes.len() == 1 && nodes.get(0).kind == NodeKind.Token
+        && nodes.get(0).token_kind == TokenKind.Star) {
+        out.push_str("Self * ");
+        return;
     }
-    return count == target.len() && trait_defaults_spells(first, target);
+    bool typed = false;
+    i64 i = 0;
+    while (i < nodes.len()) {
+        SyntaxNode* node = nodes.get(i);
+        if (trait_defaults_spells(nodes, i, target)) {
+            out.push_str("Self ");
+            typed = true;
+            i += target.len();
+        } else {
+            append_node_tokens(node, out);
+            out.push((u8)' ');
+            if (!(node.kind == NodeKind.Token
+                  && (node.token_kind == TokenKind.BitwiseAnd || node.token_kind == TokenKind.Star
+                      || node.token_kind == TokenKind.Mut))) {
+                typed = true;
+            }
+            i += 1;
+        }
+    }
+    if (!typed && receiver) { out.push_str("Self "); }
 }
 
 /// Appends the parameter types of method parameter list `list`, without
-/// the parameter names. `Self`, the impl's `target` type (written out or
-/// passed as a trait argument), and a receiver shorthand (`self`, `&self`,
-/// `*self`) all spell `Self`, so `*self` reads like `X* self`. A trait type
-/// parameter (an entry of `params`) is spelled as the impl's matching entry
-/// of `args`.
+/// the parameter names. A trait type parameter (an entry of `params`) is
+/// first replaced with the impl's matching entry of `args`; then the impl's
+/// `target` type spells `Self`, wherever it came from.
 void trait_defaults_signature(SyntaxNode* list, Vec<SyntaxNode*>* target,
                               Vec<SyntaxNode*>* params, Vec<SyntaxNode*>* args,
                               String* out) {
     i64 angle_depth = 0;
-    String parameter = String.new();
-    bool typed = false;
+    Vec<SyntaxNode*> nodes = Vec<SyntaxNode*>.new();
     SyntaxNode* part = list.first_child;
     while (part != (SyntaxNode*)0) {
         SyntaxNode* next = part.next_sibling;
         if (part.kind == NodeKind.Token && part.token_kind == TokenKind.Less) { angle_depth += 1; }
         if (part.kind == NodeKind.Token && part.token_kind == TokenKind.Greater) { angle_depth -= 1; }
-        bool separator = angle_depth == 0 && part.kind == NodeKind.Token
-            && part.token_kind == TokenKind.Comma;
         // The node before a separator or the list's end is a parameter name.
         bool name = angle_depth == 0 && (next == (SyntaxNode*)0
             || (next.kind == NodeKind.Token && next.token_kind == TokenKind.Comma));
-        if (separator) {
+        if (angle_depth == 0 && part.kind == NodeKind.Token
+            && part.token_kind == TokenKind.Comma) {
             out.push_str(",");
         } else if (name) {
-            if (!typed && strcmp(part.text, "self") == 0) {
-                if (parameter.equals("* ")) {
-                    parameter.clear();
-                    parameter.push_str("Self * ");
-                } else {
-                    parameter.push_str("Self ");
-                }
-            }
-            out.push_str(parameter.to_str());
-            parameter.clear();
-            typed = false;
-        } else if (trait_defaults_spells(part, target)) {
-            parameter.push_str("Self ");
-            typed = true;
-            i64 skipped = 1;
-            while (skipped < target.len()) {
-                next = next.next_sibling;
-                skipped += 1;
-            }
+            trait_defaults_append_type(&nodes, part, target, out);
+            nodes.clear();
         } else {
             i64 entry = 0;
             while (entry < params.len()
@@ -184,29 +184,19 @@ void trait_defaults_signature(SyntaxNode* list, Vec<SyntaxNode*>* target,
                         && strcmp(params.get(entry).text, part.text) == 0)) {
                 entry += 2;
             }
-            if (entry < params.len()
-                && trait_defaults_spells_exactly(args.get(entry), args.get(entry + 1), target)) {
-                parameter.push_str("Self ");
-            } else if (entry < params.len()) {
+            if (entry < params.len()) {
                 SyntaxNode* arg = args.get(entry);
                 while (arg != (SyntaxNode*)0 && arg != args.get(entry + 1)) {
-                    append_node_tokens(arg, &parameter);
-                    parameter.push((u8)' ');
+                    nodes.push(arg);
                     arg = arg.next_sibling;
                 }
             } else {
-                append_node_tokens(part, &parameter);
-                parameter.push((u8)' ');
-            }
-            if (!(part.kind == NodeKind.Token
-                  && (part.token_kind == TokenKind.BitwiseAnd || part.token_kind == TokenKind.Star
-                      || part.token_kind == TokenKind.Mut))) {
-                typed = true;
+                nodes.push(part);
             }
         }
         part = next;
     }
-    parameter.drop();
+    nodes.drop();
 }
 
 /// Returns true when `impl_item` declares method `name` with the parameter

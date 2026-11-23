@@ -1427,6 +1427,13 @@ class NativeLsp(unittest.TestCase):
                   'trait Meet<T> { i64 meet(&self, T other) { return self.fallback(); } }\n'
                   'impl Meet<Counter> for Counter { i64 meet(&self, Counter other) { return 2; } }\n'
                   + valid.replace("c.bump(1)", "i64 m = c.join(*c) + c.meet(*c)"), []),
+                 # Trait arguments apply before the impl's type reads as `Self`.
+                 ('trait Reach<T> { i64 reach(&self, T other) { return self.fallback(); } }\n'
+                  'impl Reach<Counter*> for Counter { i64 reach(&self, Counter* other) { return 3; } }\n'
+                  'struct T { i64 n; }\n'
+                  'trait Hold<T> { i64 hold(&self, T x) { return self.fallback(); } }\n'
+                  'impl Hold<i64> for T { i64 hold(&self, i64 x) { return x; } }\n'
+                  + valid.replace("c.bump(1)", "i64 m = c.reach(c)"), []),
                  # A parameter named like the type parameter stays a value.
                  ('trait Same<T> { i64 same(&self, i64 T) { return T; } }\n'
                   'impl Same<i32> for Counter { }\n'
