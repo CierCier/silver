@@ -27,6 +27,8 @@ impl<T: TryFrom<i128>> Converter<T> {
 enum Ordinal { First; Second; Third; }
 enum Offset { Minus = -2; Plus = 2; }
 struct OrdinalBox { Ordinal ordinal; }
+struct Extent { i64 start; i32 width; }
+struct Window { Extent extent; u8 depth; }
 impl OrdinalBox {
     void set(*self, Ordinal ordinal) { self.ordinal = ordinal; }
 }
@@ -89,5 +91,10 @@ i32 main() {
     i8 minus = -2;
     assert_eq_i64(-2, offset_code(minus), "negative integer keeps its sign as a tag");
     assert_eq_i64(-2, widen(Offset.Minus), "negative tag widens with its sign");
+
+    Window window = { { 3, 4 }, 1 };
+    assert_eq_i64(3, window.extent.start, "positional initializer fills fields in order");
+    assert_eq_i64(4, (i64)window.extent.width, "nested positional value converts to i32");
+    assert_eq_i64(1, (i64)window.depth, "positional value converts to u8");
     return done();
 }

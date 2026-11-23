@@ -850,6 +850,33 @@ u32 type_id_from_declarator(TypeTable* types, str base_type, SyntaxNode* suffix)
     return result;
 }
 
+/// Returns the name token of the field at `index` in declaration order of
+/// struct item `item`, or null.
+SyntaxNode* struct_field_name_at(SyntaxNode* item, i64 index) {
+    SyntaxNode* body = item == (SyntaxNode*)0 ? (SyntaxNode*)0 : item.first_child;
+    while (body != (SyntaxNode*)0 && body.kind != NodeKind.Block) {
+        body = body.next_sibling;
+    }
+    SyntaxNode* cursor = body == (SyntaxNode*)0 ? (SyntaxNode*)0 : body.first_child;
+    i64 position = 0;
+    while (cursor != (SyntaxNode*)0) {
+        SyntaxNode* name = (SyntaxNode*)0;
+        while (cursor != (SyntaxNode*)0
+            && !(cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon)) {
+            if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Identifier) {
+                name = cursor;
+            }
+            cursor = cursor.next_sibling;
+        }
+        if (name != (SyntaxNode*)0) {
+            if (position == index) { return name; }
+            position += 1;
+        }
+        if (cursor != (SyntaxNode*)0) { cursor = cursor.next_sibling; }
+    }
+    return (SyntaxNode*)0;
+}
+
 /// Returns the declared type id of `field_name` in struct item `item`.
 u32 struct_field_type_id(TypeTable* types, SyntaxNode* item, str field_name) {
     if (item == (SyntaxNode*)0) { return TYPE_UNKNOWN; }

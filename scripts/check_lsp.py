@@ -813,6 +813,16 @@ class NativeLsp(unittest.TestCase):
         self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
                          [(7, "no overload of method 'put' on type Box matches these arguments")])
 
+    def test_positional_and_self_struct_literals_are_checked(self):
+        text = ("struct P { i64 x; str y; }\nimpl P {\n"
+                " Self make(i64 v) {\n  Self r = { .x = v, .y = 1 };\n  return r;\n }\n}\n"
+                "i64 main() {\n P ok = { 1, \"a\" };\n P bad = { 1, 2 };\n return ok.x + bad.x;\n}\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
+                         [(3, "type mismatch: expected str, found i32"),
+                          (9, "type mismatch: expected str, found i32")])
+
     def test_returned_pointee_places_and_unrelated_c_results_are_not_local_escapes(self):
         text = ('extern "C" i64* pick(i64* base, i64** slots, i64 count);\n'
                 'extern "C" i64* same(i64* value);\n'

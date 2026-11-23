@@ -2273,30 +2273,45 @@ impl ExprLowerer {
         return struct_field_type_id(self.types, item, field_name);
     }
 
-    /// Lowers a `{ .field = value, ... }` struct literal of `struct_name`.
+    /// Lowers a `{ .field = value, ... }` or positional `{ value, ... }`
+    /// struct literal of `struct_name`.
     u32 lower_struct_lit(ExprLowerer* self, str struct_name, SyntaxNode* block) {
-        // Lower `{ .field = value, ... }` designators into name/expr pairs.
-        // Caller verified the struct exists. Malformed entries fail closed.
+        // Lower each entry into a name/expr pair; a positional entry takes
+        // the next declared field. Malformed entries fail closed.
         Vec<u32> pairs = Vec<u32>.new();
+        SyntaxNode* struct_item = struct_name == (str)0 || self.unit_root == (SyntaxNode*)0
+            ? (SyntaxNode*)0 : find_item_by_name(self.unit_root, NodeKind.Struct, struct_name);
+        i64 position = 0;
         SyntaxNode* cur = block.first_child;
         while (cur != (SyntaxNode*)0) {
             if (cur.kind == NodeKind.Token && cur.token_kind == TokenKind.Comma) {
                 cur = cur.next_sibling;
                 continue;
             }
-            SyntaxNode* dot = cur;
-            SyntaxNode* name_node = dot.next_sibling;
-            SyntaxNode* eq = name_node != (SyntaxNode*)0 ? name_node.next_sibling : (SyntaxNode*)0;
-            if (dot.kind != NodeKind.Token || strcmp(dot.text, ".") != 0
-                || name_node == (SyntaxNode*)0 || name_node.kind != NodeKind.Token
-                || name_node.token_kind != TokenKind.Identifier
-                || eq == (SyntaxNode*)0 || eq.kind != NodeKind.Token
-                || (eq.token_kind != TokenKind.Assign && strcmp(eq.text, "=") != 0)) {
+            SyntaxNode* name_node = (SyntaxNode*)0;
+            SyntaxNode* value_start = (SyntaxNode*)0;
+            if (cur.kind == NodeKind.Token && strcmp(cur.text, ".") == 0) {
+                name_node = cur.next_sibling;
+                SyntaxNode* eq = name_node != (SyntaxNode*)0 ? name_node.next_sibling
+                    : (SyntaxNode*)0;
+                if (name_node == (SyntaxNode*)0 || name_node.kind != NodeKind.Token
+                    || name_node.token_kind != TokenKind.Identifier
+                    || eq == (SyntaxNode*)0 || eq.kind != NodeKind.Token
+                    || (eq.token_kind != TokenKind.Assign && strcmp(eq.text, "=") != 0)) {
+                    name_node = (SyntaxNode*)0;
+                } else {
+                    value_start = eq.next_sibling;
+                }
+            } else {
+                name_node = struct_field_name_at(struct_item, position);
+                value_start = cur;
+            }
+            position += 1;
+            if (name_node == (SyntaxNode*)0) {
                 pairs.drop();
                 self.unsupported = true;
                 return 0;
             }
-            SyntaxNode* value_start = eq.next_sibling;
             SyntaxNode* after = (SyntaxNode*)0;
             u32 val_id = 0;
             if (value_start != (SyntaxNode*)0 && value_start.kind == NodeKind.Block) {
@@ -3286,7 +3301,7 @@ impl ExprLowerer {
                 if (cursor.token_kind == TokenKind.Dot) {
                     has_dot = true;
                 }
-                if (node_is_identifier(cursor)) {
+                if (node_is_identifier(cursor) || cursor.token_kind == TokenKind.SelfType) {
                     ident_count += 1;
                 }
                 if (cursor.token_kind == TokenKind.Less || strcmp(cursor.text, "<") == 0) {
