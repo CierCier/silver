@@ -1411,6 +1411,11 @@ class NativeLsp(unittest.TestCase):
                  ('trait Pair { i64 pick(&self, i64 a) { return a; }\n'
                   ' i64 pick(&self, i64 a, i64 b) { return a + b; } }\nimpl Pair for Counter { }\n'
                   + valid.replace("c.bump(1)", "i64 m = c.pick(1) + c.pick(2, 3)"), []),
+                 # An impl overload replaces only the default with its parameter types.
+                 ('trait Both<T> { T both(&self, T x) { return x; }\n'
+                  ' i64 both(&self, str s) { return 9; } }\n'
+                  'impl Both<i64> for Counter { i64 both(&self, i64 x) { return x + 1; } }\n'
+                  + valid.replace("c.bump(1)", 'i64 m = c.both(1) + c.both("s")'), []),
                  # Defaults come from the cfg-active trait of that name.
                  ('#[cfg(os.windows)]\ntrait Reset { void other(*self) { } }\n'
                   '#[cfg(os.linux)]\ntrait Reset { void reset(*self) { } }\n'
