@@ -333,6 +333,38 @@ void stress_owner_moves_and_params() {
     assert_eq_i32(leaf_drop_count, 2, "early-returned pair leaves dropped");
     assert_eq_i32(node_drop_count, 1, "early-return scratch node dropped once");
     assert_eq_i32(node_payload_free_count, 1, "early-return scratch payload freed");
+
+    // OwnedLeaf's fields are all Copy, but its Drop frees memory, so a
+    // plain `=` must transfer ownership rather than duplicate it.
+    reset_owner_counters();
+    {
+        OwnedLeaf a = OwnedLeaf.new(1, 8);
+        OwnedLeaf b = a;
+        assert_eq_i32(b.first(), 1, "implicitly moved leaf keeps its bytes");
+    }
+    assert_eq_i32(leaf_drop_count, 1, "implicit let transfer drops once");
+    assert_eq_i64(leaf_bytes_freed, 8, "implicit let transfer frees once");
+
+    reset_owner_counters();
+    {
+        OwnedLeaf a = OwnedLeaf.new(2, 4);
+        OwnedLeaf b = OwnedLeaf.new(3, 16);
+        b = a;
+        assert_eq_i32(b.first(), 2, "assigned leaf holds the source bytes");
+    }
+    assert_eq_i32(leaf_drop_count, 2, "assignment drops the old value and the moved one");
+    assert_eq_i64(leaf_bytes_freed, 20, "assignment frees both buffers once");
+
+    reset_owner_counters();
+    {
+        OwnedLeaf l = OwnedLeaf.new(4, 2);
+        OwnedLeaf r = OwnedLeaf.new(5, 3);
+        PairOwner p = { .id = 6, .left = l, .right = r, .peer = (PairOwner*)0 };
+        assert_eq_i32(p.sum(), 15, "initializer took both leaves");
+    }
+    assert_eq_i32(pair_drop_count, 1, "initializer-built pair dropped once");
+    assert_eq_i32(leaf_drop_count, 2, "initializer sources drop only through the pair");
+    assert_eq_i64(leaf_bytes_freed, 5, "initializer sources free once");
 }
 
 void stress_loop_churn() {

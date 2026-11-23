@@ -445,7 +445,7 @@ LLVMOpaqueValue* llvm_emit_enum_build(LlvmContext* ctx, str enum_name, str varia
     // aggregate temp (which a flagged destination then owns exactly once).
     i64 cleared_index = 0;
     while (cleared_index < (i64)args_count) {
-        llvm_clear_copy_source(ctx, ctx.pool.args.get((i64)args_start + cleared_index), false);
+        llvm_clear_copy_source(ctx, ctx.pool.args.get((i64)args_start + cleared_index));
         cleared_index += 1;
     }
     // Materialize the value so construction composes with loads and returns.
@@ -2827,7 +2827,7 @@ LLVMOpaqueValue* llvm_emit_struct_lit(LlvmContext* ctx, AstExpr* expr) {
     i64 cleared_index = 0;
     while (cleared_index < (i64)expr.aux) {
         u32 cleared_val_id = ctx.pool.args.get((i64)expr.inner1 + cleared_index * 2 + 1);
-        llvm_clear_copy_source(ctx, cleared_val_id, false);
+        llvm_clear_copy_source(ctx, cleared_val_id);
         cleared_index += 1;
     }
     return LLVMBuildLoad2(ctx.builder, def.llvm_type, slot, "struct.lit.val");
@@ -4945,7 +4945,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             ctx.note_unresolved("unwrap-or", "owned array element");
             return (LLVMOpaqueValue*)0;
         }
-        if (scrut_owned) { llvm_clear_copy_source(ctx, expr.inner0, false); }
+        if (scrut_owned) { llvm_clear_copy_source(ctx, expr.inner0); }
         LLVMOpaqueValue* scrut_slot = LLVMBuildAlloca(ctx.builder, scrut_ty, "unwrap_or_scrut");
         LLVMBuildStore(ctx.builder, scrut_val, scrut_slot);
         LLVMOpaqueValue* tag_ptr = LLVMBuildStructGEP2(ctx.builder, scrut_ty, scrut_slot, 0, "unwrap_or_tag");

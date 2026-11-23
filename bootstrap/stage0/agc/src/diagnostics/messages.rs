@@ -246,6 +246,12 @@ pub fn single_binding_let_only() -> &'static str {
 // Move & Escape Checker Messages
 // =========================================================================
 
+pub fn cannot_move_out_of_indexed_element(container: &str) -> String {
+    format!(
+        "cannot move an element out of '{container}' by indexing: the container still owns it; use take, pop, swap_remove, or a reference"
+    )
+}
+
 pub fn use_of_moved_value(name: &str) -> String {
     format!("use of moved value '{name}'")
 }

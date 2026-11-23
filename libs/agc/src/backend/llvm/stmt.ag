@@ -284,7 +284,7 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
             LLVMSetInitializer(ptr, LLVMConstNull(llvm_ty));
             storage_name.drop();
 
-            llvm_clear_copy_source(ctx, stmt.inner1, true);
+            llvm_clear_copy_source(ctx, stmt.inner1);
             ctx.add_local(var_name_id, ptr, type_id, true);
             LlvmLocal* local = ctx.find_local(var_name_id);
             if (stmt.inner1 != 0) {
@@ -370,7 +370,7 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
         // drops. Clearing runs before add_local so a shadowing `let x = x`
         // resolves to the outer source. Temps and untracked sources are
         // unaffected.
-        llvm_clear_copy_source(ctx, stmt.inner1, true);
+        llvm_clear_copy_source(ctx, stmt.inner1);
         ctx.add_local(var_name_id, ptr, type_id, true);
         LlvmLocal* local = ctx.find_local(var_name_id);
         if (stmt.inner1 != 0) {
@@ -480,7 +480,7 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
             // evaluated above, which keeps self-assignment sound. A copied
             // RHS transfers ownership to the target; the source stays
             // readable but no longer drops.
-            llvm_clear_copy_source(ctx, stmt.inner1, true);
+            llvm_clear_copy_source(ctx, stmt.inner1);
             if (target_place.borrowed && target_place.node != (LLVMOpaqueValue*)0) {
                 llvm_reference_update(ctx, target_place, stmt.span, BorrowedTransition.Cleanup);
             } else { llvm_emit_assign_predrop(ctx, stmt.inner0, stmt.inner1); }

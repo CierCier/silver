@@ -2251,6 +2251,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 ));
             };
             let field_value = self.emit_expression_value(&field_init.value)?;
+            self.transfer_owner_value(&field_init.value)?;
             let llvm_field_ty =
                 struct_ty
                     .get_field_type_at_index(index as u32)
@@ -2298,10 +2299,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
 
         let first = self.emit_expression_value(&items[0])?;
+        self.transfer_owner_value(&items[0])?;
         let element_ty = first.get_type();
         let mut values = vec![first];
         for item in &items[1..] {
             let value = self.emit_expression_value(item)?;
+            self.transfer_owner_value(item)?;
             if value.get_type() != element_ty {
                 return Err(CodegenError::with_span(
                     "array literal elements must have the same type",
@@ -2388,6 +2391,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let mut field_types = Vec::with_capacity(items.len());
         for item in items {
             let value = self.emit_expression_value(item)?;
+            self.transfer_owner_value(item)?;
             field_types.push(value.get_type());
             values.push(value);
         }
@@ -2410,7 +2414,26 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(aggregate.as_basic_value_enum())
     }
 
+    /// Builds `{ ... }` for `target_type`. An element taken from an owned
+    /// place moves out of it, so its drop state is cleared once all
+    /// elements are built.
     pub(crate) fn emit_typed_initializer_value(
+        &mut self,
+        items: &[ast::InitializerItem],
+        target_type: &ast::Type,
+        span: &Span,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let value = self.emit_typed_initializer_elements(items, target_type, span)?;
+        for item in items {
+            let (ast::InitializerItem::Positional(element)
+            | ast::InitializerItem::Field { value: element, .. }
+            | ast::InitializerItem::Index { value: element, .. }) = item;
+            self.transfer_owner_value(element)?;
+        }
+        Ok(value)
+    }
+
+    fn emit_typed_initializer_elements(
         &mut self,
         items: &[ast::InitializerItem],
         target_type: &ast::Type,

@@ -412,6 +412,43 @@ fn place_from_expr(expr: &ast::Expression) -> Option<Place> {
 /// Moved-ness lattice per live variable: tracks status, move site and reason.
 type State = FxHashMap<String, VarState>;
 
+/// The states that leave an enclosing loop through `break`, and that return
+/// to its head through `continue`. `depth` is the scope depth outside the
+/// loop body, so an exit runs the defers of the deeper scopes.
+#[derive(Default)]
+struct LoopFrame {
+    depth: usize,
+    breaks: Option<State>,
+    continues: Option<State>,
+}
+
+/// Joins `other` into `into`: a variable moved on either path is moved.
+fn join_state(into: &mut Option<State>, other: &State) {
+    match into {
+        None => *into = Some(other.clone()),
+        Some(into) => {
+            join_changed(into, other);
+        }
+    }
+}
+
+/// Joins `other` into `into`'s variables; returns whether any of them changed.
+fn join_changed(into: &mut State, other: &State) -> bool {
+    let mut changed = false;
+    for (name, var) in into.iter_mut() {
+        if let Some(theirs) = other.get(name) {
+            let before = (var.level, var.place_spans.len(), var.moved_fields.len());
+            var.merge_with(theirs);
+            changed |= before != (var.level, var.place_spans.len(), var.moved_fields.len());
+        }
+    }
+    changed
+}
+
+/// Upper bound on loop passes; the moved-ness lattice is short, so a loop's
+/// head state stops changing well before this.
+const MAX_LOOP_PASSES: usize = 8;
+
 /// Scope entry: (name, previous state, previous type, previous owner,
 /// previous locked type) so shadowing restores.
 type ScopeEntry = (
@@ -845,6 +882,8 @@ pub fn analyze_program_with_imports(
         current_plan: super::init_plan::FunctionInitPlan::default(),
         owner_bindings: FxHashMap::default(),
         locked_bindings: FxHashMap::default(),
+        loops: Vec::new(),
+        defers: Vec::new(),
     };
     for item in &program.items {
         match &item.kind {
@@ -894,6 +933,10 @@ struct MoveChecker {
     /// Owning payload bindings of a match on a lock block's value, with their
     /// types: the Mutex still owns what they name.
     locked_bindings: FxHashMap<String, ast::Type>,
+    /// Enclosing loops of the statement being checked, innermost last.
+    loops: Vec<LoopFrame>,
+    /// Registered `defer` statements with the scope depth that owns them.
+    defers: Vec<(usize, ast::Statement)>,
 }
 
 /// Layout completion belongs to the semantic ownership boundary. All required
@@ -925,6 +968,8 @@ impl OwnerLayouts {
             current_plan: Default::default(),
             owner_bindings: FxHashMap::default(),
             locked_bindings: FxHashMap::default(),
+            loops: Vec::new(),
+            defers: Vec::new(),
         };
         checker.check_function(parameters, return_type, body);
         if let Some(error) = checker.errors.first() {
@@ -1164,6 +1209,95 @@ impl MoveChecker {
                 let (root, path) = expr_root_and_path(receiver)?;
                 self.get_field_type(&root, &path, var_types)
             })
+    }
+
+    /// Checks a value stored into a new place (`T u = t`, `u = t`, a struct
+    /// literal field). A tracked source place is moved, and the transfer is
+    /// recorded so codegen clears the source's drop state.
+    fn transfer_value(
+        &mut self,
+        value: &ast::Expression,
+        state: &mut State,
+        scopes: &mut Vec<Vec<ScopeEntry>>,
+        var_types: &mut FxHashMap<String, ast::Type>,
+    ) {
+        self.reject_locked_move(value, var_types);
+        if self.reject_container_element_move(value, var_types) {
+            self.check_expr(value, state, scopes, var_types);
+            return;
+        }
+        let Some((root, path)) = expr_root_and_path(value).filter(|(root, path)| {
+            state.contains_key(root) && self.is_path_tracked(root, path, var_types)
+        }) else {
+            self.check_expr(value, state, scopes, var_types);
+            return;
+        };
+        // The ordinary read check runs first so an earlier move is reported.
+        self.check_expr(value, state, scopes, var_types);
+        if !path.is_empty()
+            && self.reject_partial_move_from_drop_ancestor(&root, &path, value.span, var_types)
+        {
+            return;
+        }
+        self.record_transfer(value);
+        if let Some(var) = state.get_mut(&root) {
+            if path.is_empty() {
+                var.mark_moved(value.span, msg::note_value_moved_here());
+            } else {
+                var.mark_place_moved(
+                    &place_from_root_and_path(&root, &path),
+                    value.span,
+                    msg::note_value_moved_here(),
+                );
+            }
+        }
+    }
+
+    /// Rejects taking an owned element out of `container[i]` when the
+    /// container is a heap collection: it still owns and later drops that
+    /// element. Arrays, slices and tuples are places the checker tracks.
+    fn reject_container_element_move(
+        &mut self,
+        value: &ast::Expression,
+        var_types: &FxHashMap<String, ast::Type>,
+    ) -> bool {
+        let ast::ExpressionKind::Index { object, index } = value.kind.as_ref() else {
+            return false;
+        };
+        let Some(container) = self.receiver_type(object, var_types) else {
+            return false;
+        };
+        if !matches!(container.kind.as_ref(), ast::TypeKind::Named(_)) {
+            return false;
+        }
+        if !index_element_type(&container, index)
+            .is_some_and(|element| self.facts.is_tracked(&element))
+        {
+            return false;
+        }
+        let name = crate::types::Type::from_ast(&container).to_string();
+        self.error(msg::cannot_move_out_of_indexed_element(&name), value.span);
+        true
+    }
+
+    /// A borrow passed to a call lives until the call returns, so it must
+    /// still be valid after every argument has been evaluated:
+    /// `f(&t, move t)` is rejected.
+    fn recheck_borrowed_arguments(
+        &mut self,
+        arguments: &[ast::Expression],
+        state: &mut State,
+        scopes: &mut Vec<Vec<ScopeEntry>>,
+        var_types: &mut FxHashMap<String, ast::Type>,
+    ) {
+        for argument in arguments {
+            if matches!(
+                argument.kind.as_ref(),
+                ast::ExpressionKind::Reference { .. }
+            ) {
+                self.check_expr(argument, state, scopes, var_types);
+            }
+        }
     }
 
     fn move_value_argument(
@@ -1738,12 +1872,24 @@ impl MoveChecker {
     }
 
     fn error(&mut self, message: impl Into<String>, span: Span) {
-        self.errors.push(MoveError {
+        self.push_error(MoveError {
             message: message.into(),
             span,
             note_span: None,
             note_message: None,
         });
+    }
+
+    /// Records `error` once: loop passes and defers walked at several exits
+    /// revisit the same code.
+    fn push_error(&mut self, error: MoveError) {
+        if !self
+            .errors
+            .iter()
+            .any(|seen| seen.span == error.span && seen.message == error.message)
+        {
+            self.errors.push(error);
+        }
     }
 
     fn error_with_note(
@@ -1753,7 +1899,7 @@ impl MoveChecker {
         note_span: Option<Span>,
         note_message: impl Into<String>,
     ) {
-        self.errors.push(MoveError {
+        self.push_error(MoveError {
             message: message.into(),
             span,
             note_span,
@@ -1773,10 +1919,44 @@ impl MoveChecker {
         var_types: &mut FxHashMap<String, ast::Type>,
     ) {
         scopes.push(Vec::new());
+        let depth = scopes.len();
         for stmt in &block.statements {
             self.check_statement(stmt, state, scopes, var_types);
         }
+        let first = self
+            .defers
+            .iter()
+            .position(|(owner, _)| *owner >= depth)
+            .unwrap_or(self.defers.len());
+        let pending = self.defers.split_off(first);
+        // A terminating block already ran its defers at the exit.
+        if !block_terminates(block) {
+            for (_, deferred) in pending.iter().rev() {
+                self.check_statement(deferred, state, scopes, var_types);
+            }
+        }
         self.pop_scope(state, scopes, var_types);
+    }
+
+    /// Checks the defers that an exit to scope depth `depth` runs, innermost
+    /// first, against the exiting path's state.
+    fn check_exit_defers(
+        &mut self,
+        depth: usize,
+        state: &mut State,
+        scopes: &mut Vec<Vec<ScopeEntry>>,
+        var_types: &mut FxHashMap<String, ast::Type>,
+    ) {
+        let pending: Vec<ast::Statement> = self
+            .defers
+            .iter()
+            .rev()
+            .filter(|(owner, _)| *owner > depth)
+            .map(|(_, deferred)| deferred.clone())
+            .collect();
+        for deferred in &pending {
+            self.check_statement(deferred, state, scopes, var_types);
+        }
     }
 
     fn check_statement(
@@ -1797,29 +1977,7 @@ impl MoveChecker {
                     self.record_owner(name, ty, let_stmt.initializer.is_some());
                 }
                 if let Some(init) = &let_stmt.initializer {
-                    self.reject_locked_move(init, var_types);
-                    if let Some((root_name, path)) = expr_root_and_path(init)
-                        && !path.is_empty()
-                        && state.contains_key(&root_name)
-                        && self.is_path_tracked(&root_name, &path, var_types)
-                    {
-                        // Preserve the ordinary read check before recording the
-                        // implicit transfer. This catches a field moved earlier.
-                        self.check_expr(init, state, scopes, var_types);
-                        if !self.reject_partial_move_from_drop_ancestor(
-                            &root_name, &path, init.span, var_types,
-                        ) && let Some(var) = state.get_mut(&root_name)
-                        {
-                            self.record_transfer(init);
-                            var.mark_place_moved(
-                                &place_from_root_and_path(&root_name, &path),
-                                init.span,
-                                msg::note_value_moved_here(),
-                            );
-                        }
-                    } else {
-                        self.check_expr(init, state, scopes, var_types);
-                    }
+                    self.transfer_value(init, state, scopes, var_types);
                 }
                 self.declare_pattern(
                     &let_stmt.pattern,
@@ -1832,53 +1990,162 @@ impl MoveChecker {
             ast::StatementKind::Expression(expr) => {
                 self.check_expr(expr, state, scopes, var_types);
             }
-            ast::StatementKind::Return(Some(expr)) => {
-                // Bare identifier returns are implicit moves (the drop flag is
-                // cleared on the return path); the variable is dead afterwards.
-                // Field returns (`return x.field;`) are views and do not move.
-                self.reject_locked_move(expr, var_types);
-                match expr.kind.as_ref() {
-                    ast::ExpressionKind::Identifier(ident) => {
-                        if let Some(var) = state.get_mut(&ident.name) {
-                            var.mark_moved(expr.span, msg::note_value_moved_by_return());
-                        }
-                    }
-                    _ => {
-                        if let Some((root_name, path)) = expr_root_and_path(expr)
-                            && !path.is_empty()
-                            && state.contains_key(&root_name)
-                            && self.is_path_tracked(&root_name, &path, var_types)
-                        {
-                            self.check_expr(expr, state, scopes, var_types);
-                            if self.reject_partial_move_from_drop_ancestor(
-                                &root_name, &path, expr.span, var_types,
-                            ) {
-                                return;
-                            }
-                            if let Some(var) = state.get_mut(&root_name) {
-                                self.record_transfer(expr);
-                                var.mark_place_moved(
-                                    &place_from_root_and_path(&root_name, &path),
-                                    expr.span,
-                                    msg::note_value_moved_by_return(),
-                                );
-                            }
-                        } else {
-                            self.check_expr(expr, state, scopes, var_types);
-                        }
-                    }
+            ast::StatementKind::Return(value) => {
+                if let Some(expr) = value {
+                    self.check_return_value(expr, state, scopes, var_types);
                 }
+                self.check_exit_defers(0, state, scopes, var_types);
             }
-            ast::StatementKind::Return(None)
-            | ast::StatementKind::Break(_)
-            | ast::StatementKind::Continue => {}
+            ast::StatementKind::Break(value) => {
+                if let Some(value) = value {
+                    self.check_expr(value, state, scopes, var_types);
+                }
+                self.leave_loop(true, state, scopes, var_types);
+            }
+            ast::StatementKind::Continue => {
+                self.leave_loop(false, state, scopes, var_types);
+            }
             ast::StatementKind::Defer(inner) => {
-                // Deferred bodies run at scope exit; walk them with the state
-                // at registration so a defer that uses a later-moved variable
-                // is caught conservatively.
-                self.check_statement(inner, state, scopes, var_types);
+                // A deferred statement runs at each exit of its scope and is
+                // checked there, against the state that exit carries.
+                self.defers.push((scopes.len(), (**inner).clone()));
             }
         }
+    }
+
+    /// Checks a returned value: returning a bare local or an owned field
+    /// moves it.
+    fn check_return_value(
+        &mut self,
+        expr: &ast::Expression,
+        state: &mut State,
+        scopes: &mut Vec<Vec<ScopeEntry>>,
+        var_types: &mut FxHashMap<String, ast::Type>,
+    ) {
+        // Bare identifier returns are implicit moves (the drop flag is
+        // cleared on the return path); the variable is dead afterwards.
+        // Field returns (`return x.field;`) are views and do not move.
+        self.reject_locked_move(expr, var_types);
+        match expr.kind.as_ref() {
+            ast::ExpressionKind::Identifier(ident) => {
+                self.check_expr(expr, state, scopes, var_types);
+                if let Some(var) = state.get_mut(&ident.name) {
+                    var.mark_moved(expr.span, msg::note_value_moved_by_return());
+                }
+            }
+            _ => {
+                if let Some((root_name, path)) = expr_root_and_path(expr)
+                    && !path.is_empty()
+                    && state.contains_key(&root_name)
+                    && self.is_path_tracked(&root_name, &path, var_types)
+                {
+                    self.check_expr(expr, state, scopes, var_types);
+                    if self.reject_partial_move_from_drop_ancestor(
+                        &root_name, &path, expr.span, var_types,
+                    ) {
+                        return;
+                    }
+                    if let Some(var) = state.get_mut(&root_name) {
+                        self.record_transfer(expr);
+                        var.mark_place_moved(
+                            &place_from_root_and_path(&root_name, &path),
+                            expr.span,
+                            msg::note_value_moved_by_return(),
+                        );
+                    }
+                } else {
+                    self.check_expr(expr, state, scopes, var_types);
+                }
+            }
+        }
+    }
+
+    /// Checks a loop until its head state stops changing, then leaves `state`
+    /// as the state after the loop. `condition` runs at the head of every
+    /// pass; `step` runs on the paths that reach the next pass: the end of
+    /// the body and each `continue`. The loop exits when the condition fails
+    /// (never for a literal `true`) and at each `break`.
+    fn check_loop(
+        &mut self,
+        condition: Option<&ast::Expression>,
+        body: &ast::Block,
+        step: Option<&ast::Expression>,
+        state: &mut State,
+        scopes: &mut Vec<Vec<ScopeEntry>>,
+        var_types: &mut FxHashMap<String, ast::Type>,
+    ) {
+        let endless = condition.is_some_and(|condition| {
+            matches!(
+                condition.kind.as_ref(),
+                ast::ExpressionKind::Literal(ast::Literal::Bool(true))
+            )
+        });
+        let mut head = state.clone();
+        let mut exit: Option<State> = None;
+        for _ in 0..MAX_LOOP_PASSES {
+            let mut pass = head.clone();
+            let mut pass_scopes = scopes.clone();
+            if let Some(condition) = condition {
+                self.check_expr(condition, &mut pass, &mut pass_scopes, var_types);
+            }
+            if !endless {
+                join_state(&mut exit, &pass);
+            }
+            self.loops.push(LoopFrame {
+                depth: pass_scopes.len(),
+                ..LoopFrame::default()
+            });
+            self.check_block(body, &mut pass, &mut pass_scopes, var_types);
+            let frame = self.loops.pop().expect("loop frame");
+            if let Some(breaks) = &frame.breaks {
+                join_state(&mut exit, breaks);
+            }
+            let mut next = frame.continues;
+            if !block_terminates(body) {
+                join_state(&mut next, &pass);
+            }
+            let Some(mut next) = next else {
+                break;
+            };
+            if let Some(step) = step {
+                self.check_expr(step, &mut next, &mut pass_scopes, var_types);
+            }
+            if !join_changed(&mut head, &next) {
+                break;
+            }
+        }
+        // With no exit path the code after the loop is unreachable; keep the
+        // head state for it.
+        let after = exit.unwrap_or(head);
+        for (name, var) in state.iter_mut() {
+            if let Some(exit_var) = after.get(name) {
+                *var = exit_var.clone();
+            }
+        }
+    }
+
+    /// Records a `break` (`is_break`) or `continue` path in the innermost
+    /// loop after running the defers of the scopes it leaves.
+    fn leave_loop(
+        &mut self,
+        is_break: bool,
+        state: &mut State,
+        scopes: &mut Vec<Vec<ScopeEntry>>,
+        var_types: &mut FxHashMap<String, ast::Type>,
+    ) {
+        let Some(depth) = self.loops.last().map(|frame| frame.depth) else {
+            return;
+        };
+        self.check_exit_defers(depth, state, scopes, var_types);
+        let frame = self.loops.last_mut().expect("loop frame");
+        join_state(
+            if is_break {
+                &mut frame.breaks
+            } else {
+                &mut frame.continues
+            },
+            state,
+        );
     }
 
     // ------------------------------------------------------------------
@@ -1922,6 +2189,10 @@ impl MoveChecker {
             }
             ast::ExpressionKind::Move(inner) => {
                 self.reject_locked_move(inner, var_types);
+                if self.reject_container_element_move(inner, var_types) {
+                    self.check_expr(inner, state, scopes, var_types);
+                    return;
+                }
                 self.check_place_operands(inner, state, scopes, var_types);
                 // Phase 11 — Index place: try structured Place first for v[i] / x.a[i] etc.
                 // Index projections are built via Place::new(local).index() /
@@ -2087,6 +2358,11 @@ impl MoveChecker {
                         self.check_expr(arg, state, scopes, var_types);
                     }
                 }
+                // A borrowed receiver place must outlive the arguments too.
+                if !is_consuming && place_from_expr(receiver).is_some() {
+                    self.check_expr(receiver, state, scopes, var_types);
+                }
+                self.recheck_borrowed_arguments(arguments, state, scopes, var_types);
             }
             ast::ExpressionKind::Call {
                 function,
@@ -2109,6 +2385,7 @@ impl MoveChecker {
                         self.check_expr(arg, state, scopes, var_types);
                     }
                 }
+                self.recheck_borrowed_arguments(arguments, state, scopes, var_types);
                 self.check_expr(function, state, scopes, var_types);
             }
             ast::ExpressionKind::Launch(inner) => {
@@ -2320,27 +2597,7 @@ impl MoveChecker {
             } => {
                 if *operator == ast::BinaryOperator::Assign {
                     // Evaluate RHS first (in case it uses or moves resources).
-                    self.reject_locked_move(right, var_types);
-                    if let Some((root_name, path)) = expr_root_and_path(right)
-                        && !path.is_empty()
-                        && state.contains_key(&root_name)
-                        && self.is_path_tracked(&root_name, &path, var_types)
-                    {
-                        self.check_expr(right, state, scopes, var_types);
-                        if !self.reject_partial_move_from_drop_ancestor(
-                            &root_name, &path, right.span, var_types,
-                        ) && let Some(var) = state.get_mut(&root_name)
-                        {
-                            self.record_transfer(right);
-                            var.mark_place_moved(
-                                &place_from_root_and_path(&root_name, &path),
-                                right.span,
-                                msg::note_value_moved_here(),
-                            );
-                        }
-                    } else {
-                        self.check_expr(right, state, scopes, var_types);
-                    }
+                    self.transfer_value(right, state, scopes, var_types);
                     self.check_place_operands(left, state, scopes, var_types);
 
                     // Re-initialization handling — now via `MovePathTree` + `Place::is_prefix_of`
@@ -2473,58 +2730,13 @@ impl MoveChecker {
                 }
             }
             ast::ExpressionKind::While { condition, body } => {
-                self.check_expr(condition, state, scopes, var_types);
-                // The body may run zero or more times; merge its effect into
-                // the pre-loop state to a fixpoint (moves only accumulate).
-                // A body that never falls through (always returns/breaks)
-                // cannot move anything onto the loop-exit path.
-                let body_terminates = block_terminates(body);
-                for _ in 0..8 {
-                    let mut body_state = state.clone();
-                    let mut body_scopes = scopes.clone();
-                    self.check_block(body, &mut body_state, &mut body_scopes, var_types);
-                    let mut changed = false;
-                    for (name, var) in state.iter_mut() {
-                        let body_var = if body_terminates {
-                            VarState::default()
-                        } else {
-                            body_state.get(name).cloned().unwrap_or_default()
-                        };
-                        if body_var.level > var.level {
-                            var.merge_with(&body_var);
-                            changed = true;
-                        }
-                    }
-                    if !changed {
-                        break;
-                    }
-                }
+                self.check_loop(Some(condition), body, None, state, scopes, var_types);
             }
             ast::ExpressionKind::ForIn { iterable, body, .. } => {
                 self.check_expr(iterable, state, scopes, var_types);
                 // The loop binding is a fresh per-iteration variable; the
                 // original iterable is only borrowed (a copy feeds iteration).
-                let body_terminates = block_terminates(body);
-                for _ in 0..8 {
-                    let mut body_state = state.clone();
-                    let mut body_scopes = scopes.clone();
-                    self.check_block(body, &mut body_state, &mut body_scopes, var_types);
-                    let mut changed = false;
-                    for (name, var) in state.iter_mut() {
-                        let body_var = if body_terminates {
-                            VarState::default()
-                        } else {
-                            body_state.get(name).cloned().unwrap_or_default()
-                        };
-                        if body_var.level > var.level {
-                            var.merge_with(&body_var);
-                            changed = true;
-                        }
-                    }
-                    if !changed {
-                        break;
-                    }
-                }
+                self.check_loop(None, body, None, state, scopes, var_types);
             }
             ast::ExpressionKind::For {
                 init,
@@ -2546,29 +2758,14 @@ impl MoveChecker {
                     scopes,
                     var_types,
                 );
-                self.check_expr(condition, state, scopes, var_types);
-                let body_terminates = block_terminates(body);
-                for _ in 0..8 {
-                    let mut body_state = state.clone();
-                    let mut body_scopes = scopes.clone();
-                    self.check_block(body, &mut body_state, &mut body_scopes, var_types);
-                    self.check_expr(increment, &mut body_state, &mut body_scopes, var_types);
-                    let mut changed = false;
-                    for (name, var) in state.iter_mut() {
-                        let body_var = if body_terminates {
-                            VarState::default()
-                        } else {
-                            body_state.get(name).cloned().unwrap_or_default()
-                        };
-                        if body_var.level > var.level {
-                            var.merge_with(&body_var);
-                            changed = true;
-                        }
-                    }
-                    if !changed {
-                        break;
-                    }
-                }
+                self.check_loop(
+                    Some(condition),
+                    body,
+                    Some(increment),
+                    state,
+                    scopes,
+                    var_types,
+                );
                 self.pop_scope(state, scopes, var_types);
             }
             ast::ExpressionKind::Match { expression, arms } => {
@@ -2607,33 +2804,42 @@ impl MoveChecker {
                 }
                 *state = merged;
             }
-            ast::ExpressionKind::Block(block) | ast::ExpressionKind::Lambda { body: block, .. } => {
+            ast::ExpressionKind::Block(block) => {
                 self.check_block(block, state, scopes, var_types);
+            }
+            ast::ExpressionKind::Lambda { body, .. } => {
+                // A lambda body has its own exits: its `return` does not run
+                // the enclosing defers, and it cannot leave enclosing loops.
+                let defers = std::mem::take(&mut self.defers);
+                let loops = std::mem::take(&mut self.loops);
+                self.check_block(body, state, scopes, var_types);
+                self.defers = defers;
+                self.loops = loops;
             }
             ast::ExpressionKind::Initializer { items } => {
                 for item in items {
                     match item {
                         ast::InitializerItem::Positional(expr) => {
-                            self.check_expr(expr, state, scopes, var_types);
+                            self.transfer_value(expr, state, scopes, var_types);
                         }
                         ast::InitializerItem::Field { value, .. } => {
-                            self.check_expr(value, state, scopes, var_types);
+                            self.transfer_value(value, state, scopes, var_types);
                         }
                         ast::InitializerItem::Index { index, value } => {
                             self.check_expr(index, state, scopes, var_types);
-                            self.check_expr(value, state, scopes, var_types);
+                            self.transfer_value(value, state, scopes, var_types);
                         }
                     }
                 }
             }
             ast::ExpressionKind::Array(items) | ast::ExpressionKind::Tuple(items) => {
                 for item in items {
-                    self.check_expr(item, state, scopes, var_types);
+                    self.transfer_value(item, state, scopes, var_types);
                 }
             }
             ast::ExpressionKind::StructLiteral { fields, .. } => {
                 for field in fields {
-                    self.check_expr(&field.value, state, scopes, var_types);
+                    self.transfer_value(&field.value, state, scopes, var_types);
                 }
             }
             ast::ExpressionKind::EnumVariant { fields, .. } => {
@@ -2781,6 +2987,7 @@ mod tests {
           void absorb(self, i64... rest) {}\n\
         }\n\
         void eat(Text text) {}\n\
+        void mixed(&Text seen, Text text) {}\n\
         Text fresh() { Text text; return text; }\n\
         struct Mutex<T> { T value; }\n\
         impl<T> Mutex<T> {\n\
@@ -2908,6 +3115,42 @@ mod tests {
             assert!(
                 errors.moves.iter().any(|message| message.contains("moved value 'text'")),
                 "{consumed}: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn moves_follow_transfers_and_every_loop_exit() {
+        for misuse in [
+            "Text t; Text u = t; i64 n = t.inspect();",
+            "Text t; Text u; u = t; i64 n = t.inspect();",
+            "Text t; Mutex<Text> m = { .value = t }; i64 n = t.inspect();",
+            "Text t; while (true) { eat(t); }",
+            "Text t; while (true) { eat(t); break; } i64 n = t.inspect();",
+            "Text t; i64 i = 0; while (i < 2) { i += 1; if (i == 1) { eat(t); continue; } } \
+             i64 n = t.inspect();",
+            "Text t; { defer eat(t); } i64 n = t.inspect();",
+            "Text t; defer t.inspect(); eat(t);",
+            "Text t; mixed(&t, move t);",
+        ] {
+            let errors = errors_in(misuse);
+            assert!(
+                errors.moves.iter().any(|message| message.contains("moved value 't'")),
+                "{misuse}: {errors:?}"
+            );
+        }
+        for control in [
+            "Text t; Text u = move t; t = fresh(); i64 n = t.inspect();",
+            "Text t; i64 i = 0; while (i < 2) { eat(t); t = fresh(); i += 1; } \
+             i64 n = t.inspect();",
+            "Text t; while (true) { eat(t); break; }",
+            "Text t; { defer t.inspect(); } eat(t);",
+            "Text t; Text u; mixed(&t, move u); eat(t);",
+        ] {
+            let errors = errors_in(control);
+            assert!(
+                errors.types.is_empty() && errors.moves.is_empty(),
+                "{control}: {errors:?}"
             );
         }
     }

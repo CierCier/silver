@@ -35,7 +35,7 @@ prove type checking, code generation, or runtime behavior. Stage0 lives under
 | Traits, operators, and casts | [operator traits](std/ops.ag), [stage1 lowering](libs/agc/src/frontend/lower_expr.ag) | [comparison](tests/compare_trait_test.ag), [sequences](tests/sequence_traits_test.ag) |
 | Control flow, matching, and defers | [stage1 statement codegen](libs/agc/src/backend/llvm/stmt.ag) | [iterators](tests/iterator_ergonomics_test.ag), [guards](tests/guard_test.ag) |
 | Macros, attributes, cfg, and static values | [stage1 cfg](libs/agc/src/frontend/cfg.ag), [stage0 parser](bootstrap/stage0/agc/src/parser/prt_parser.rs) | [JSON serialization](tests/json_test.ag), [formatting](tests/fmt_test.ag) |
-| Ownership and borrowing | [stage0 borrow checker](bootstrap/stage0/agc/src/semantic/borrow_check.rs), [stage1 move flow](libs/agc/src/frontend/move_flow.ag) | [container cleanup](tests/collection_drop_glue_test.ag), [Box](tests/box_test.ag) |
+| Ownership and borrowing | [stage0 borrow checker](bootstrap/stage0/agc/src/semantic/borrow_check.rs), [stage1 move flow](libs/agc/src/frontend/move_flow.ag) | [container cleanup](tests/collection_drop_glue_test.ag), [Box](tests/box_test.ag), [owner transfers](tests/memory_stress.ag) |
 | Threads and channels | [stage1 Send check](libs/agc/src/frontend/send.ag), [borrowed launch](libs/agc/src/frontend/scoped_launch.ag), [`shared` and `lock`](libs/agc/src/frontend/sync_sugar.ag), [channels](std/channel.ag), [Arc](std/mem/arc.ag) | [borrowed launch](tests/scoped_launch_test.ag), [`shared` and `lock`](tests/shared_lock_test.ag), [channels](tests/channel_test.ag), [bounded channels](tests/channel_bounded_test.ag), [Arc](tests/arc_test.ag) |
 | Result and optional values | [Optional](std/optional.ag), [Result](std/result.ag), [syscall errors](std/sys/result.ag) | [structured errors](tests/structured_error_test.ag), [Result cleanup](tests/unwrap_or_err_drop_test.ag) |
 | Allocation, formatting, FFI, and assembly | [allocator](std/mem/alloc.ag), [display](std/display.ag), [stage1 codegen](libs/agc/src/backend/llvm/generator.ag) | [allocation](tests/allocation_bounds_test.ag), [display](tests/display_test.ag), [Rust FFI](tests/rust_ffi_test.ag), [syscalls](tests/syscall_wrapper_test.ag) |
@@ -1042,8 +1042,8 @@ control cleanup of local owned values.
 
 `TypeProperties {is_copy, needs_drop}` is the single source of truth:
 
-- **Copy** (bitwise, `copy_from` — no invalidation): primitives (`bool`, `i8`/`i16`/`i32`/`i64`/`u8`…/`f32`/`f64`/`char`), raw pointers (`T*`), and structs/enums whose every field/variant payload is Copy. `T x = y` copies.
-- **Move** (destructive, `move_out` — invalidates source): `String`, `Vec<T>`, `HashMap<K,V>`, `HashSet<K>`, `Deque<T>`, `Box<T>`, `Rc<T>`, `File`, etc., and any struct containing them. `T x = y` moves; use `T x = move y` to be explicit. LSP shows implicit `move`/`copy` inlay hints before the source place.
+- **Copy** (bitwise, `copy_from` — no invalidation): primitives (`bool`, `i8`/`i16`/`i32`/`i64`/`u8`…/`f32`/`f64`/`char`), raw pointers (`T*`), and structs/enums without a `Drop` implementation whose every field/variant payload is Copy. `T x = y` copies.
+- **Move** (destructive, `move_out` — invalidates source): `String`, `Vec<T>`, `HashMap<K,V>`, `HashSet<K>`, `Deque<T>`, `Box<T>`, `Rc<T>`, `File`, etc., any type with its own `Drop` implementation (even when every field is Copy), and any struct containing them. `T x = y`, `x = y`, and an initializer field `{ .f = y }` move; use `T x = move y` to be explicit. LSP shows implicit `move`/`copy` inlay hints before the source place.
 
 ```silver
 String a = String.from_str("hello");

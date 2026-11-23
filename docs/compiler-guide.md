@@ -257,7 +257,8 @@ flowchart TD
 
 #### 7. Ownership (`place.rs` / `move_path.rs` / `init.rs` / `type_properties.rs` / `move_check.rs` / `borrow_check.rs` / `drop_elaborate.rs`)
 - `Place {local, projections}` with `is_prefix_of` / `overlaps` (Index `v[i]` vs `v[j]` conservative, `v` overlaps `v[i]`).
-- `TypeProperties {is_copy, needs_drop}`: primitives/ptr/all-Copy struct = Copy, `String`/`Vec`/`HashMap`/`HashSet`/`Deque` = Move.
+- `TypeProperties {is_copy, needs_drop}`: primitives/ptr/all-Copy struct = Copy, `String`/`Vec`/`HashMap`/`HashSet`/`Deque` = Move. A type with its own `Drop` impl is a drop owner, so it moves even when every field is Copy.
+- `move_check.rs` walks statements in order. Loops repeat until the state is stable (at most 8 passes) and join their `break` states into the exit and their `continue` states before the step. `return`, `break`, and `continue` check the defers of the scopes they leave. A `let`, an assignment, or an initializer element that reads a tracked place moves it and records an owner transfer; codegen clears the source's drop state only at recorded transfers. A borrowed call argument is checked again after the other arguments, so `f(&t, move t)` is rejected. Moving an owned element out of a heap container by index is rejected.
 - `MovePathTree` + `InitState` + `move_out`/`copy_from`/`initialize`/`read`; field-granular `x.a` vs `x.b`, reinit `x.a = make()`.
 - `Borrow {place, kind}` via `places_overlap`.
 - `init_plan.rs` carries typed owner layouts and resolved places from move
@@ -512,9 +513,11 @@ Section 8.2 of [SYNTAX.md](../SYNTAX.md) states the rules the pass enforces.
 `ownership.ag` now only builds owner initialization plans before expression
 checking.
 
-Stage1 is stricter than stage0 in two cases. It rejects a non-exhaustive `match`
+Stage1 is stricter than stage0 in three cases. It rejects a non-exhaustive `match`
 on an enum and an unknown field in a struct literal. Stage0 accepts both, and
-the generated code fails at run time.
+the generated code fails at run time. Stage1 also rejects a read of a local
+that only some paths initialized; stage0 accepts it and reads the zeroed
+storage, and the runtime init state still prevents a drop of that storage.
 
 A generic body is a template, so the checker does not judge a method call on
 a type-parameter receiver inside it. Each concrete call instead reports

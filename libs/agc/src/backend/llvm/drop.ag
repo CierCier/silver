@@ -1278,32 +1278,12 @@ void llvm_drop_active_unmoved_payloads(LlvmContext* ctx) {
     llvm_drop_active_unmoved_payloads_above(ctx, 0);
 }
 
-/// Direct Copy+Drop places can retain ownership in local bindings; aggregate
-/// construction still transfers their nested drop flags to the new value.
-void llvm_clear_copy_source(LlvmContext* ctx, u32 src_id,
-                            bool preserve_direct_copy_drop) {
+/// Moves drop ownership from place operand `src_id` to the value built from
+/// it: the source bits stay readable, but only the destination drops.
+void llvm_clear_copy_source(LlvmContext* ctx, u32 src_id) {
     if (src_id == 0) { return; }
     u32 src_ty = llvm_expr_type(ctx, src_id);
     if (!llvm_type_needs_tracking(ctx, src_ty)) { return; }
-    AstExpr* source = ctx.pool.get_expr(src_id);
-    bool source_is_place = source.kind == ExprKind.Var || source.kind == ExprKind.Field
-        || source.kind == ExprKind.Index;
-    bool source_is_match_binding = false;
-    if (source_is_place) {
-        u32 root_name = llvm_place_root_name(ctx, src_id);
-        i64 i = ctx.scrutinee_moves.len() - 1;
-        while (i >= 0) {
-            if (ctx.scrutinee_moves.get_ptr(i).binding_name == root_name) {
-                source_is_match_binding = true;
-                break;
-            }
-            i -= 1;
-        }
-    }
-    if (preserve_direct_copy_drop && source_is_place
-        && !source_is_match_binding
-        && ctx.types.is_copy(ctx.types.resolve_subst(src_ty))
-        && llvm_can_resolve_drop_fn(ctx, src_ty)) { return; }
     llvm_clear_place_drops(ctx, src_id);
 }
 
@@ -1313,7 +1293,7 @@ void llvm_clear_copy_source(LlvmContext* ctx, u32 src_id,
 void llvm_clear_aggregate_sources(LlvmContext* ctx, u32 args_start, u32 args_count) {
     i64 i = 0;
     while (i < (i64)args_count) {
-        llvm_clear_copy_source(ctx, ctx.pool.args.get((i64)args_start + i), false);
+        llvm_clear_copy_source(ctx, ctx.pool.args.get((i64)args_start + i));
         i += 1;
     }
 }
