@@ -2990,6 +2990,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         self.clear_yielded_value_flags(value)?;
                     }
                 }
+                // A yielded field or element leaves its owner before the
+                // block's cleanup runs, so the owner does not drop it.
+                ast::ExpressionKind::FieldAccess { .. } | ast::ExpressionKind::Index { .. } => {
+                    self.transition_owner_expr(expression, false)?;
+                    self.clear_drop_flag_of(expression)?;
+                }
                 _ => {}
             }
         }
