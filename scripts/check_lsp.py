@@ -870,6 +870,20 @@ class NativeLsp(unittest.TestCase):
                          [(3, "argument count mismatch: expected 1, found 0"),
                           (4, "type mismatch in argument 1: expected str, found bool")])
 
+    def test_an_unassigned_field_of_a_value_built_field_by_field_reads_as_zero(self):
+        text = ("trait Drop { void drop(*self); }\nstruct Text { i64 n; }\n"
+                "impl Text { i64 len(&self) { return self.n; } }\nimpl Drop for Text { void drop(*self) { } }\n"
+                "struct Opts { i64 n; Text items; }\n"
+                "i64 built() {\n Opts o;\n o.n = 1;\n return o.items.len();\n}\n"
+                "i64 empty() {\n Opts o;\n return o.items.len();\n}\n"
+                "i64 element() {\n Text a[2];\n a[0] = { .n = 1 };\n return a[1].len();\n}\n"
+                "i64 main() { return built() + empty() + element(); }\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
+                         [(12, "use of uninitialized value 'o'"),
+                          (17, "use of uninitialized value 'a[1]'")])
+
     def test_returned_pointee_places_and_unrelated_c_results_are_not_local_escapes(self):
         # A result of the parameter's pointee type (`i64*` from `i64**`) is a
         # loaded value; any other pointer result may view the argument.

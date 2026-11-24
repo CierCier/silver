@@ -545,12 +545,23 @@ impl MoveFlow {
         return self.summary(state, place) != FlowInit.Empty;
     }
 
+    /// Whether `place` or a struct value that contains it counts as assigned.
+    /// An unassigned field of a value built field by field keeps its zero value.
+    bool assigned_in_struct(MoveFlow* self, FlowState* state, i64 place) {
+        while (place >= 0) {
+            if (self.assigned(state, place)) { return true; }
+            place = self.places.get(place).parent;
+            if (place >= 0 && self.places.get(place).is_array) { return false; }
+        }
+        return false;
+    }
+
     /// Requires `place` to be usable: nothing in it may be moved out on any
     /// path, and it must have been assigned.
     void require(MoveFlow* self, FlowState* state, i64 place, Span span) {
         if (!state.reachable) { return; }
         i64 gap = self.first_gap(state, place, true);
-        if (gap < 0 && !self.assigned(state, place)) {
+        if (gap < 0 && !self.assigned_in_struct(state, place)) {
             gap = self.first_gap(state, place, false);
         }
         if (gap >= 0) { self.report_gap(state, place, gap, span); }
