@@ -759,7 +759,13 @@ impl MoveFlow {
                 return;
             }
             if (expr.kind == ExprKind.Field) {
-                self.walk_expr(state, expr.inner0, use == FlowUse.BorrowMut ? use : FlowUse.Read);
+                // Moving an owned field out of a container element moves out
+                // of that element, which the Index case below rejects.
+                ExprKind base = self.pool.get_expr(expr.inner0).kind;
+                bool owned_field = use == FlowUse.Consume && expr.inferred_type != TYPE_UNKNOWN
+                    && !self.is_copy(expr.inferred_type)
+                    && (base == ExprKind.Field || base == ExprKind.Index);
+                self.walk_expr(state, expr.inner0, owned_field || use == FlowUse.BorrowMut ? use : FlowUse.Read);
             } else if (expr.kind == ExprKind.Index) {
                 self.walk_expr(state, expr.inner0, FlowUse.Read);
                 self.walk_expr(state, expr.inner1, FlowUse.Read);
