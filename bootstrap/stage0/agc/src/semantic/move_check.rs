@@ -1286,15 +1286,22 @@ impl MoveChecker {
         }
     }
 
-    /// Rejects taking an owned element out of `container[i]` when the
-    /// container is a heap collection: it still owns and later drops that
-    /// element. Arrays, slices and tuples are places the checker tracks.
+    /// Rejects taking an owned element, or an owned field of one, out of
+    /// `container[i]` when the container is a heap collection: it still owns
+    /// and later drops that element. Arrays, slices and tuples are places the
+    /// checker tracks.
     fn reject_container_element_move(
         &mut self,
         value: &ast::Expression,
         var_types: &FxHashMap<String, ast::Type>,
     ) -> bool {
-        let ast::ExpressionKind::Index { object, index } = value.kind.as_ref() else {
+        let mut fields = Vec::new();
+        let mut element = value;
+        while let ast::ExpressionKind::FieldAccess { object, field } = element.kind.as_ref() {
+            fields.push(field.name.as_str());
+            element = object;
+        }
+        let ast::ExpressionKind::Index { object, index } = element.kind.as_ref() else {
             return false;
         };
         let Some(container) = self.receiver_type(object, var_types) else {
@@ -1303,8 +1310,10 @@ impl MoveChecker {
         if !matches!(container.kind.as_ref(), ast::TypeKind::Named(_)) {
             return false;
         }
+        fields.reverse();
         if !index_element_type(&container, index)
-            .is_some_and(|element| self.facts.is_tracked(&element))
+            .and_then(|element| self.field_type(element, &fields.join(".")))
+            .is_some_and(|moved| self.facts.is_tracked(&moved))
         {
             return false;
         }
@@ -3252,6 +3261,7 @@ mod tests {
         trait IndexedAccess { type Item; Item __index_get(*self, i64 index); \
           void __index_set(*self, i64 index, Item value); }\n\
         struct Bag<T> { T* data; }\n\
+        struct Card { Text text; i64 n; }\n\
         impl<T> IndexedAccess for Bag<T> {\n\
           type Item = T;\n\
           T __index_get(*self, i64 index) { return self.data[index]; }\n\
@@ -3299,16 +3309,23 @@ mod tests {
     /// elements leave by indexing.
     #[test]
     fn an_owned_element_cannot_leave_a_container_by_index() {
-        let rejected = super::msg::cannot_move_out_of_indexed_element("Bag<Text>");
-        for misuse in [
-            "Bag<Text> bag; Text t = move bag[0];",
-            "Bag<Text> bag; eat(bag[0]);",
-            "Bag<Text> bag; Text t = bag[pick()];",
+        for (container, misuse) in [
+            ("Bag<Text>", "Bag<Text> bag; Text t = move bag[0];"),
+            ("Bag<Text>", "Bag<Text> bag; eat(bag[0]);"),
+            ("Bag<Text>", "Bag<Text> bag; Text t = bag[pick()];"),
+            ("Bag<Card>", "Bag<Card> bag; Text t = move bag[0].text;"),
+            ("Bag<Card>", "Bag<Card> bag; eat(bag[0].text);"),
         ] {
+            let rejected = super::msg::cannot_move_out_of_indexed_element(container);
             let errors = errors_in(misuse);
             assert!(errors.moves.contains(&rejected), "{misuse}: {errors:?}");
         }
-        for control in ["Bag<i64> bag; i64 n = bag[0];", "Bag<Text> bag; i64 n = bag[0].inspect();"] {
+        for control in [
+            "Bag<i64> bag; i64 n = bag[0];",
+            "Bag<Text> bag; i64 n = bag[0].inspect();",
+            "Bag<Card> bag; i64 n = bag[0].n;",
+            "Bag<Card> bag; i64 n = bag[0].text.inspect();",
+        ] {
             let errors = errors_in(control);
             assert!(errors.types.is_empty() && errors.moves.is_empty(), "{control}: {errors:?}");
         }
