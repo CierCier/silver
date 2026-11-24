@@ -858,6 +858,46 @@ class NativeLsp(unittest.TestCase):
                          [(3, "type mismatch: expected str, found i32"),
                           (9, "type mismatch: expected str, found i32")])
 
+    def test_moves_and_initialization_are_checked_at_each_control_flow_boundary(self):
+        # Each function from `branch` to `bound` misuses one boundary; `controls`
+        # moves and reinitializes on every path and must stay accepted.
+        text = ("trait Drop { void drop(*self); }\n"
+                "struct Tok { i64 id; }\n"
+                "impl Drop for Tok { void drop(*self) { } }\n"
+                "struct Pair { Tok left; Tok right; }\n"
+                "enum Slot { Full(Tok), Empty }\n"
+                "void take(Tok t) { }\n"
+                "i64 peek(&Tok t) { return t.id; }\n"
+                "Tok mk(i64 id) { Tok t; t.id = id; return move t; }\n"
+                "i64 branch(bool f) { Tok t = mk(1); if (f) { take(t); } return peek(&t); }\n"
+                "i64 looped(i64 n) { Tok t = mk(1); while (n > 0) { take(t); n -= 1; } return 0; }\n"
+                "i64 broke() { Tok t = mk(1); while (true) { take(t); break; } return peek(&t); }\n"
+                "i64 deferred() { Tok t = mk(1); defer peek(&t); take(t); return 0; }\n"
+                "i64 maybe_init(bool f) { Tok t; if (f) { t = mk(1); } return peek(&t); }\n"
+                "i64 field(Pair p) { take(move p.left); return peek(&p.left); }\n"
+                "i64 selected(bool f) { Tok t = mk(1); Tok u = f ? t : mk(2); return peek(&t) + peek(&u); }\n"
+                "i64 bound(Slot s) { match s { Full(move x) : { take(x); return peek(&x); }, Empty : { return 0; } } }\n"
+                "i64 controls(bool f) {\n"
+                "    Tok t = mk(1);\n"
+                "    if (f) { take(t); t = mk(2); }\n"
+                "    Pair p; p.left = mk(3); p.right = mk(4);\n"
+                "    take(move p.left);\n"
+                "    p.left = mk(5);\n"
+                "    return peek(&t) + peek(&p.left);\n"
+                "}\n"
+                "i32 main() { return 0; }\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
+                         [(8, "use of possibly moved value 't'"),
+                          (9, "use of possibly moved value 't'"),
+                          (10, "use of moved value 't'"),
+                          (11, "use of moved value 't'"),
+                          (12, "use of possibly uninitialized value 't'"),
+                          (13, "use of moved value 'p.left'"),
+                          (14, "use of possibly moved value 't'"),
+                          (15, "use of moved value 'x'")])
+
     def test_a_local_callable_is_checked_against_its_own_signature(self):
         # The parameter `f` shadows the function `f`, so its signature rules.
         text = ("void f(i64 a, i64 b) { }\n"
