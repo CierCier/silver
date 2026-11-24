@@ -1136,7 +1136,9 @@ A loop is checked until its state stops changing, so a move late in the body
 reaches the next iteration's start, and a move in a `while` condition repeats
 on every test. A `defer` runs when its scope exits, on the fall-through path
 and on every `return`, `break`, or `continue` that leaves the scope, and is
-checked against the state at each exit. Code after a `return`, `break`,
+checked against the state at each exit. A block that yields a value, such as
+a `match` arm `{ ...; leaf; }`, hands `leaf` out before its defers run, so a
+defer in that block cannot consume it. Code after a `return`, `break`,
 `continue`, or a call that never returns is unreachable and is not checked.
 
 A conditional expression moves only the arm it takes: in
