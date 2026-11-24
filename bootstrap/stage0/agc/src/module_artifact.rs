@@ -1611,4 +1611,32 @@ mod reference_abi_tests {
         trailing.extend_from_slice(&[0; 4]);
         assert!(ModuleArtifact::from_bytes(&trailing).is_err());
     }
+
+    #[test]
+    fn method_signatures_keep_reference_mutability() {
+        let dir = std::env::temp_dir().join(format!("agc-mut-ref-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("counter.ag");
+        std::fs::write(
+            &path,
+            "struct Counter { i64 n; }\n\
+             impl Counter {\n\
+                 void bump(&mut self) { self.n = self.n + 1; }\n\
+                 i64 read(&self) { return self.n; }\n\
+             }\n",
+        )
+        .expect("write source");
+        let artifact = ModuleArtifact::from_source(&path).expect("build artifact");
+        std::fs::remove_dir_all(&dir).ok();
+        let signature = |name: &str| {
+            artifact
+                .exports
+                .iter()
+                .find(|export| export.name == name)
+                .map(|export| export.signature.clone())
+                .unwrap_or_else(|| panic!("missing export {name}"))
+        };
+        assert!(signature("Counter::bump").starts_with("fn(&mut Counter)"));
+        assert!(signature("Counter::read").starts_with("fn(&Counter)"));
+    }
 }

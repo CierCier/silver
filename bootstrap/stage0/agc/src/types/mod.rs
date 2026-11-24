@@ -581,7 +581,10 @@ impl Type {
                     format!("*{}", inner.canonical_key())
                 }
             }
-            Type::Reference { inner, .. } => format!("&{}", inner.canonical_key()),
+            Type::Reference { is_mutable, inner } => {
+                let mutability = if *is_mutable { "mut " } else { "" };
+                format!("&{mutability}{}", inner.canonical_key())
+            }
             Type::Unit => "unit".to_string(),
             Type::Never => "never".to_string(),
             Type::Primitive(p) => format!("{:?}", p).to_lowercase(),
