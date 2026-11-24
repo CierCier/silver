@@ -388,6 +388,81 @@ void stress_loop_churn() {
     assert_eq_i64(leaf_bytes_freed, 560, "loop pair leaf bytes accounted");
 }
 
+// ---------------- Conditional and borrowed transfers ----------------
+i32 deferred_leaf_id = 0;
+
+/// A defer names the `outer` leaf visible where it was written, even when
+/// the return runs it inside a scope with another leaf of that name.
+i32 defer_sees_outer_leaf() {
+    OwnedLeaf leaf = OwnedLeaf.new(21, 1);
+    defer deferred_leaf_id = leaf.id;
+    {
+        OwnedLeaf leaf = OwnedLeaf.new(22, 1);
+        return leaf.id;
+    }
+}
+
+i64 leaf_count(Slice<OwnedLeaf> leaves) {
+    return leaves.len();
+}
+
+void keep_leaf(OwnedLeaf leaf) {
+    assert_eq_i32(leaf.first(), 25, "match binding moved its payload out");
+}
+
+struct LeafSlot {
+    [OwnedLeaf, i64] pair;
+}
+
+void stress_conditional_and_borrowed_transfers() {
+    STDOUT.write_str("\n--- Conditional and borrowed transfers ---\n");
+    reset_owner_counters();
+    {
+        OwnedLeaf a = OwnedLeaf.new(20, 4);
+        bool pick = leaf_drop_count == 0;
+        OwnedLeaf b = pick ? a : OwnedLeaf.new(19, 2);
+        assert_eq_i32(b.first(), 20, "conditional took the leaf");
+    }
+    assert_eq_i32(leaf_drop_count, 1, "conditional transfer drops once");
+    assert_eq_i64(leaf_bytes_freed, 4, "conditional transfer frees once");
+
+    reset_owner_counters();
+    assert_eq_i32(defer_sees_outer_leaf(), 22, "inner leaf returned its id");
+    assert_eq_i32(deferred_leaf_id, 21, "defer read the leaf in its own scope");
+    assert_eq_i32(leaf_drop_count, 2, "both shadowing leaves dropped once");
+
+    reset_owner_counters();
+    {
+        Vec<OwnedLeaf> leaves = Vec<OwnedLeaf>.new();
+        leaves.push(OwnedLeaf.new(23, 2));
+        leaves.push(OwnedLeaf.new(24, 3));
+        assert_eq_i64(leaf_count(leaves), 2, "slice parameter viewed the vec");
+        assert_eq_i64(leaves.len(), 2, "vec still owns its leaves after the call");
+    }
+    assert_eq_i32(leaf_drop_count, 2, "vec viewed as a slice drops its leaves once");
+    assert_eq_i64(leaf_bytes_freed, 5, "vec viewed as a slice frees once");
+
+    reset_owner_counters();
+    {
+        Optional<OwnedLeaf> maybe = Optional<OwnedLeaf>.Some(OwnedLeaf.new(25, 6));
+        match maybe {
+            Some(move leaf): keep_leaf(move leaf),
+            None: {},
+        };
+    }
+    assert_eq_i32(leaf_drop_count, 1, "moved payload binding drops once");
+    assert_eq_i64(leaf_bytes_freed, 6, "moved payload binding frees once");
+
+    reset_owner_counters();
+    {
+        OwnedLeaf a = OwnedLeaf.new(26, 7);
+        LeafSlot slot = { .pair = [a, 1] };
+        assert_eq_i32(slot.pair[0].first(), 26, "tuple field took the leaf");
+    }
+    assert_eq_i32(leaf_drop_count, 1, "tuple element in an initializer drops once");
+    assert_eq_i64(leaf_bytes_freed, 7, "tuple element in an initializer frees once");
+}
+
 void stress_defer_and_break_continue() {
     STDOUT.write_str("\n--- Defer, break, continue with owned locals ---\n");
     reset_node_counters();
@@ -472,6 +547,7 @@ i32 main() {
     stress_cross_linked_nodes();
     stress_owner_moves_and_params();
     stress_loop_churn();
+    stress_conditional_and_borrowed_transfers();
     stress_defer_and_break_continue();
     stress_large_raw_memory();
 

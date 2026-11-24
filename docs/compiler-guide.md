@@ -258,7 +258,7 @@ flowchart TD
 #### 7. Ownership (`place.rs` / `move_path.rs` / `init.rs` / `type_properties.rs` / `move_check.rs` / `borrow_check.rs` / `drop_elaborate.rs`)
 - `Place {local, projections}` with `is_prefix_of` / `overlaps` (Index `v[i]` vs `v[j]` conservative, `v` overlaps `v[i]`).
 - `TypeProperties {is_copy, needs_drop}`: primitives/ptr/all-Copy struct = Copy, `String`/`Vec`/`HashMap`/`HashSet`/`Deque` = Move. A type with its own `Drop` impl is a drop owner, so it moves even when every field is Copy.
-- `move_check.rs` walks statements in order. Loops repeat until the state is stable (at most 8 passes) and join their `break` states into the exit and their `continue` states before the step. `return`, `break`, and `continue` check the defers of the scopes they leave. A `let`, an assignment, or an initializer element that reads a tracked place moves it and records an owner transfer; codegen clears the source's drop state only at recorded transfers. A borrowed call argument is checked again after the other arguments, so `f(&t, move t)` is rejected. Moving an owned element out of a heap container by index is rejected.
+- `move_check.rs` walks statements in order. Loops repeat until the state is stable (at most 8 passes) and join their `break` states into the exit and their `continue` states before the step. `return`, `break`, and `continue` check the defers of the scopes they leave. A `let`, an assignment, or an initializer element that reads a tracked place moves it and records an owner transfer; codegen clears the source's drop state only at recorded transfers. A borrowed call argument is checked again after the other arguments, so `f(&t, move t)` is rejected. Moving an owned element out of a heap container by index is rejected, also as a by-value argument or a returned value. A conditional transfers each arm on its own path and joins the results. Statements after a terminating statement are not checked. A `match` arm declares its `move` bindings in a scope of its own, and a guarded refutable arm joins the guard-miss state into the next arm.
 - `MovePathTree` + `InitState` + `move_out`/`copy_from`/`initialize`/`read`; field-granular `x.a` vs `x.b`, reinit `x.a = make()`.
 - `Borrow {place, kind}` via `places_overlap`.
 - `init_plan.rs` carries typed owner layouts and resolved places from move
@@ -506,8 +506,12 @@ joins mark disagreeing places `Maybe`. A loop repeats its condition and body,
 joining the `continue` states before the step, until the head state is stable.
 Its exit joins the false-condition state with the `break` states. `return`,
 `break`, and `continue` first walk the deferred statements of the scopes they
-leave; a block walks its own defers at its end. A `let` reuses its place on
-each loop pass, so the states converge.
+leave; a block walks its own defers at its end. While a defer is walked, the
+locals declared after its registration are hidden, so its names resolve as
+written; both backends hide the same locals when they emit it. A `let` reuses
+its place on each loop pass, so the states converge. A conditional expression
+consumes each arm on its own branch, and the backends clear the source of the
+arm that ran. A `move` binding in a `match` arm is an owned place for that arm.
 
 Section 8.2 of [SYNTAX.md](../SYNTAX.md) states the rules the pass enforces.
 `ownership.ag` now only builds owner initialization plans before expression

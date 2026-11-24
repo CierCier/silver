@@ -637,6 +637,10 @@ Defers fire in **LIFO** order, including before early returns.
 }
 ```
 
+A deferred statement names the bindings visible where it was written. An
+inner binding that shadows one of those names does not change what the defer
+reads, even when a `return` inside the inner scope runs it.
+
 ### Control Flow Statements
 
 ```silver
@@ -1131,7 +1135,19 @@ A loop is checked until its state stops changing, so a move late in the body
 reaches the next iteration's start, and a move in a `while` condition repeats
 on every test. A `defer` runs when its scope exits, on the fall-through path
 and on every `return`, `break`, or `continue` that leaves the scope, and is
-checked against the state at each exit.
+checked against the state at each exit. Code after a `return`, `break`,
+`continue`, or a call that never returns is unreachable and is not checked.
+
+A conditional expression moves only the arm it takes: in
+`Token t = ready ? a : make();`, `a` is moved when `ready` is true and still
+owned when it is false, so a later use of `a` is a use of a possibly moved
+value. `r ? fallback` consumes an owned `r`. In a `match`, a `move` binding
+owns its payload for the arm and can be moved on; the scrutinee no longer
+owns that payload. A guard that fails falls through to the next arm with
+the scrutinee intact.
+
+Passing a `Vec<T>` or an array to a `Slice<T>` parameter lends a view; the
+caller keeps the container and its elements.
 
 A local declared without a value starts as zeroed storage. It must be assigned
 on every path before it is read or moved, unless part of it is assigned: the
