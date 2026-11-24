@@ -3248,7 +3248,15 @@ mod tests {
         impl<T: Copy> Slot<T> { T get(&self) { return self.value; } }\n\
         struct Shelf { Text items[2]; }\n\
         i64 pick() { return 0; }\n\
-        void keep(&Text seen, Shelf shelf) {}\n";
+        void keep(&Text seen, Shelf shelf) {}\n\
+        trait IndexedAccess { type Item; Item __index_get(*self, i64 index); \
+          void __index_set(*self, i64 index, Item value); }\n\
+        struct Bag<T> { T* data; }\n\
+        impl<T> IndexedAccess for Bag<T> {\n\
+          type Item = T;\n\
+          T __index_get(*self, i64 index) { return self.data[index]; }\n\
+          void __index_set(*self, i64 index, T value) { self.data[index] = move value; }\n\
+        }\n";
 
     /// Messages from the type checker and from the move checker, kept apart
     /// because each reports some moves out of a lock.
@@ -3285,6 +3293,25 @@ mod tests {
              shared Bin state = move initial;\n\
              lock state as value {{ match value {{ {arms} }}; }}"
         ))
+    }
+
+    /// A heap container keeps owning an element read by index; only Copy
+    /// elements leave by indexing.
+    #[test]
+    fn an_owned_element_cannot_leave_a_container_by_index() {
+        let rejected = super::msg::cannot_move_out_of_indexed_element("Bag<Text>");
+        for misuse in [
+            "Bag<Text> bag; Text t = move bag[0];",
+            "Bag<Text> bag; eat(bag[0]);",
+            "Bag<Text> bag; Text t = bag[pick()];",
+        ] {
+            let errors = errors_in(misuse);
+            assert!(errors.moves.contains(&rejected), "{misuse}: {errors:?}");
+        }
+        for control in ["Bag<i64> bag; i64 n = bag[0];", "Bag<Text> bag; i64 n = bag[0].inspect();"] {
+            let errors = errors_in(control);
+            assert!(errors.types.is_empty() && errors.moves.is_empty(), "{control}: {errors:?}");
+        }
     }
 
     #[test]
