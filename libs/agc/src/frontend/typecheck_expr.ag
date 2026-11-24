@@ -1140,6 +1140,34 @@ SyntaxNode* typecheck_overload_by_symbol(TypeTable* types, Interner* names, Synt
 /// Resolves a free-function call to the overload whose parameters fit its
 /// arguments. Returns null when none fits or several do; sets `*overloaded`
 /// and `*ambiguous` for the caller to report.
+/// The declaration of the one imported Silver function `name` that takes
+/// `arity` arguments, or null. Its signature decides how each argument is
+/// passed, as for a local function.
+SyntaxNode* typecheck_imported_function(SymbolTable* symbols, str name, i64 arity) {
+    SyntaxNode* found = (SyntaxNode*)0;
+    i64 index = 0;
+    while (index < symbols.symbols.len()) {
+        Symbol* symbol = symbols.symbols.get_ptr(index);
+        index += 1;
+        if (symbol.kind != SymbolKind.Function
+            || strcmp(symbols.names.get(symbol.name_id), name) != 0) {
+            continue;
+        }
+        if (symbol.c_abi || symbol.declaration == (SyntaxNode*)0
+            || symbol.declaration.kind != NodeKind.Function) {
+            return (SyntaxNode*)0;
+        }
+        Vec<Binding> params = Vec<Binding>.new();
+        collect_parameter_bindings(binding_function_parameters(symbol.declaration), &params);
+        bool fits = binding_parameters_accept_arity(&params, arity);
+        params.drop();
+        if (!fits) { continue; }
+        if (found != (SyntaxNode*)0) { return (SyntaxNode*)0; }
+        found = symbol.declaration;
+    }
+    return found;
+}
+
 SyntaxNode* typecheck_resolve_free_function(AstPool* pool, TypeTable* types,
                                            SymbolTable* symbols, SyntaxNode* root,
                                            TypeEnv* env, str name, AstExpr* call,
@@ -1169,7 +1197,9 @@ SyntaxNode* typecheck_resolve_free_function(AstPool* pool, TypeTable* types,
         }
     }
     if (!typecheck_has_free_overloads(types, root, name)) {
-        return find_function_by_name_and_arity(root, name, (i64)call.aux);
+        SyntaxNode* local = find_function_by_name_and_arity(root, name, (i64)call.aux);
+        return local != (SyntaxNode*)0 ? local
+            : typecheck_imported_function(symbols, name, (i64)call.aux);
     }
     *overloaded = true;
 

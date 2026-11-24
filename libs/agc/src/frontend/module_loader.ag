@@ -1132,8 +1132,12 @@ void add_visible_source_item(ModuleLoader* loader, SyntaxNode* item) {
         || kind == SymbolKind.Trait || kind == SymbolKind.TypeAlias) {
         type_id = loader.symbols.types.get_named(name.text);
     }
+    // A retained function keeps its syntax, so a call's arguments are
+    // checked against the imported signature.
+    SyntaxNode* declaration = kind == SymbolKind.Function
+        && loader.declarations != (ImportedDeclarations*)0 ? item : (SyntaxNode*)0;
     u32 name_id = loader.symbols.names.intern(name.text);
-    loader.symbols.declare_typed(name_id, kind, name.span, (SyntaxNode*)0, type_id);
+    loader.symbols.declare_typed(name_id, kind, name.span, declaration, type_id);
 }
 
 /// Lexes and parses source module `path`, declares its cfg-active items, and
