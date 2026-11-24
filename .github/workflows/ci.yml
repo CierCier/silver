@@ -63,6 +63,10 @@ jobs:
       - name: Run stdlib suite with native stage1
         run: python3 tests/run_tests.py --compiler "$RUNNER_TEMP/agc-stage1" --no-tui --jobs 4
 
+      - name: Build language server with native stage1
+        run: |
+          "$RUNNER_TEMP/agc-stage1" build silver.toml --bin aglsp --no-cache -o "$RUNNER_TEMP/aglsp-stage1"
+
   aarch64:
     # Native arm64 runner: the stdlib suite on real hardware, with stage0
     # built and run on the same architecture. Stage1 emits x86_64 only, so
