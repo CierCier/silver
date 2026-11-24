@@ -121,15 +121,10 @@ bool type_is_numeric_or_char(u32 id) {
     return type_is_numeric(id) || id == TYPE_CHAR;
 }
 
-/// Parses a decimal literal index; returns -1 when malformed.
+/// Parses a literal index in any integer radix; returns -1 when malformed.
 i64 typecheck_literal_index(str text) {
     i64 value = 0;
-    i64 i = 0;
-    while (text[i] >= (u8)'0' && text[i] <= (u8)'9') {
-        value = value * 10 + ((i64)text[i] - 48);
-        i += 1;
-    }
-    return i > 0 && text[i] == 0 ? value : -1;
+    return items_parse_enum_tag(text, false, &value) ? value : -1;
 }
 
 /// True when `type_id` mentions an unknown type or a type parameter. The
@@ -1854,6 +1849,20 @@ u32 typecheck_arm_moved_binding(AstPool* pool, TypeTable* types, SyntaxNode* roo
     return arm.moves_payload ? pool.arm_bindings.get((i64)arm.bindings_start) : 0;
 }
 
+/// Whether an argument of `actual` type passed for a parameter of `expected`
+/// type is coerced to a view of it, which leaves the argument with its owner:
+/// a `Vec` or array passed as a `Slice`.
+bool typecheck_coerces_to_view(TypeTable* types, u32 expected, u32 actual) {
+    if (expected == TYPE_UNKNOWN || actual == TYPE_UNKNOWN) { return false; }
+    TypeEntry* view = types.get(types.resolve_subst(expected));
+    TypeEntry* source = types.get(types.resolve_subst(actual));
+    if (view.kind != TypeKind.Named || strcmp(types.names.get(view.name_id), "Slice") != 0) {
+        return false;
+    }
+    return source.kind == TypeKind.Array
+        || (source.kind == TypeKind.Named && strcmp(types.names.get(source.name_id), "Slice") != 0);
+}
+
 /// Records that `place_id` is passed by value, for the move-flow pass, and
 /// reports moving a field out of a value whose type implements Drop, or a
 /// value out of a lock block. Returns true when it reported.
@@ -2854,9 +2863,15 @@ ParameterMode typecheck_selected_parameter_mode(AstPool* pool, SyntaxNode* root,
             &ret_start, &name);
     }
     if (params_node == (SyntaxNode*)0) {
-        return typecheck_method_parameter_is_value(root, types, receiver_type, method_name,
-                                                   param_count, parameter_index, arg_type)
-            ? ParameterMode.Value : ParameterMode.Shared;
+        if (typecheck_method_parameter_is_value(root, types, receiver_type, method_name,
+                                                param_count, parameter_index, arg_type)) {
+            return ParameterMode.Value;
+        }
+        // A method known only from an imported artifact keeps its recorded mode.
+        return receiver.kind == TypeKind.Named
+            && types.method_param_is_mutable(types.names.get(receiver.name_id), method_name,
+                                             param_count, parameter_index, arg_type)
+            ? ParameterMode.Mutable : ParameterMode.Shared;
     }
     Vec<Binding> params = Vec<Binding>.new();
     collect_parameter_bindings(params_node, &params);
@@ -3681,6 +3696,11 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                             }
                             payload_text.drop();
                             arm_env.insert(binding_name, payload_type);
+                            i64 slot = (i64)arm.bindings_start + binding_index;
+                            while (pool.arm_binding_types.len() <= slot) {
+                                pool.arm_binding_types.push(TYPE_UNKNOWN);
+                            }
+                            pool.arm_binding_types.set(slot, payload_type);
                             binding_index += 1;
                         }
                         bool seen_tag = false;
@@ -3920,7 +3940,8 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                         }
                         if (expected_entry.kind != TypeKind.Pointer
                             && expected_entry.kind != TypeKind.Reference
-                            && pool.get_expr(arg_expr_id).kind != ExprKind.Move) {
+                            && pool.get_expr(arg_expr_id).kind != ExprKind.Move
+                            && !typecheck_coerces_to_view(types, expected_arg_type, actual_arg_type)) {
                             typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
                                                                arg_expr_id, diagnostics, ok);
                         }
@@ -4225,7 +4246,8 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                         payload_must_be_moved(types.type_name(payload_type)));
                     *ok = false;
                 }
-                if (arg_mode == ParameterMode.Value && pool.get_expr(arg_id).kind != ExprKind.Move) {
+                if (arg_mode == ParameterMode.Value && pool.get_expr(arg_id).kind != ExprKind.Move
+                    && !typecheck_coerces_to_view(types, expected_arg_type, arg_type)) {
                     typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
                                                        arg_id, diagnostics, ok);
                 } else if (arg_mode == ParameterMode.Mutable) {

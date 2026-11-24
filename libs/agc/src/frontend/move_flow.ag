@@ -110,6 +110,20 @@ struct FlowLoop {
     FlowState continues;
 }
 
+/// A registered `defer` and the number of locals visible where it was
+/// written. Locals declared after it cannot be the names it refers to.
+struct FlowDefer {
+    u32 stmt_id;
+    i64 locals_len;
+}
+
+/// Locals hidden from name lookup while a defer runs: those declared after
+/// the defer was registered.
+struct FlowRange {
+    i64 start;
+    i64 end;
+}
+
 /// The root place a `let` statement declared, reused when a loop pass walks
 /// the statement again so loop states can converge.
 struct FlowDeclaration {
@@ -127,9 +141,13 @@ struct MoveFlow {
     DiagnosticBag* diagnostics;
     Vec<FlowPlace> places;
     Vec<FlowDeclaration> declarations;
+    /// Places of owned match bindings, keyed by `arm_bindings` slot in
+    /// `stmt_id`, so each loop pass reuses them.
+    Vec<FlowDeclaration> binding_places;
     Vec<FlowLocal> locals;
     Vec<FlowScope> scopes;
-    Vec<u32> defers;
+    Vec<FlowDefer> defers;
+    Vec<FlowRange> hidden;
     Vec<FlowLoop> loops;
     Vec<Span> reported;
     bool failed;
@@ -146,9 +164,11 @@ impl MoveFlow {
         flow.diagnostics = diagnostics;
         flow.places = Vec<FlowPlace>.new();
         flow.declarations = Vec<FlowDeclaration>.new();
+        flow.binding_places = Vec<FlowDeclaration>.new();
         flow.locals = Vec<FlowLocal>.new();
         flow.scopes = Vec<FlowScope>.new();
-        flow.defers = Vec<u32>.new();
+        flow.defers = Vec<FlowDefer>.new();
+        flow.hidden = Vec<FlowRange>.new();
         flow.loops = Vec<FlowLoop>.new();
         flow.reported = Vec<Span>.new();
         flow.failed = false;
@@ -411,6 +431,13 @@ impl MoveFlow {
                 }
                 into.init.set(i, FlowInit.Maybe);
             }
+            // A move on either path outranks a place merely left unset.
+            if (mine != FlowInit.Init && theirs != FlowInit.Init
+                && into.cause.get(i) == FlowCause.Declared
+                && self.cause_at(other, i) == FlowCause.Moved) {
+                into.cause.set(i, FlowCause.Moved);
+                into.origin.set(i, self.origin_at(other, i));
+            }
             i += 1;
         }
     }
@@ -535,10 +562,30 @@ impl MoveFlow {
         i64 i = self.locals.len() - 1;
         while (i >= 0) {
             FlowLocal local = self.locals.get(i);
-            if (local.name_id == name_id) { return local.place; }
+            if (local.name_id == name_id && !self.is_hidden(i)) { return local.place; }
             i -= 1;
         }
         return -1;
+    }
+
+    bool is_hidden(MoveFlow* self, i64 local) {
+        i64 i = 0;
+        while (i < self.hidden.len()) {
+            FlowRange range = self.hidden.get(i);
+            if (local >= range.start && local < range.end) { return true; }
+            i += 1;
+        }
+        return false;
+    }
+
+    /// Walks `deferred` with the names it saw where it was written.
+    void walk_defer(MoveFlow* self, FlowState* state, FlowDefer deferred) {
+        FlowRange range;
+        range.start = deferred.locals_len;
+        range.end = self.locals.len();
+        self.hidden.push(range);
+        self.walk_stmt(state, deferred.stmt_id);
+        self.hidden.len = self.hidden.len() - 1;
     }
 
     /// Declares `name_id` of `type_id`, shadowing any outer local. Returns its
@@ -669,6 +716,15 @@ impl MoveFlow {
         return self.pool.mutable_borrows.test((i64)id) ? FlowUse.BorrowMut : FlowUse.Read;
     }
 
+    /// Walks the subscripts of the field and index chain `id`, innermost
+    /// first, when `id` itself resolved to a place.
+    void walk_subscripts(MoveFlow* self, FlowState* state, u32 id) {
+        AstExpr expr = *self.pool.get_expr(id);
+        if (expr.kind != ExprKind.Field && expr.kind != ExprKind.Index) { return; }
+        self.walk_subscripts(state, expr.inner0);
+        if (expr.kind == ExprKind.Index) { self.walk_expr(state, expr.inner1, FlowUse.Read); }
+    }
+
     /// Walks `id` on a branch of `state` and joins the result back.
     void walk_branch(MoveFlow* self, FlowState* state, u32 id, FlowUse use) {
         FlowState branch = state.clone();
@@ -681,11 +737,11 @@ impl MoveFlow {
         AstExpr expr = *self.pool.get_expr(id);
         if (expr.kind == ExprKind.Var || expr.kind == ExprKind.Field || expr.kind == ExprKind.Index) {
             bool unknown_element = false;
-            i64 place = self.resolve(id, use == FlowUse.Consume, &unknown_element);
-            if (expr.kind == ExprKind.Index) {
-                self.walk_expr(state, expr.inner1, FlowUse.Read);
-            }
+            // A mutable borrow may initialize only the place it names.
+            i64 place = self.resolve(id, use == FlowUse.Consume || use == FlowUse.BorrowMut,
+                                     &unknown_element);
             if (place >= 0) {
+                self.walk_subscripts(state, id);
                 bool copy = expr.inferred_type != TYPE_UNKNOWN && self.is_copy(expr.inferred_type);
                 self.use_place(state, place, copy && use == FlowUse.Consume ? FlowUse.Read : use,
                                unknown_element, expr.span);
@@ -695,6 +751,7 @@ impl MoveFlow {
                 self.walk_expr(state, expr.inner0, use == FlowUse.BorrowMut ? use : FlowUse.Read);
             } else if (expr.kind == ExprKind.Index) {
                 self.walk_expr(state, expr.inner0, FlowUse.Read);
+                self.walk_expr(state, expr.inner1, FlowUse.Read);
                 if (use == FlowUse.Consume) { self.check_element_move(expr); }
             }
             return;
@@ -749,7 +806,12 @@ impl MoveFlow {
             self.walk_expr(state, expr.aux, use);
             self.pop_scope(state);
         } else if (expr.kind == ExprKind.UnwrapOr) {
-            self.walk_expr(state, expr.inner0, use);
+            // `value ? fallback` consumes an owned value whatever its result
+            // is used for; a pointer or reference is only read.
+            TypeKind source = self.types.get(self.types.resolve_subst(
+                self.pool.get_expr(expr.inner0).inferred_type)).kind;
+            bool borrowed = source == TypeKind.Pointer || source == TypeKind.Reference;
+            self.walk_expr(state, expr.inner0, borrowed ? FlowUse.Read : FlowUse.Consume);
             self.walk_branch(state, expr.inner1, use);
         } else if (expr.kind == ExprKind.Match) {
             self.walk_match(state, expr, use);
@@ -780,8 +842,14 @@ impl MoveFlow {
                 self.walk_expr(state, self.pool.args.get((i64)item.args_start + i), FlowUse.Read);
                 i += 1;
             }
-        } else if (expr.kind == ExprKind.Fprint || expr.kind == ExprKind.DropInPlace
-                   || expr.kind == ExprKind.Assert) {
+        } else if (expr.kind == ExprKind.Assert) {
+            // A disabled assertion (`aux` 0) runs nothing. An enabled one runs
+            // its message only when it fails, which aborts.
+            if (expr.aux == 0) { return; }
+            self.walk_expr(state, expr.inner0, FlowUse.Read);
+            FlowState failure = state.clone();
+            self.walk_expr(&failure, expr.inner1, FlowUse.Read);
+        } else if (expr.kind == ExprKind.Fprint || expr.kind == ExprKind.DropInPlace) {
             self.walk_expr(state, expr.inner0, FlowUse.Read);
             self.walk_expr(state, expr.inner1, FlowUse.Read);
         } else if (expr.kind == ExprKind.MemoryBuiltin) {
@@ -808,9 +876,31 @@ impl MoveFlow {
         self.report(expr.span, cannot_move_out_of_indexed_element(self.types.type_name(target_type)));
     }
 
-    /// Arms start from the state after the guards before them: a guard that
-    /// fails falls through to the next arm. A `move` payload binding consumes
-    /// the scrutinee on its arm.
+    /// The place of owned match binding `slot`, or -1 when its type is not
+    /// tracked.
+    i64 binding_place(MoveFlow* self, u32 slot, u32 name_id) {
+        i64 i = 0;
+        while (i < self.binding_places.len()) {
+            if (self.binding_places.get(i).stmt_id == slot) { return self.binding_places.get(i).place; }
+            i += 1;
+        }
+        u32 type_id = (i64)slot < self.pool.arm_binding_types.len()
+            ? self.pool.arm_binding_types.get((i64)slot) : TYPE_UNKNOWN;
+        i64 place = -1;
+        if (type_id != TYPE_UNKNOWN && self.tracks(type_id)) {
+            place = self.add_place(name_id, -1, 0, type_id);
+        }
+        FlowDeclaration declaration;
+        declaration.stmt_id = slot;
+        declaration.place = place;
+        self.binding_places.push(declaration);
+        return place;
+    }
+
+    /// Each arm starts from the state in which the arms before it missed. A
+    /// guard runs only after its pattern matched, so a refutable arm misses
+    /// with the state before or after its guard. A `move` payload binding
+    /// consumes the scrutinee on its arm and owns the payload there.
     void walk_match(MoveFlow* self, FlowState* state, AstExpr expr, FlowUse use) {
         self.walk_expr(state, expr.inner0, FlowUse.Read);
         bool unknown_element = false;
@@ -823,16 +913,26 @@ impl MoveFlow {
                 self.report(arm.span, String.from_str(move_in_guarded_match_arm()));
             }
             self.push_scope();
+            bool refutable = arm.pattern == MatchPatternKind.Variant
+                || arm.pattern == MatchPatternKind.Literal;
+            FlowState missed = FlowState.new();
+            if (refutable && arm.guard_id != 0) { missed = state.clone(); }
             i64 binding = 0;
             while (binding < (i64)arm.bindings_count) {
+                u32 slot = arm.bindings_start + (u32)binding;
                 FlowLocal local;
-                local.name_id = self.pool.arm_bindings.get((i64)arm.bindings_start + binding);
+                local.name_id = self.pool.arm_bindings.get((i64)slot);
                 local.place = -1;
+                if (arm.moves_payload) { local.place = self.binding_place(slot, local.name_id); }
+                if (local.place >= 0) {
+                    self.set_tree(state, local.place, FlowInit.Init, FlowCause.Declared, arm.span);
+                }
                 self.locals.push(local);
                 binding += 1;
             }
             self.walk_expr(state, arm.guard_id, FlowUse.Read);
             FlowState branch = state.clone();
+            self.join(state, &missed);
             if (arm.moves_payload && scrutinee >= 0) {
                 self.use_place(&branch, scrutinee, FlowUse.Consume, unknown_element,
                                self.pool.get_expr(expr.inner0).span);
@@ -867,7 +967,7 @@ impl MoveFlow {
                 ? self.scopes.get(scope_index + 1).defers_start : self.defers.len();
             i64 i = end - 1;
             while (i >= scope.defers_start) {
-                self.walk_stmt(state, self.defers.get(i));
+                self.walk_defer(state, self.defers.get(i));
                 i -= 1;
             }
             scope_index -= 1;
@@ -881,9 +981,9 @@ impl MoveFlow {
             i64 i = self.defers.len() - 1;
             while (i >= scope.defers_start) {
                 // A defer's own defers belong to the deferred statement.
-                u32 deferred = self.defers.get(i);
+                FlowDefer deferred = self.defers.get(i);
                 self.defers.len = i;
-                self.walk_stmt(state, deferred);
+                self.walk_defer(state, deferred);
                 i -= 1;
             }
         }
@@ -905,8 +1005,12 @@ impl MoveFlow {
 
     void walk_loop(MoveFlow* self, FlowState* state, AstStmt stmt) {
         AstExpr condition = *self.pool.get_expr(stmt.inner0);
-        bool endless = condition.kind == ExprKind.Literal && condition.aux == TYPE_BOOL
-            && strcmp(self.symbols.names.get(condition.inner0), "true") == 0;
+        bool literal = condition.kind == ExprKind.Literal && condition.aux == TYPE_BOOL;
+        bool endless = literal && strcmp(self.symbols.names.get(condition.inner0), "true") == 0;
+        if (literal && !endless) {
+            self.walk_expr(state, stmt.inner0, FlowUse.Read);
+            return;
+        }
         FlowState head = state.clone();
         FlowState exit = FlowState.new();
         u32 pass = 0;
@@ -938,7 +1042,12 @@ impl MoveFlow {
         if (stmt_id == 0) { return; }
         AstStmt stmt = *self.pool.get_stmt(stmt_id);
         if (stmt.kind == StmtKind.Defer) {
-            if (state.reachable) { self.defers.push(stmt.inner0); }
+            if (state.reachable) {
+                FlowDefer deferred;
+                deferred.stmt_id = stmt.inner0;
+                deferred.locals_len = self.locals.len();
+                self.defers.push(deferred);
+            }
             return;
         }
         if (!state.reachable) {

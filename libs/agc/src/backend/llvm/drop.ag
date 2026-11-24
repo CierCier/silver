@@ -1284,7 +1284,32 @@ void llvm_clear_copy_source(LlvmContext* ctx, u32 src_id) {
     if (src_id == 0) { return; }
     u32 src_ty = llvm_expr_type(ctx, src_id);
     if (!llvm_type_needs_tracking(ctx, src_ty)) { return; }
+    AstExpr* source = ctx.pool.get_expr(src_id);
+    if (source.kind == ExprKind.Ternary) {
+        llvm_clear_ternary_sources(ctx, src_id, source.inner1, source.aux);
+        return;
+    }
     llvm_clear_place_drops(ctx, src_id);
+}
+
+/// Releases the source of whichever arm of ternary `ternary_id` produced
+/// the value, branching on the condition that ternary already computed.
+void llvm_clear_ternary_sources(LlvmContext* ctx, u32 ternary_id, u32 then_id, u32 else_id) {
+    i64 i = ctx.ternary_conditions.len() - 1;
+    while (i >= 0 && ctx.ternary_conditions.get(i).expr_id != ternary_id) { i -= 1; }
+    if (i < 0 || ctx.is_terminated()) { return; }
+    LLVMOpaqueValue* condition = ctx.ternary_conditions.get(i).value;
+    LLVMOpaqueBasicBlock* then_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "tern_release_then");
+    LLVMOpaqueBasicBlock* else_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "tern_release_else");
+    LLVMOpaqueBasicBlock* done_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "tern_release_done");
+    LLVMBuildCondBr(ctx.builder, condition, then_bb, else_bb);
+    LLVMPositionBuilderAtEnd(ctx.builder, then_bb);
+    llvm_clear_copy_source(ctx, then_id);
+    LLVMBuildBr(ctx.builder, done_bb);
+    LLVMPositionBuilderAtEnd(ctx.builder, else_bb);
+    llvm_clear_copy_source(ctx, else_id);
+    LLVMBuildBr(ctx.builder, done_bb);
+    LLVMPositionBuilderAtEnd(ctx.builder, done_bb);
 }
 
 /// After building an aggregate value, release any droppable place operand

@@ -539,6 +539,7 @@ void module_register_artifact_method_params(TypeTable* types, ArtifactExport* ex
     }
 
     Vec<bool> is_vals = Vec<bool>.new();
+    Vec<bool> is_muts = Vec<bool>.new();
     Vec<u32> param_types = Vec<u32>.new();
     i64 param_start = 3;
     i64 angle_depth = 0;
@@ -575,6 +576,9 @@ void module_register_artifact_method_params(TypeTable* types, ArtifactExport* ex
                 u32 param_type = types.parse_type_name(p_text.to_str());
                 p_text.drop();
                 is_vals.push(!is_view);
+                is_muts.push(sig[ps] == (u8)'*'
+                    || (sig[ps] == (u8)'&' && ps + 4 <= pe && sig[ps + 1] == (u8)'m'
+                        && sig[ps + 2] == (u8)'u' && sig[ps + 3] == (u8)'t'));
                 param_types.push(param_type);
             }
             param_start = i + 1;
@@ -586,10 +590,11 @@ void module_register_artifact_method_params(TypeTable* types, ArtifactExport* ex
     while (idx < param_count) {
         types.register_method_param(owner.to_str(), method.to_str(),
                                     param_count, idx, param_types.get(idx),
-                                    is_vals.get(idx));
+                                    is_vals.get(idx), is_muts.get(idx));
         idx += 1;
     }
     is_vals.drop();
+    is_muts.drop();
     param_types.drop();
 
     owner.drop();
@@ -1109,7 +1114,11 @@ void module_register_source_impl(TypeTable* types, SyntaxNode* item) {
                     }
                 }
                 dtext.drop();
-                types.register_method_param(owner_name, name.text, param_count, pi, param_type, is_val);
+                bool is_mut = p.declared_type.kind == ProjectionTypeKind.Pointer
+                    || (p.declared_type.kind == ProjectionTypeKind.Reference
+                        && p.declared_type.is_mutable);
+                types.register_method_param(owner_name, name.text, param_count, pi, param_type,
+                                            is_val, is_mut);
                 pi += 1;
             }
             params.drop();

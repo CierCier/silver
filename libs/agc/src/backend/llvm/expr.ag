@@ -4806,6 +4806,10 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         LLVMOpaqueBasicBlock* then_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "tern_then");
         LLVMOpaqueBasicBlock* else_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "tern_else");
         LLVMOpaqueBasicBlock* merge_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "tern_merge");
+        LlvmTernaryCondition branched;
+        branched.expr_id = expr_id;
+        branched.value = cond_val;
+        ctx.ternary_conditions.push(branched);
         LLVMBuildCondBr(ctx.builder, cond_val, then_bb, else_bb);
         LLVMPositionBuilderAtEnd(ctx.builder, then_bb);
         LLVMOpaqueValue* then_val = llvm_emit_expr(ctx, expr.inner1);

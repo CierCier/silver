@@ -191,6 +191,9 @@ struct AstPool {
     Vec<u32> block_stmts;
     Vec<MatchArm> arms;
     Vec<u32> arm_bindings;
+    /// The type checker's type for each `arm_bindings` slot it has typed;
+    /// a slot past the end is unknown.
+    Vec<u32> arm_binding_types;
     Vec<AstAsm> asms;
     /// Names in scope in the match arms being checked on a lock block's
     /// value: their payload bindings, which the Mutex still owns, then any
@@ -224,6 +227,7 @@ impl AstPool {
         pool.block_stmts = Vec<u32>.new();
         pool.arms = Vec<MatchArm>.new();
         pool.arm_bindings = Vec<u32>.new();
+        pool.arm_binding_types = Vec<u32>.new();
         pool.locked_bindings = Vec<LockedName>.new();
         pool.asms = Vec<AstAsm>.new();
         pool.consumed = BitSet.new();

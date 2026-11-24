@@ -32,6 +32,27 @@ struct LlvmLocal {
     Vec<Projection> init_projections;
 }
 
+/// A registered `defer` and the number of locals visible where it was
+/// written. Its names never refer to a local declared after it.
+struct LlvmDefer {
+    u32 stmt_id;
+    i64 locals_len;
+}
+
+/// The condition a ternary expression branched on, so a consumer of its
+/// result can release the source of the arm that ran.
+struct LlvmTernaryCondition {
+    u32 expr_id;
+    LLVMOpaqueValue* value;
+}
+
+/// Locals that name lookup skips while a defer is emitted: those declared
+/// after the defer was registered.
+struct LlvmLocalRange {
+    i64 start;
+    i64 end;
+}
+
 /// A drop flag for one field path of a local (by projection range).
 struct LlvmFieldFlag {
     u32 projections_start;
@@ -139,7 +160,9 @@ struct LlvmContext {
     Vec<LlvmLocal> locals;
     Vec<LlvmStructDef> struct_defs;
     Vec<i64> scope_markers;
-    Vec<u32> deferred_statements;
+    Vec<LlvmDefer> deferred_statements;
+    Vec<LlvmLocalRange> hidden_locals;
+    Vec<LlvmTernaryCondition> ternary_conditions;
     Vec<i64> defer_scope_markers;
     Vec<LLVMOpaqueBasicBlock*> loop_breaks;
     Vec<LLVMOpaqueBasicBlock*> loop_continues;
@@ -184,7 +207,9 @@ impl LlvmContext {
         c.locals = Vec<LlvmLocal>.new();
         c.struct_defs = Vec<LlvmStructDef>.new();
         c.scope_markers = Vec<i64>.new();
-        c.deferred_statements = Vec<u32>.new();
+        c.deferred_statements = Vec<LlvmDefer>.new();
+        c.hidden_locals = Vec<LlvmLocalRange>.new();
+        c.ternary_conditions = Vec<LlvmTernaryCondition>.new();
         c.defer_scope_markers = Vec<i64>.new();
         c.loop_breaks = Vec<LLVMOpaqueBasicBlock*>.new();
         c.loop_continues = Vec<LLVMOpaqueBasicBlock*>.new();
@@ -439,12 +464,22 @@ impl LlvmContext {
         i64 i = self.locals.len() - 1;
         while (i >= 0) {
             LlvmLocal* cur = self.locals.get_ptr(i);
-            if (cur.name_id == name_id) {
+            if (cur.name_id == name_id && !self.local_is_hidden(i)) {
                 return cur;
             }
             i -= 1;
         }
         return (LlvmLocal*)0;
+    }
+
+    bool local_is_hidden(LlvmContext* self, i64 index) {
+        i64 i = 0;
+        while (i < self.hidden_locals.len()) {
+            LlvmLocalRange range = self.hidden_locals.get(i);
+            if (index >= range.start && index < range.end) { return true; }
+            i += 1;
+        }
+        return false;
     }
 
     /// Adds a local to the current scope.
