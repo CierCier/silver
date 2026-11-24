@@ -901,9 +901,10 @@ class NativeLsp(unittest.TestCase):
     def test_a_local_callable_is_checked_against_its_own_signature(self):
         # The parameter `f` shadows the function `f`, so its signature rules.
         text = ("void f(i64 a, i64 b) { }\n"
-                "i64 run(void(str) f) {\n f(\"ok\");\n f();\n f(true);\n return 0;\n}\n"
-                "void print_it(str s) { }\n"
-                "i64 main() { return run(print_it); }\n")
+                "i64 run(void(str) f, i64([i64, i64]) g) {\n f(\"ok\");\n f();\n f(true);\n"
+                " return g([1, 2]);\n}\n"
+                "void print_it(str s) { }\ni64 add([i64, i64] p) { return p[0] + p[1]; }\n"
+                "i64 main() { return run(print_it, add); }\n")
         uri = self.open(text)
         diagnostics = self.session.published(uri, 1)["diagnostics"]
         self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],

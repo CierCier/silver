@@ -3869,6 +3869,7 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 if (!direct_c_call
                     && !typecheck_call_argument_matches(types, parameter_type, actual_type, literal)
                     && !typecheck_implicit_borrow(types, parameter_type, actual_type, literal)
+                    && !typecheck_tuple_literal_fits(pool, root, types, parameter_type, arg_id)
                     && !typecheck_implicit_cast(root, types, actual_type, parameter_type)) {
                     diagnostics.error(pool.get_expr(arg_id).span,
                         argument_type_mismatch(i + 1, types.type_name(parameter_type),
