@@ -437,6 +437,22 @@ void stress_conditional_and_borrowed_transfers() {
     assert_eq_i64(leaf_bytes_freed, 6, "both leaves free once when the other arm runs");
 
     reset_owner_counters();
+    {
+        OwnedLeaf a = OwnedLeaf.new(25, 4);
+        keep_leaf(leaf_drop_count == 0 ? a : OwnedLeaf.new(25, 2));
+    }
+    assert_eq_i32(leaf_drop_count, 1, "a conditional argument moves its leaf into the callee");
+    assert_eq_i64(leaf_bytes_freed, 4, "a conditional argument frees its leaf once");
+
+    reset_owner_counters();
+    {
+        OwnedLeaf a = OwnedLeaf.new(25, 4);
+        keep_leaf(leaf_drop_count != 0 ? a : OwnedLeaf.new(25, 2));
+    }
+    assert_eq_i32(leaf_drop_count, 2, "the unused leaf drops at scope exit");
+    assert_eq_i64(leaf_bytes_freed, 6, "both conditional-argument leaves free once");
+
+    reset_owner_counters();
     assert_eq_i32(defer_sees_outer_leaf(), 22, "inner leaf returned its id");
     assert_eq_i32(deferred_leaf_id, 21, "defer read the leaf in its own scope");
     assert_eq_i32(leaf_drop_count, 2, "both shadowing leaves dropped once");

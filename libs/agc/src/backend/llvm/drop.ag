@@ -1054,9 +1054,7 @@ void llvm_clear_transferred_arg(LlvmContext* ctx, LLVMOpaqueType* fn_type,
     LLVMOpaqueType* param_ty = param_tys.get(param_index);
     param_tys.drop();
     if (LLVMGetTypeKind(param_ty) == (u32)12 || param_ty == llvm_reference_type(ctx.ctx)) { return; }
-    u32 arg_ty = llvm_expr_type(ctx, arg_expr_id);
-    if (!llvm_type_needs_tracking(ctx, arg_ty)) { return; }
-    llvm_clear_place_drops(ctx, arg_expr_id);
+    llvm_clear_copy_source(ctx, arg_expr_id);
 }
 
 /// Root Var name of a place expression, following field/index chains and
