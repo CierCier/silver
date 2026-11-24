@@ -398,7 +398,11 @@ impl TypeChecker {
             });
         }
         table.record_program_symbols(program, CompilerPhase::TypeCheck);
-        for trait_error in validate_traits_with_imports(program, &self.imported_traits) {
+        for trait_error in validate_traits_with_imports(
+            program,
+            &self.imported_traits,
+            &self.imported_modules,
+        ) {
             self.errors.push(TypeError {
                 message: trait_error.message,
                 span: trait_error.span,

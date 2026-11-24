@@ -97,6 +97,7 @@ impl TypeChecker {
     /// and no owned field or payload. This is the built-in `Copy` bound.
     pub(super) fn type_is_copy(&self, ty: &Type) -> bool {
         let mut context = TypePropertiesContext::new();
+        context.insert_module_exports(&self.imported_modules);
         context
             .drop_bases
             .extend(self.drop_owner_bases.iter().cloned());

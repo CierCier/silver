@@ -242,7 +242,11 @@ impl TraitRegistry {
         (registry, errors)
     }
 
-    pub fn validate_impls(&self, program: &ast::Program) -> Vec<TraitError> {
+    pub fn validate_impls(
+        &self,
+        program: &ast::Program,
+        imported_modules: &[crate::module_artifact::ModuleArtifact],
+    ) -> Vec<TraitError> {
         let mut errors = Vec::new();
         let mut copy_context: Option<TypePropertiesContext> = None;
         let mut impl_keys = HashMap::default();
@@ -353,7 +357,7 @@ impl TraitRegistry {
                     }
                     let trait_name = trait_name_from_ref(&bound.trait_ref);
                     if trait_name == BUILTIN_COPY && bound.trait_ref.generics.is_none() {
-                        let context = copy_context.get_or_insert_with(|| copy_rules(program));
+                        let context = copy_context.get_or_insert_with(|| copy_rules(program, imported_modules));
                         if !is_copy_with(&arg_type.to_ast(), context) {
                             errors.push(TraitError {
                                 message: crate::diagnostics::messages::bound_requires_copy(
@@ -610,10 +614,15 @@ fn trait_name_from_ref(trait_ref: &ast::TraitRef) -> String {
 /// declaration; it is decided from the type's ownership.
 pub const BUILTIN_COPY: &str = "Copy";
 
-/// The implicit-copy rule over `program`: its `Drop` impls own resources, and
-/// its structs and enums are Copy only when every field or payload is.
-fn copy_rules(program: &ast::Program) -> TypePropertiesContext {
+/// The implicit-copy rule over `program` and the precompiled modules it
+/// imports: `Drop` impls own resources, and structs and enums are Copy only
+/// when every field or payload is.
+fn copy_rules(
+    program: &ast::Program,
+    imported_modules: &[crate::module_artifact::ModuleArtifact],
+) -> TypePropertiesContext {
     let mut context = TypePropertiesContext::new();
+    context.insert_module_exports(imported_modules);
     let parameters = |generics: &Option<ast::Generics>| -> Vec<String> {
         generics
             .iter()
@@ -1005,7 +1014,7 @@ fn trait_path_key(path: &[ast::Identifier]) -> String {
 
 pub fn validate_traits(program: &ast::Program) -> Vec<TraitError> {
     let (registry, mut errors) = TraitRegistry::collect(program);
-    errors.extend(registry.validate_impls(program));
+    errors.extend(registry.validate_impls(program, &[]));
     sort_trait_errors(&mut errors);
     errors
 }
@@ -1013,10 +1022,11 @@ pub fn validate_traits(program: &ast::Program) -> Vec<TraitError> {
 pub fn validate_traits_with_imports(
     program: &ast::Program,
     imported_traits: &HashSet<String>,
+    imported_modules: &[crate::module_artifact::ModuleArtifact],
 ) -> Vec<TraitError> {
     let (mut registry, mut errors) = TraitRegistry::collect(program);
     registry.trait_names.extend(imported_traits.iter().cloned());
-    errors.extend(registry.validate_impls(program));
+    errors.extend(registry.validate_impls(program, imported_modules));
     sort_trait_errors(&mut errors);
     errors
 }
@@ -1065,5 +1075,38 @@ mod tests {
         }
         let errors = trait_errors(&format!("{prelude}impl Needs<Plain> for Sink {{ }}\n"));
         assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    /// A precompiled module's owning type fails the bound too, and a slice of
+    /// it is a view that passes.
+    #[test]
+    fn a_copy_bound_sees_owners_from_precompiled_modules() {
+        let dir = std::env::temp_dir().join(format!("agc-copy-import-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("text.ag");
+        std::fs::write(
+            &path,
+            "trait Drop { void drop(*self); }\n\
+             struct Text { u8* bytes; }\n\
+             impl Drop for Text { void drop(*self) {} }\n",
+        )
+        .expect("write module");
+        let module = crate::module_artifact::ModuleArtifact::from_source(&path).expect("module");
+        std::fs::remove_dir_all(&dir).ok();
+        let check = |target: &str| {
+            let source = format!(
+                "trait Needs<T: Copy> {{ }}\nstruct Sink {{ i64 n; }}\nimpl Needs<{target}> for Sink {{ }}\n"
+            );
+            let tokens = lexer::lex(&source).expect("probe should lex");
+            let (program, errors) = Parser::new(tokens).parse_program();
+            assert!(errors.is_empty(), "probe should parse: {errors:?}");
+            super::validate_traits_with_imports(&program, &Default::default(), &[module.clone()])
+                .into_iter()
+                .map(|error| error.message)
+                .collect::<Vec<_>>()
+        };
+        let rejected = crate::diagnostics::messages::bound_requires_copy(&"Text");
+        assert!(check("Text").contains(&rejected), "{:?}", check("Text"));
+        assert!(check("Slice<Text>").is_empty(), "{:?}", check("Slice<Text>"));
     }
 }
