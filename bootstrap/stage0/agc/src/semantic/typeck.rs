@@ -4022,6 +4022,7 @@ impl TypeChecker {
         };
 
         let mut matches: Vec<(usize, Type, HashMap<String, Type>, FunctionSig)> = Vec::new();
+        let mut unmet_bounds = None;
 
         for candidate_id in &candidate_ids {
             let Some(candidate) = self.function_symbols.get(candidate_id).cloned() else {
@@ -4222,7 +4223,8 @@ impl TypeChecker {
             }
 
             if ok {
-                if !self.bounds_satisfied(&candidate.bounds, &mapping, span) {
+                if !self.bounds_hold_quietly(&candidate.bounds, &mapping, span) {
+                    unmet_bounds.get_or_insert_with(|| (candidate.bounds.clone(), mapping.clone()));
                     continue;
                 }
                 let return_type = self.substitute_type(&candidate.return_type, &mapping);
@@ -4230,6 +4232,12 @@ impl TypeChecker {
             }
         }
 
+        if matches.is_empty()
+            && let Some((bounds, mapping)) = unmet_bounds
+        {
+            self.bounds_satisfied(&bounds, &mapping, span);
+            return (Type::Unknown, arg_types);
+        }
         if matches.is_empty() {
             let arg_desc: String = if arg_types.len() == 1 {
                 format!("{}", arg_types[0])
@@ -4417,6 +4425,7 @@ impl TypeChecker {
         let candidate_ids = self.methods.get(&key).cloned()?;
 
         let mut matches: Vec<(usize, Type, HashMap<String, Type>, MethodSig)> = Vec::new();
+        let mut unmet_bounds = None;
         let owner_ty = Self::method_owner_type(receiver_ty);
 
         for candidate_id in candidate_ids {
@@ -4782,8 +4791,8 @@ impl TypeChecker {
             }
 
             if ok {
-                let sat = self.bounds_satisfied(&candidate.bounds, &mapping, span);
-                if !sat {
+                if !self.bounds_hold_quietly(&candidate.bounds, &mapping, span) {
+                    unmet_bounds.get_or_insert_with(|| (candidate.bounds.clone(), mapping.clone()));
                     continue;
                 }
                 let return_type = self.substitute_type(&candidate.return_type, &mapping);
@@ -4792,6 +4801,9 @@ impl TypeChecker {
         }
 
         if matches.is_empty() {
+            if let Some((bounds, mapping)) = unmet_bounds {
+                self.bounds_satisfied(&bounds, &mapping, span);
+            }
             return None;
         }
 
@@ -5318,6 +5330,20 @@ impl TypeChecker {
             }
         }
         bounds
+    }
+
+    /// Whether `bounds` hold, reporting nothing. An overload whose bounds
+    /// fail is skipped; its failure is reported only when no overload fits.
+    fn bounds_hold_quietly(
+        &mut self,
+        bounds: &[TypeBoundPredicate],
+        mapping: &HashMap<String, Type>,
+        span: Span,
+    ) -> bool {
+        let reported = self.errors.len();
+        let holds = self.bounds_satisfied(bounds, mapping, span);
+        self.errors.truncate(reported);
+        holds
     }
 
     fn bounds_satisfied(
@@ -9240,5 +9266,58 @@ fn populate_expression_for_in_types(
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TypeChecker;
+    use crate::{lexer, parser::Parser, symbol_table::CompilerSymbolTable};
+
+    /// `Tok` has a destructor, so it is not Copy. Stage0 converts between
+    /// `bool` and `i64` arguments, so `read` and `pick` fit both overloads
+    /// and `look` and `keep` fit only the bounded one.
+    const OVERLOADS: &str = "trait Drop { void drop(*self); }\n\
+         struct Tok { i64 n; }\n\
+         impl Drop for Tok { void drop(*self) {} }\n\
+         trait Peek { i64 read(self, i64 i); i64 look(self, i64 i); }\n\
+         struct Cell<T> { T value; i64 tag; }\n\
+         impl<T> Cell<T> {\n\
+             i64 read(&self, bool more) { return self.tag; }\n\
+             i64 look(&self, &Tok other) { return self.tag; }\n\
+         }\n\
+         impl<T: Copy> Peek for Cell<T>* {\n\
+             i64 read(self, i64 i) { return i; }\n\
+             i64 look(self, i64 i) { return i; }\n\
+         }\n\
+         i64 pick<T: Copy>(T value, i64 i) { return i; }\n\
+         i64 pick(Tok value, bool more) { return 0; }\n\
+         i64 keep<T: Copy>(T value, i64 i) { return i; }\n\
+         i64 keep(Tok value, &Tok other) { return 0; }\n";
+
+    fn type_errors(body: &str) -> Vec<String> {
+        let source = format!("{OVERLOADS}i32 main() {{\nCell<Tok> c;\nTok t;\n{body}\nreturn 0;\n}}\n");
+        let tokens = lexer::lex(&source).expect("probe should lex");
+        let (mut program, errors) = Parser::new(tokens).parse_program();
+        assert!(errors.is_empty(), "probe should parse: {errors:?}");
+        TypeChecker::resolve_type_aliases_in_program(&mut program);
+        let (errors, _) =
+            TypeChecker::new().check_program_with_table(&program, &mut CompilerSymbolTable::new());
+        errors.into_iter().map(|error| error.message).collect()
+    }
+
+    /// An overload whose bound fails is skipped for one that fits; the bound
+    /// is reported only when no overload fits.
+    #[test]
+    fn an_unmet_bound_skips_an_overload_without_reporting_it() {
+        for accepted in ["(&c).read(true);", "pick(t, true);"] {
+            let errors = type_errors(accepted);
+            assert!(errors.is_empty(), "{accepted} {errors:?}");
+        }
+        let copy = crate::diagnostics::messages::bound_requires_copy(&"Tok");
+        for rejected in ["(&c).look(5);", "keep(t, 5);"] {
+            let errors = type_errors(rejected);
+            assert!(errors.iter().any(|message| message.contains(&copy)), "{rejected} {errors:?}");
+        }
     }
 }
