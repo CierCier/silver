@@ -6389,13 +6389,14 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 : semantic_receiver
                 ? llvm_emit_reference_argument(ctx, expr.inner0, ctx.types.get_reference(receiver_type_id, true))
                 : (rx_is_ptr ? llvm_emit_expr(ctx, expr.inner0) : llvm_emit_lvalue(ctx, expr.inner0));
+            LLVMOpaqueValue* rx_temporary = (LLVMOpaqueValue*)0;
             if (rx_val == (LLVMOpaqueValue*)0 && !rx_is_ptr) {
                 LLVMOpaqueValue* val = llvm_emit_expr(ctx, expr.inner0);
                 if (val != (LLVMOpaqueValue*)0) {
                     LLVMOpaqueType* val_ty = llvm_lower_type(ctx.ctx, ctx.types, rx_type);
-                    LLVMOpaqueValue* tmp = LLVMBuildAlloca(ctx.builder, val_ty, "method_rx_tmp");
-                    LLVMBuildStore(ctx.builder, val, tmp);
-                    rx_val = tmp;
+                    rx_temporary = llvm_entry_alloca(ctx, val_ty, "method_rx_tmp");
+                    LLVMBuildStore(ctx.builder, val, rx_temporary);
+                    rx_val = rx_temporary;
                 }
             }
             if (rx_val == (LLVMOpaqueValue*)0) {
@@ -6428,6 +6429,11 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                     rx_val = LLVMBuildLoad2(ctx.builder, self_ty, rx_val, "method_rx_val");
                     rx_moved = true;
                 }
+            }
+            // A borrowed temporary receiver drops with the enclosing block; a
+            // by-value `self` takes ownership of it instead.
+            if (rx_temporary != (LLVMOpaqueValue*)0 && !rx_moved) {
+                llvm_add_temporary_local(ctx, rx_temporary, rx_type, expr.span);
             }
             call_args.push(rx_val);
             call_arg_types.push(rx_type);

@@ -862,6 +862,19 @@ void llvm_init_tree_build(LlvmContext* ctx, LlvmLocal* local, InitOwnerPlan* pla
     ctx.builder = saved_builder;
 }
 
+/// Keeps the initialized temporary at `ptr` as an unnamed local, so it drops
+/// once when the enclosing block exits. Returns that local.
+LlvmLocal* llvm_add_temporary_local(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 type_id,
+                                    Span span) {
+    String name = String.from_str("__temporary_");
+    append_u32(&name, (u32)ctx.locals.len());
+    u32 name_id = ctx.names.intern(name.to_str());
+    name.drop();
+    ctx.add_local(name_id, ptr, type_id, true);
+    llvm_register_local_drops(ctx, name_id, ptr, type_id, true, span);
+    return ctx.find_local(name_id);
+}
+
 /// Every inline child has a state node, including Copy and scalar fields. The
 /// tree is fixed-size for the local and its layout is computed by LLVM.
 void llvm_register_local_drops(LlvmContext* ctx, u32 name_id, LLVMOpaqueValue* ptr,

@@ -543,6 +543,10 @@ check yet.
 Stage1 also resolves a call to an imported free function against the retained
 declaration, so the call's arguments move or borrow as the signature says.
 
+Both backends keep a temporary that owns a resource, such as a method
+receiver built by a call, as an unnamed local that drops when its block
+exits.
+
 ## 7. Diagnostics
 
 Compiler diagnostic messages are rendered using the `diagnostics::render` utility.

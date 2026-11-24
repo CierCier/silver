@@ -244,12 +244,9 @@ LlvmPlace llvm_emit_reference_place(LlvmContext* ctx, u32 expr_id) {
         place.type_id = llvm_expr_type(ctx, expr_id);
         place.data = llvm_entry_alloca(ctx, LLVMTypeOf(value), "reference_temporary");
         LLVMBuildStore(ctx.builder, value, place.data);
-        String name = String.from_str("__reference_temporary_");
-        append_u32(&name, (u32)ctx.locals.len());
-        u32 name_id = ctx.names.intern(name.to_str());
-        ctx.add_local(name_id, place.data, place.type_id, true);
-        llvm_register_local_drops(ctx, name_id, place.data, place.type_id, true, expression.span);
-        place.node = llvm_init_tree_node_ptr(ctx, ctx.find_local(name_id), 0);
+        LlvmLocal* temporary = llvm_add_temporary_local(ctx, place.data, place.type_id,
+                                                        expression.span);
+        place.node = llvm_init_tree_node_ptr(ctx, temporary, 0);
         return place;
     }
     if (expression.kind == ExprKind.Index) {

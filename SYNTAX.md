@@ -1150,6 +1150,11 @@ the scrutinee intact.
 Passing a `Vec<T>` or an array to a `Slice<T>` parameter lends a view; the
 caller keeps the container and its elements.
 
+A temporary that owns a resource, such as the result of `make()` in
+`make().id`, lives like an unnamed local: it drops once when its enclosing
+block exits, on every exit path, and a loop body drops its temporaries on
+each pass.
+
 A local declared without a value starts as zeroed storage. It must be assigned
 on every path before it is read or moved, unless part of it is assigned: the
 unassigned fields of a value built field by field keep their zero value. A

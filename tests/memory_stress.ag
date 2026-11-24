@@ -482,6 +482,20 @@ void stress_conditional_and_borrowed_transfers() {
     }
     assert_eq_i32(leaf_drop_count, 1, "tuple element in an initializer drops once");
     assert_eq_i64(leaf_bytes_freed, 7, "tuple element in an initializer frees once");
+
+    reset_owner_counters();
+    {
+        i32 first = OwnedLeaf.new(27, 3).first();
+        assert_eq_i32(first, 27, "temporary was readable");
+        assert_eq_i32(leaf_drop_count, 0, "a temporary lives to the end of its block");
+    }
+    assert_eq_i32(leaf_drop_count, 1, "a temporary drops once at block exit");
+    i64 pass = 0;
+    while (pass < 3) {
+        i32 _id = OwnedLeaf.new(28, 1).first();
+        pass += 1;
+    }
+    assert_eq_i32(leaf_drop_count, 4, "a loop body drops its temporary on each pass");
 }
 
 void stress_defer_and_break_continue() {
