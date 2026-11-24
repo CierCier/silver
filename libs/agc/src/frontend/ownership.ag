@@ -7,35 +7,21 @@ import frontend.bindings;
 import frontend.cfg;
 import frontend.diagnostics;
 import frontend.init_plan;
+import frontend.lower_expr;
 import frontend.module_loader;
 import frontend.symbols;
 import frontend.typecheck_expr;
 import frontend.types;
 
-/// Returns a function item's body block, or null.
-SyntaxNode* ownership_function_body(SyntaxNode* function) {
-    if (function == (SyntaxNode*)0) {
-        return (SyntaxNode*)0;
-    }
-    SyntaxNode* child = function.first_child;
-    while (child != (SyntaxNode*)0) {
-        if (child.kind == NodeKind.Block) {
-            return child;
-        }
-        child = child.next_sibling;
-    }
-    return (SyntaxNode*)0;
-}
-
-/// Appends a plan for every typed local binding of `function` to `plans`.
-/// A generic binding's plan stays empty until its types are specialized.
-void ownership_collect_plans(SyntaxNode* function, SymbolTable* symbols, SyntaxNode* root,
-                             Vec<InitOwnerPlan>* plans) {
+/// Appends a plan for every typed local binding of `function`, whose body
+/// spans `body`, to `plans`. A generic binding's plan stays empty until its
+/// types are specialized.
+void ownership_collect_plans(SyntaxNode* function, Span body, SymbolTable* symbols,
+                             SyntaxNode* root, Vec<InitOwnerPlan>* plans) {
     Vec<Binding> bindings = Vec<Binding>.new();
     collect_function_bindings(function, &bindings);
     Vec<u32> binding_types = Vec<u32>.new();
     typecheck_binding_types(symbols, &symbols.types, root, &bindings, &binding_types);
-    Span body = ownership_function_body(function).span;
     i64 i = 0;
     while (i < bindings.len()) {
         Binding* binding = bindings.get_ptr(i);
@@ -70,8 +56,9 @@ Vec<InitOwnerPlan> build_owner_plans(SyntaxTree* tree, SymbolTable* symbols,
     i = 0;
     while (i < items.len()) {
         SyntaxNode* item = items.get(i);
-        if (item.kind == NodeKind.Function && ownership_function_body(item) != (SyntaxNode*)0) {
-            ownership_collect_plans(item, symbols, tree.root, &plans);
+        SyntaxNode* body = item.kind == NodeKind.Function ? find_function_body(item) : (SyntaxNode*)0;
+        if (body != (SyntaxNode*)0) {
+            ownership_collect_plans(item, body.span, symbols, tree.root, &plans);
         }
         i += 1;
     }
