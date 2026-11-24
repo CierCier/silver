@@ -356,7 +356,7 @@ ImportOverloadSafety diagnostic_probe_import_overloads(
                 AstPool expressions = AstPool.new();
                 bool ok = true; bool unsupported = false;
                 typecheck_function_statements_scoped(&expressions, &symbols.types, &symbols,
-                    scratch.tree.root, function, &checked, &ok, &unsupported);
+                    scratch.tree.root, function, cfg, &checked, &ok, &unsupported);
                 if (unsupported) { return ImportOverloadSafety.Inconclusive; }
                 i64 diagnostic = 0;
                 while (diagnostic < checked.len()) {

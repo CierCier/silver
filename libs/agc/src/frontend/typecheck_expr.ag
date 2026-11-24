@@ -4948,22 +4948,23 @@ void typecheck_generic_call_drop_ownership(
 /// Type-checks every statement of a function body. Sets `*unsupported_out`
 /// (when non-null) if the body cannot be lowered.
 void typecheck_function_statements_scoped(AstPool* pool, TypeTable* types, SymbolTable* symbols,
-                                          SyntaxNode* root, SyntaxNode* function,
+                                          SyntaxNode* root, SyntaxNode* function, CfgSet* cfg,
                                           DiagnosticBag* diagnostics, bool* ok, bool* unsupported_out) {
     SyntaxNode* body = find_function_body(function);
     if (body == (SyntaxNode*)0) { return; }
     typecheck_body(pool, types, symbols, root, binding_function_parameters(function), body,
-                   function_return_type_id(types, function), TYPE_UNKNOWN, diagnostics, ok,
+                   function_return_type_id(types, function), TYPE_UNKNOWN, cfg, diagnostics, ok,
                    unsupported_out);
 }
 
 /// Type-checks the statements of `body` with `parameters` in scope. A
 /// receiver written without a type (`*self`, `&self`, `self`) has
 /// `self_type`. Sets `*unsupported_out` (when non-null) if the body cannot
-/// be lowered.
+/// be lowered. In-body `@cfg` conditions use `cfg`, the build's active
+/// configuration.
 void typecheck_body(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode* root,
                     SyntaxNode* parameters, SyntaxNode* body, u32 expected_return,
-                    u32 self_type, DiagnosticBag* diagnostics, bool* ok,
+                    u32 self_type, CfgSet* cfg, DiagnosticBag* diagnostics, bool* ok,
                     bool* unsupported_out) {
     TypeEnv env = TypeEnv.new();
     env.expected_return = expected_return;
@@ -4990,6 +4991,7 @@ void typecheck_body(AstPool* pool, TypeTable* types, SymbolTable* symbols, Synta
 
     ExprLowerer lowerer = ExprLowerer.new(pool, types, &symbols.names);
     lowerer.unit_root = root;
+    lowerer.cfg = cfg;
     Vec<u32> stmt_ids = Vec<u32>.new();
     lowerer.lower_block(body, &stmt_ids);
     if (lowerer.unsupported) {
@@ -5125,7 +5127,7 @@ void typecheck_impl_methods(AstPool* pool, SymbolTable* symbols, SyntaxNode* roo
                 bool function_ok = true;
                 bool unsupported = false;
                 typecheck_body(pool, types, symbols, root, cursor, next, expected_return,
-                               owner, diagnostics, &function_ok, &unsupported);
+                               owner, cfg, diagnostics, &function_ok, &unsupported);
                 if (unsupported && function_ok) {
                     diagnostics.error(name.span, unchecked_function_body(name.text));
                     function_ok = false;
@@ -5259,7 +5261,7 @@ bool typecheck_expressions_scoped(AstPool* pool, SymbolTable* symbols, SyntaxTre
                 bool function_ok = true;
                 bool unsupported = false;
                 typecheck_function_statements_scoped(pool, &symbols.types, symbols, tree.root,
-                                                     item, diagnostics, &function_ok,
+                                                     item, cfg, diagnostics, &function_ok,
                                                      &unsupported);
                 // A body the checker cannot lower is a limitation, not an
                 // accepted body. A macro error already explains it.
