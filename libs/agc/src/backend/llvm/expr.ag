@@ -6359,6 +6359,8 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         Vec<u32> borrowed_temp_types = Vec<u32>.new();
         Vec<u8> slice_coerced_args = Vec<u8>.new();
         bool rx_moved = false;
+        // The receiver temporary's local, cleared by an explicit `drop()`.
+        i64 rx_temporary_index = -1;
         if (is_instance) {
             u32 rx_type = llvm_expr_type(ctx, expr.inner0);
             if (rx_type == TYPE_UNKNOWN) { rx_type = receiver_type_id; }
@@ -6434,6 +6436,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             // by-value `self` takes ownership of it instead.
             if (rx_temporary != (LLVMOpaqueValue*)0 && !rx_moved) {
                 llvm_add_temporary_local(ctx, rx_temporary, rx_type, expr.span);
+                rx_temporary_index = ctx.locals.len() - 1;
             }
             call_args.push(rx_val);
             call_arg_types.push(rx_type);
@@ -6608,6 +6611,10 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         }
         if (strcmp(method_name, "drop") == 0 && is_instance) {
             llvm_clear_place_drops(ctx, expr.inner0);
+            if (rx_temporary_index >= 0) {
+                llvm_store_init_tree(ctx, ctx.locals.get_ptr(rx_temporary_index),
+                    LLVMConstInt(LLVMInt8TypeInContext(ctx.ctx), LLVM_INIT_UNINIT, 0));
+            }
         }
         i64 cleared = 0;
         while (cleared < (i64)args_count) {

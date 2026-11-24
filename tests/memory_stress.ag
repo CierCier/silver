@@ -506,6 +506,13 @@ void stress_conditional_and_borrowed_transfers() {
     }
     assert_eq_i32(leaf_drop_count, 1, "only the temporary of the arm that ran drops");
     assert_eq_i64(leaf_bytes_freed, 2, "only the temporary of the arm that ran frees");
+
+    reset_owner_counters();
+    {
+        OwnedLeaf.new(34, 3).drop();
+    }
+    assert_eq_i32(leaf_drop_count, 1, "an explicitly dropped temporary drops once");
+    assert_eq_i64(leaf_bytes_freed, 3, "an explicitly dropped temporary frees once");
 }
 
 void stress_defer_and_break_continue() {

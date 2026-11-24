@@ -950,6 +950,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         let internal = signature.as_ref().is_some_and(|sig| Self::internal_abi(sig.linkage.as_ref()));
         let mut args = Vec::with_capacity(arguments.len() + usize::from(inject_receiver));
+        // The drop flag of a spilled receiver temporary, cleared by an explicit `drop()`.
+        let mut receiver_temporary_flag = None;
         if inject_receiver {
             let semantic_reference = signature.as_ref().and_then(|sig| sig.params.first())
                 .is_some_and(|ty| matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_)));
@@ -1068,6 +1070,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                     flag: Some(flag_alloca),
                                 });
                             }
+                            receiver_temporary_flag = Some(flag_alloca);
                         }
 
                         if semantic_reference {
@@ -1388,6 +1391,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         // the implicit destructor at scope exit doesn't double-free.
         if method.name == "drop" {
             self.clear_drop_flag_of(receiver)?;
+            if let Some(flag) = receiver_temporary_flag {
+                self.builder
+                    .build_store(flag, self.context.bool_type().const_int(0, false))
+                    .map_err(|e| CodegenError::new(format!("failed to clear temp drop flag: {e}")))?;
+            }
         }
 
         if let Some(value) = value {
