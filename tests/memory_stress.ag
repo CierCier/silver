@@ -472,6 +472,30 @@ void stress_conditional_and_borrowed_transfers() {
 
     reset_owner_counters();
     {
+        Vec<OwnedLeaf> leaves = Vec<OwnedLeaf>.new();
+        leaves.push(OwnedLeaf.new(40, 1));
+        leaves.push(OwnedLeaf.new(41, 2));
+        leaves.push(OwnedLeaf.new(42, 3));
+        leaves.push(OwnedLeaf.new(43, 4));
+        Vec<i32> ids = Vec<i32>.new();
+        ids.push(leaves.get_ref(1).first());
+        assert_eq_i32(ids.get(0), 41, "get copied a Copy element out");
+        assert_eq_i32(leaf_drop_count, 0, "a borrowed element is not dropped");
+        {
+            OwnedLeaf last = leaves.pop();
+            OwnedLeaf first = leaves.take(0);
+            OwnedLeaf swapped = leaves.swap_remove(0);
+            assert_eq_i32(last.first() + first.first() + swapped.first(), 124, "pop, take, and swap_remove moved the elements out");
+        }
+        assert_eq_i32(leaf_drop_count, 3, "taken elements drop once with their new owners");
+        assert_eq_i64(leaves.len(), 1, "the vec still owns one element");
+        ids.drop();
+    }
+    assert_eq_i32(leaf_drop_count, 4, "the vec drops only the element it still owns");
+    assert_eq_i64(leaf_bytes_freed, 10, "each element frees once");
+
+    reset_owner_counters();
+    {
         OwnedLeaf a = OwnedLeaf.new(29, 4);
         bool outer = leaf_drop_count == 0;
         bool inner = leaf_drop_count != 0;
