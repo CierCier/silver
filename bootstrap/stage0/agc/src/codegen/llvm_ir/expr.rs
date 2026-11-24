@@ -2991,10 +2991,24 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     }
                 }
                 // A yielded field or element leaves its owner before the
-                // block's cleanup runs, so the owner does not drop it.
+                // block's cleanup runs, so the owner does not drop it. A
+                // Copy value is only read: its owner stays whole and still
+                // runs its own Drop.
                 ast::ExpressionKind::FieldAccess { .. } | ast::ExpressionKind::Index { .. } => {
-                    self.transition_owner_expr(expression, false)?;
-                    self.clear_drop_flag_of(expression)?;
+                    let yielded_ty = self
+                        .lvalue_root_and_path(expression)
+                        .and_then(|(root, path)| {
+                            let var = self.lookup_variable(&root)?;
+                            self.field_type_at_path(&var.ty, &path).ok()
+                        });
+                    let owned = match yielded_ty {
+                        Some(ty) => self.type_needs_drop_glue(&ty, &mut Vec::new())?,
+                        None => true,
+                    };
+                    if owned {
+                        self.transition_owner_expr(expression, false)?;
+                        self.clear_drop_flag_of(expression)?;
+                    }
                 }
                 _ => {}
             }
