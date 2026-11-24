@@ -545,7 +545,10 @@ declaration, so the call's arguments move or borrow as the signature says.
 
 Both backends keep a temporary that owns a resource, such as a method
 receiver built by a call, as an unnamed local that drops when its block
-exits.
+exits. Stage1 starts that local's drop state empty in the entry block, so a
+temporary built in only one arm of `?:` drops only when that arm ran. Stage0
+lowers each arm as a block and drops the arm's temporaries at the end of the
+arm. Stage0 also rejects `&` applied to a temporary, as in `peek(&mk(6))`.
 
 ## 7. Diagnostics
 

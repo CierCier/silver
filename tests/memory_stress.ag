@@ -496,6 +496,16 @@ void stress_conditional_and_borrowed_transfers() {
         pass += 1;
     }
     assert_eq_i32(leaf_drop_count, 4, "a loop body drops its temporary on each pass");
+
+    reset_owner_counters();
+    {
+        bool taken = leaf_drop_count == 0;
+        i32 hit = taken ? OwnedLeaf.new(32, 2).first() : 0;
+        i32 miss = taken ? 0 : OwnedLeaf.new(33, 5).first();
+        assert_eq_i32(hit + miss, 32, "only the arm that ran built a temporary");
+    }
+    assert_eq_i32(leaf_drop_count, 1, "only the temporary of the arm that ran drops");
+    assert_eq_i64(leaf_bytes_freed, 2, "only the temporary of the arm that ran frees");
 }
 
 void stress_defer_and_break_continue() {

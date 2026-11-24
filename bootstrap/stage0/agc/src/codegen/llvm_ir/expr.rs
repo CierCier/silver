@@ -2905,6 +2905,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ast::StatementKind::Expression(expr) => {
                 let value = self.emit_expression_value(expr)?;
                 self.clear_yielded_value_flags(expr)?;
+                // Locals and temporaries of this block drop here, except the
+                // yielded value; popping the scope alone would leak them.
+                self.emit_defers(1)?;
                 value
             }
             _ => {
@@ -3036,7 +3039,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 if phi_ty.is_int_type() && value.get_type().is_int_type() {
                     let target_ty = phi_ty.into_int_type();
                     let int_val = value.into_int_value();
-                    self.builder.position_at_end(*bb);
+                    // The arm already branched to the join; cast before it.
+                    let branch = bb.get_terminator().ok_or_else(|| {
+                        CodegenError::new("if expression arm has no branch")
+                    })?;
+                    self.builder.position_before(&branch);
                     let casted = if int_val.get_type().get_bit_width() > target_ty.get_bit_width() {
                         self.builder
                             .build_int_truncate(int_val, target_ty, "if.trunc")
