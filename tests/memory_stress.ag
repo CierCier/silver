@@ -509,6 +509,16 @@ void stress_conditional_and_borrowed_transfers() {
 
     reset_owner_counters();
     {
+        bool ready = leaf_drop_count > 0;
+        bool skipped = ready && OwnedLeaf.new(35, 2).valid();
+        bool evaluated = !ready && OwnedLeaf.new(36, 3).valid();
+        assert_true(!skipped && evaluated, "only the evaluated operand built a temporary");
+    }
+    assert_eq_i32(leaf_drop_count, 1, "a skipped operand's temporary never drops");
+    assert_eq_i64(leaf_bytes_freed, 3, "only the evaluated operand's temporary frees");
+
+    reset_owner_counters();
+    {
         OwnedLeaf.new(34, 3).drop();
     }
     assert_eq_i32(leaf_drop_count, 1, "an explicitly dropped temporary drops once");
