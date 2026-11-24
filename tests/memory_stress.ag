@@ -583,6 +583,25 @@ void stress_defer_and_break_continue() {
     assert_eq_i32(pair_drop_count, 1, "owned value dropped with defer present");
     assert_eq_i32(leaf_drop_count, 2, "nested leaves dropped with defer present");
 
+    reset_owner_counters();
+    {
+        OwnedLeaf outer_leaf = OwnedLeaf.new(52, 3);
+        Optional<i64> pick = Optional<i64>.Some(1);
+        OwnedLeaf yielded = match pick {
+            Some(n): {
+                OwnedLeaf inner = OwnedLeaf.new(53, 4);
+                defer { defer_marker = defer_marker + 1; }
+                outer_leaf;
+            },
+            None: OwnedLeaf.new(54, 5),
+        };
+        assert_eq_i32(defer_marker, 11, "a yielding block ran its defer");
+        assert_eq_i32(leaf_drop_count, 1, "a yielding block dropped its own local");
+        assert_eq_i32(yielded.first(), 52, "a value block handed out the outer leaf");
+    }
+    assert_eq_i32(leaf_drop_count, 2, "a leaf yielded by a value block drops once");
+    assert_eq_i64(leaf_bytes_freed, 7, "a leaf yielded by a value block frees once");
+
     reset_node_counters();
     for (i32 i = 0; i < 10; i = i + 1) {
         RawNode n = RawNode.new(3000 + i, 24);

@@ -2013,11 +2013,32 @@ impl MoveChecker {
         scopes: &mut Vec<Vec<ScopeEntry>>,
         var_types: &mut FxHashMap<String, ast::Type>,
     ) {
+        self.check_block_yielding(block, false, state, scopes, var_types);
+    }
+
+    /// Checks `block`; when it `yields`, its trailing expression is the
+    /// block's value and moves out before the block's defers run, so a defer
+    /// cannot consume what the block hands out.
+    fn check_block_yielding(
+        &mut self,
+        block: &ast::Block,
+        yields: bool,
+        state: &mut State,
+        scopes: &mut Vec<Vec<ScopeEntry>>,
+        var_types: &mut FxHashMap<String, ast::Type>,
+    ) {
         scopes.push(Vec::new());
         let depth = scopes.len();
         // Statements after one that never falls through cannot run.
-        for stmt in &block.statements {
-            self.check_statement(stmt, state, scopes, var_types);
+        for (position, stmt) in block.statements.iter().enumerate() {
+            match &stmt.kind {
+                ast::StatementKind::Expression(value)
+                    if yields && position + 1 == block.statements.len() =>
+                {
+                    self.transfer_value(value, state, scopes, var_types);
+                }
+                _ => self.check_statement(stmt, state, scopes, var_types),
+            }
             if statement_terminates(stmt) {
                 break;
             }
@@ -3015,7 +3036,7 @@ impl MoveChecker {
                 *state = merged;
             }
             ast::ExpressionKind::Block(block) => {
-                self.check_block(block, state, scopes, var_types);
+                self.check_block_yielding(block, true, state, scopes, var_types);
             }
             ast::ExpressionKind::Lambda { body, .. } => {
                 // A lambda body has its own exits: its `return` does not run
@@ -3617,6 +3638,18 @@ mod tests {
                  match b { Full(move p): { eat(p); i64 n = p.inspect(); }, Empty: {} };",
                 "p",
             ),
+            // A value block hands out its result before its defers run.
+            (
+                "Bin b = Bin.Empty; \
+                 Text out = match b { Full(x): { Text leaf = fresh(); defer eat(leaf); leaf; }, \
+                 Empty: fresh() };",
+                "leaf",
+            ),
+            (
+                "Text t; Bin b = Bin.Empty; \
+                 Text out = match b { Full(x): { t; }, Empty: fresh() }; i64 n = t.inspect();",
+                "t",
+            ),
         ] {
             let errors = errors_in(misuse);
             assert!(
@@ -3635,6 +3668,9 @@ mod tests {
             "Text t; while (false) { eat(t); } i64 n = t.inspect();",
             "Text t; { eat(t); return 0; } i64 n = t.inspect();",
             "Text t; bool f = true; Text u = f ? fresh() : fresh(); i64 n = t.inspect();",
+            "Bin b = Bin.Empty; \
+             Text out = match b { Full(x): { Text leaf = fresh(); defer leaf.inspect(); fresh(); }, \
+             Empty: fresh() };",
         ] {
             let errors = errors_in(control);
             assert!(errors.moves.is_empty(), "{control}: {errors:?}");
