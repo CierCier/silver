@@ -3,6 +3,7 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use crate::lexer::Span;
 use crate::parser::ast;
 use crate::types::Type;
+use crate::semantic::type_properties::{TypePropertiesContext, is_copy_with};
 
 #[derive(Debug, Clone)]
 pub struct TraitError {
@@ -243,6 +244,7 @@ impl TraitRegistry {
 
     pub fn validate_impls(&self, program: &ast::Program) -> Vec<TraitError> {
         let mut errors = Vec::new();
+        let mut copy_context: Option<TypePropertiesContext> = None;
         let mut impl_keys = HashMap::default();
 
         for item in &program.items {
@@ -350,11 +352,19 @@ impl TraitRegistry {
                         continue;
                     }
                     let trait_name = trait_name_from_ref(&bound.trait_ref);
-                    // The type checker judges the built-in `Copy` bound.
-                    if trait_name.is_empty()
-                        || trait_name == BUILTIN_COPY
-                        || bound.trait_ref.path.len() > 1
-                    {
+                    if trait_name == BUILTIN_COPY && bound.trait_ref.generics.is_none() {
+                        let context = copy_context.get_or_insert_with(|| copy_rules(program));
+                        if !is_copy_with(&arg_type.to_ast(), context) {
+                            errors.push(TraitError {
+                                message: crate::diagnostics::messages::bound_requires_copy(
+                                    &type_key(arg_type),
+                                ),
+                                span: bound.trait_ref.span,
+                            });
+                        }
+                        continue;
+                    }
+                    if trait_name.is_empty() || bound.trait_ref.path.len() > 1 {
                         continue;
                     }
                     if !self.has_impl(&trait_name, &type_key(arg_type), program) {
@@ -597,8 +607,60 @@ fn trait_name_from_ref(trait_ref: &ast::TraitRef) -> String {
 }
 
 /// The bound satisfied exactly by implicitly copied types. It has no
-/// declaration; the type checker decides it from the type's ownership.
+/// declaration; it is decided from the type's ownership.
 pub const BUILTIN_COPY: &str = "Copy";
+
+/// The implicit-copy rule over `program`: its `Drop` impls own resources, and
+/// its structs and enums are Copy only when every field or payload is.
+fn copy_rules(program: &ast::Program) -> TypePropertiesContext {
+    let mut context = TypePropertiesContext::new();
+    let parameters = |generics: &Option<ast::Generics>| -> Vec<String> {
+        generics
+            .iter()
+            .flat_map(|generics| &generics.params)
+            .filter_map(|param| match param {
+                ast::GenericParam::Type(param) => Some(param.name.name.clone()),
+                ast::GenericParam::Lifetime(_) => None,
+            })
+            .collect()
+    };
+    for item in &program.items {
+        match &item.kind {
+            ast::ItemKind::Struct(strct) => context.insert_generic_struct(
+                strct.name.name.clone(),
+                parameters(&strct.generics),
+                strct.fields.iter().map(|field| field.field_type.clone()).collect(),
+            ),
+            ast::ItemKind::Enum(enumeration) => context.insert_generic_struct(
+                enumeration.name.name.clone(),
+                parameters(&enumeration.generics),
+                enumeration
+                    .variants
+                    .iter()
+                    .flat_map(|variant| match &variant.data {
+                        ast::EnumVariantData::Unit => Vec::new(),
+                        ast::EnumVariantData::Tuple(types) => types.clone(),
+                        ast::EnumVariantData::Struct(fields) => {
+                            fields.iter().map(|field| field.field_type.clone()).collect()
+                        }
+                    })
+                    .collect(),
+            ),
+            ast::ItemKind::Impl(implementation)
+                if implementation
+                    .trait_ref
+                    .as_ref()
+                    .is_some_and(|trait_ref| trait_name_from_ref(trait_ref) == "Drop") =>
+            {
+                let owner = type_key(&Type::from_ast(&implementation.self_type));
+                let base = owner.split('<').next().unwrap_or_default().to_string();
+                context.drop_bases.insert(base);
+            }
+            _ => {}
+        }
+    }
+    context
+}
 
 fn validate_bound_trait(
     trait_names: &HashSet<String>,
@@ -972,4 +1034,36 @@ fn sort_trait_errors(errors: &mut Vec<TraitError>) {
             &b.message,
         ))
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::lexer;
+    use crate::parser::Parser;
+
+    fn trait_errors(source: &str) -> Vec<String> {
+        let tokens = lexer::lex(source).expect("probe should lex");
+        let (program, errors) = Parser::new(tokens).parse_program();
+        assert!(errors.is_empty(), "probe should parse: {errors:?}");
+        super::validate_traits(&program).into_iter().map(|error| error.message).collect()
+    }
+
+    /// A trait parameter bounded by `Copy` takes only implicitly copied types.
+    #[test]
+    fn a_copy_bound_on_a_trait_parameter_rejects_owners() {
+        let prelude = "trait Drop { void drop(*self); }\n\
+            trait Needs<T: Copy> { }\n\
+            struct Text { i64 len; }\n\
+            impl Drop for Text { void drop(*self) {} }\n\
+            struct Holder { Text text; }\n\
+            struct Plain { i64 n; }\n\
+            struct Sink { i64 n; }\n";
+        for owner in ["Text", "Holder"] {
+            let errors = trait_errors(&format!("{prelude}impl Needs<{owner}> for Sink {{ }}\n"));
+            let rejected = crate::diagnostics::messages::bound_requires_copy(&owner);
+            assert!(errors.iter().any(|message| message == &rejected), "{owner}: {errors:?}");
+        }
+        let errors = trait_errors(&format!("{prelude}impl Needs<Plain> for Sink {{ }}\n"));
+        assert!(errors.is_empty(), "{errors:?}");
+    }
 }

@@ -1110,7 +1110,8 @@ indexing: `move v[i]` and `T x = v[i]` are rejected. Use `v.take(i)`,
 `v.pop()`, `v.swap_remove(i)`, or borrow the element.
 
 Accessors that return a copy of an element (`get`, `try_get`, `iter`,
-`for x in &v`, `HashMap.get`, `values`, `peek`, `front`, a lock guard's `get`)
+`Slice.iter`, `for x in &v`, `HashMap.get`, `values`, `peek`, `front`, a lock
+guard's `get`)
 live in `impl<T: Copy>` blocks. For a non-Copy element, borrow it with
 `get_ref` or `get_mut`, or take it out. Iterating `for x in v` consumes `v`
 and moves each element out.

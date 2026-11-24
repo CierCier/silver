@@ -2559,7 +2559,7 @@ void typecheck_method_call_target(AstPool* pool, TypeTable* types, SyntaxNode* r
         ? (SyntaxNode*)0 : name.parent.parent;
     if (selected && declaring != (SyntaxNode*)0 && declaring.kind == NodeKind.Impl) {
         declaring = typecheck_receiver_impl(root, types, receiver_type, owner_name,
-                                            method_name, declaring);
+                                            name, declaring);
         String failure = String.new();
         mono_owner_bound_failure(root, types, declaring, owner_type, &failure);
         bool bounds_hold = failure.len() == 0;
@@ -2593,11 +2593,47 @@ void typecheck_method_call_target(AstPool* pool, TypeTable* types, SyntaxNode* r
     }
 }
 
-/// The implementation that declares `method_name` for a receiver as
-/// indirect as `receiver_type`: `(&v).into_iter()` uses `impl ... for
-/// Vec<T>*`, not the by-value impl. Falls back to `selected`.
+/// Returns the parameter count of the method declared at `name`, or -1.
+i64 typecheck_declared_arity(SyntaxNode* name) {
+    SyntaxNode* parameters = name.next_sibling;
+    while (parameters != (SyntaxNode*)0 && parameters.kind != NodeKind.Parenthesized) {
+        parameters = parameters.next_sibling;
+    }
+    if (parameters == (SyntaxNode*)0) { return -1; }
+    Vec<Binding> bindings = Vec<Binding>.new();
+    collect_parameter_bindings(parameters, &bindings);
+    i64 arity = bindings.len();
+    bindings.drop();
+    return arity;
+}
+
+/// Returns true when impl `item` declares a method named like `selected`
+/// with the same parameter count.
+bool typecheck_impl_declares_overload(SyntaxNode* item, SyntaxNode* selected) {
+    SyntaxNode* block = item.first_child;
+    while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+        block = block.next_sibling;
+    }
+    i64 arity = typecheck_declared_arity(selected);
+    SyntaxNode* member = block == (SyntaxNode*)0 ? (SyntaxNode*)0 : block.first_child;
+    while (member != (SyntaxNode*)0) {
+        if (member.kind == NodeKind.Token && member.token_kind == TokenKind.Identifier
+            && strcmp(member.text, selected.text) == 0
+            && typecheck_declared_arity(member) == arity) {
+            return true;
+        }
+        member = member.next_sibling;
+    }
+    return false;
+}
+
+/// The implementation that declares the overload at `selected_name` for a
+/// receiver as indirect as `receiver_type`: `(&v).into_iter()` uses
+/// `impl ... for Vec<T>*`, not the by-value impl. An impl whose method of
+/// that name takes other parameters does not apply. Falls back to `selected`.
 SyntaxNode* typecheck_receiver_impl(SyntaxNode* root, TypeTable* types, u32 receiver_type,
-                                    str owner_name, str method_name, SyntaxNode* selected) {
+                                    str owner_name, SyntaxNode* selected_name,
+                                    SyntaxNode* selected) {
     u32 depth = 0;
     TypeEntry* entry = types.get(types.resolve_subst(receiver_type));
     while (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) {
@@ -2609,12 +2645,10 @@ SyntaxNode* typecheck_receiver_impl(SyntaxNode* root, TypeTable* types, u32 rece
     while (item != (SyntaxNode*)0) {
         if (item.kind == NodeKind.Impl && impl_target_pointer_depth(item) == depth) {
             SyntaxNode* target = impl_target_identifier(item);
-            i64 count = 0;
-            i64 generic = 0;
-            if (target != (SyntaxNode*)0 && strcmp(target.text, owner_name) == 0) {
-                typecheck_count_block_methods(item, method_name, &count, &generic);
+            if (target != (SyntaxNode*)0 && strcmp(target.text, owner_name) == 0
+                && typecheck_impl_declares_overload(item, selected_name)) {
+                return item;
             }
-            if (count > 0) { return item; }
         }
         item = item.next_sibling;
     }
@@ -4841,6 +4875,11 @@ bool typecheck_str_contains(str message, str marker) {
     return false;
 }
 
+/// Returns true for a method whose impl bound the concrete receiver misses.
+bool typecheck_is_method_bound_error(str message) {
+    return message[0] == '\'' && typecheck_str_contains(message, "' is not available on '");
+}
+
 /// Returns true for a shared_value_outside_lock or lock_needs_shared
 /// message: a generic body that uses its `T` directly is wrong once `T` is
 /// a `shared` Mutex, and one that locks its `T` is wrong unless it is.
@@ -4943,6 +4982,7 @@ void typecheck_generic_call_drop_ownership(
             && (typecheck_is_drop_ancestor_error(diagnostic.message.to_str())
                 || typecheck_is_shared_value_error(diagnostic.message.to_str())
                 || typecheck_str_contains(diagnostic.message.to_str(), "' out of its lock block: ")
+                || typecheck_is_method_bound_error(diagnostic.message.to_str())
                 || typecheck_str_starts_with(diagnostic.message.to_str(), "pointer argument type mismatch:"))) {
             diagnostics.error(diagnostic.span, diagnostic.message.clone());
             *ok = false;

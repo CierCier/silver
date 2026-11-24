@@ -953,7 +953,8 @@ bool mono_any_open(SyntaxNode* root, TypeTable* types, Vec<u32>* type_ids) {
 }
 
 /// Returns true when `type_id` contains a type parameter. Inside a generic
-/// body a parameter is a bare name that no struct or enum declares.
+/// body a parameter is a bare name that no struct or enum declares, in
+/// source or in an imported artifact.
 bool mono_type_is_open(SyntaxNode* root, TypeTable* types, u32 type_id, i64 depth) {
     u32 resolved = types.resolve_subst(type_id);
     if (depth > 16 || (i64)resolved >= types.types.len()) { return false; }
@@ -962,7 +963,8 @@ bool mono_type_is_open(SyntaxNode* root, TypeTable* types, u32 type_id, i64 dept
     if (entry.kind == TypeKind.Named && entry.count == 0) {
         str name = types.names.get(entry.name_id);
         return find_item_by_name(root, NodeKind.Struct, name) == (SyntaxNode*)0
-            && find_enum_item(root, name) == (SyntaxNode*)0;
+            && find_enum_item(root, name) == (SyntaxNode*)0
+            && !types.has_definition(entry.name_id);
     }
     if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference
         || entry.kind == TypeKind.Array || entry.kind == TypeKind.Slice) {

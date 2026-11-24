@@ -535,7 +535,11 @@ arguments, or when monomorphization cannot infer the method's type arguments.
 Both stages check the bounds of a method's inherent impl at each call. The
 built-in bound `Copy` is satisfied by the `TypeProperties` Copy rule and has
 no impl. Stage1 skips the check while the receiver's type arguments are still
-open, as in a generic body, and checks again on each concrete instantiation.
+open, as in a generic body, and checks again on each concrete instantiation;
+a type that an imported artifact defines is not open. Stage0 judges a `Copy`
+bound only where the receiver is concrete, and it also checks a `Copy` bound
+on a trait's type parameter in `impl Trait<X> for Y`, which stage1 does not
+check yet.
 Stage1 also resolves a call to an imported free function against the retained
 declaration, so the call's arguments move or borrow as the signature says.
 

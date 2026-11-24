@@ -142,25 +142,6 @@ impl<T> Slice<T> {
         return &self.data[self.len - 1];
     }
 
-    /// Returns an iterator over the slice.
-    SliceIter<T> iter(&self) {
-        SliceIter<T> it;
-        it.data = self.data;
-        it.len = self.len;
-        it.idx = 0;
-        return it;
-    }
-
-    /// Returns an iterator starting from `start`.
-    SliceIter<T> iter_from(&self, i64 start) {
-        if (start < 0 || start > self.len) { abort(); }
-        SliceIter<T> it;
-        it.data = self.data;
-        it.len = self.len;
-        it.idx = start;
-        return it;
-    }
-
     /// Returns pointer to element at index, aborting if out of bounds.
     T* get_ptr(&self, i64 index) {
         if (index < 0 || index >= self.len) { abort(); }
@@ -191,6 +172,25 @@ impl<T: Copy> Slice<T> {
     T get(&self, i64 index) {
         if (index < 0 || index >= self.len) { abort(); }
         return self.data[index];
+    }
+
+    /// Returns an iterator over the slice.
+    SliceIter<T> iter(&self) {
+        SliceIter<T> it;
+        it.data = self.data;
+        it.len = self.len;
+        it.idx = 0;
+        return it;
+    }
+
+    /// Returns an iterator starting from `start`.
+    SliceIter<T> iter_from(&self, i64 start) {
+        if (start < 0 || start > self.len) { abort(); }
+        SliceIter<T> it;
+        it.data = self.data;
+        it.len = self.len;
+        it.idx = start;
+        return it;
     }
 
     /// Returns a reverse iterator over the slice.

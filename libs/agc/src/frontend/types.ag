@@ -1121,6 +1121,17 @@ impl TypeTable {
     TypeProperties properties(TypeTable* self, u32 id) {
         return type_properties_at(self, id, 0);
     }
+    /// Returns true when a struct or enum named `name_id` has registered
+    /// properties, from source or from an imported artifact.
+    bool has_definition(TypeTable* self, u32 name_id) {
+        i64 i = 0;
+        while (i < self.struct_properties.len()) {
+            if (self.struct_properties.get_ptr(i).name_id == name_id) { return true; }
+            i += 1;
+        }
+        return false;
+    }
+
     /// Records the field types of struct `name`.
     void register_struct_properties(TypeTable* self, str name, Vec<u32>* fields) {
         u32 name_id = self.names.intern(name);
