@@ -859,7 +859,7 @@ class NativeLsp(unittest.TestCase):
                           (9, "type mismatch: expected str, found i32")])
 
     def test_moves_and_initialization_are_checked_at_each_control_flow_boundary(self):
-        # Each function from `branch` to `element` misuses one boundary; `controls`
+        # Each function from `branch` to `loop_field` misuses one boundary; `controls`
         # moves and reinitializes on every path and must stay accepted.
         text = ("trait Drop { void drop(*self); }\n"
                 "struct Tok { i64 id; }\n"
@@ -880,6 +880,7 @@ class NativeLsp(unittest.TestCase):
                 "struct Bag { Pair* data; }\n"
                 "impl Bag { Pair __index_get(*self, i64 i) { return self.data[i]; } }\n"
                 "i64 element(Bag b) { take(move b[0].left); return peek(&b[0].right); }\n"
+                "i64 loop_field(i64 n) { Pair p; p.right = mk(1); while (n > 0) { take(move p.left); n -= 1; } return 0; }\n"
                 "i64 controls(bool f) {\n"
                 "    Tok t = mk(1);\n"
                 "    if (f) { take(t); t = mk(2); }\n"
@@ -901,7 +902,8 @@ class NativeLsp(unittest.TestCase):
                           (14, "use of possibly moved value 't'"),
                           (15, "use of moved value 'x'"),
                           (18, "cannot move an element out of 'Bag' by indexing: the container still owns it; "
-                               "use take, pop, swap_remove, or a reference")])
+                               "use take, pop, swap_remove, or a reference"),
+                          (19, "use of moved value 'p.left'")])
 
     def test_a_local_callable_is_checked_against_its_own_signature(self):
         # The parameter `f` shadows the function `f`, so its signature rules.
@@ -918,7 +920,8 @@ class NativeLsp(unittest.TestCase):
 
     def test_an_unassigned_field_of_a_value_built_field_by_field_reads_as_zero(self):
         # Array elements are not zero-filled: a whole-array read needs each one,
-        # though an element built field by field counts.
+        # though an element built field by field counts, and so does an array
+        # field of a struct built field by field.
         text = ("trait Drop { void drop(*self); }\nstruct Text { i64 n; }\n"
                 "impl Text { i64 len(&self) { return self.n; } }\nimpl Drop for Text { void drop(*self) { } }\n"
                 "struct Opts { i64 n; Text items; }\n"
@@ -928,13 +931,16 @@ class NativeLsp(unittest.TestCase):
                 "i64 whole() {\n Text a[2];\n a[0] = { .n = 1 };\n Text b[2] = move a;\n return b[0].len();\n}\n"
                 "i64 full() {\n Text a[2];\n a[0] = { .n = 1 };\n a[1] = { .n = 2 };\n Text b[2] = move a;\n return b[1].len();\n}\n"
                 "i64 fields() {\n Opts a[1];\n a[0].n = 1;\n Opts b[1] = move a;\n return b[0].items.len();\n}\n"
-                "i64 main() { return built() + empty() + element() + whole() + full() + fields(); }\n")
+                "struct Holder { i64 n; Text items[2]; }\n"
+                "i64 holder() {\n Holder h;\n h.n = 1;\n h.items[0] = { .n = 1 };\n Text moved[2] = move h.items;\n return moved[1].len();\n}\n"
+                "i64 main() { return built() + empty() + element() + whole() + full() + fields() + holder(); }\n")
         uri = self.open(text)
         diagnostics = self.session.published(uri, 1)["diagnostics"]
         self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
                          [(12, "use of uninitialized value 'o'"),
                           (17, "use of uninitialized value 'a[1]'"),
-                          (22, "use of 'a' before 'a[...]' is initialized")])
+                          (22, "use of 'a' before 'a[...]' is initialized"),
+                          (43, "use of 'h.items' before 'h.items[...]' is initialized")])
 
     def test_returned_pointee_places_and_unrelated_c_results_are_not_local_escapes(self):
         # A result of the parameter's pointee type (`i64*` from `i64**`) is a

@@ -457,13 +457,19 @@ impl MoveFlow {
         }
     }
 
-    /// Whether every place has the same state in both.
+    /// Whether every place has the same state in both, including why a place
+    /// without a value lacks one: a move outranks a declaration, so a loop
+    /// whose body moves a zero-valued field needs another pass.
     bool same(MoveFlow* self, FlowState* left, FlowState* right) {
         if (left.reachable != right.reachable) { return false; }
         i64 count = self.places.len();
         i64 i = 0;
         while (i < count) {
-            if (self.init_at(left, i) != self.init_at(right, i)) { return false; }
+            FlowInit init = self.init_at(left, i);
+            if (init != self.init_at(right, i)) { return false; }
+            if (init != FlowInit.Init && self.cause_at(left, i) != self.cause_at(right, i)) {
+                return false;
+            }
             i += 1;
         }
         return true;
@@ -572,11 +578,14 @@ impl MoveFlow {
     }
 
     /// Whether `place` or a struct value that contains it counts as assigned.
-    /// An unassigned field of a value built field by field keeps its zero value.
+    /// An unassigned field of a value built field by field keeps its zero
+    /// value; an array of owned elements and its elements are not zero-filled.
     bool assigned_in_struct(MoveFlow* self, FlowState* state, i64 place) {
         while (place >= 0) {
             if (self.assigned(state, place)) { return true; }
-            place = self.places.get(place).parent;
+            FlowPlace info = self.places.get(place);
+            if (info.is_array && !self.is_copy(info.type_id)) { return false; }
+            place = info.parent;
             if (place >= 0 && self.places.get(place).is_array) { return false; }
         }
         return false;
