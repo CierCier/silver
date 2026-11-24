@@ -567,12 +567,32 @@ impl MoveFlow {
     bool assigned(MoveFlow* self, FlowState* state, i64 place) {
         FlowPlace info = self.places.get(place);
         if (!info.expanded) { return self.init_at(state, place) == FlowInit.Init; }
-        if (!info.is_array) { return self.summary(state, place) != FlowInit.Empty; }
+        if (!info.is_array) {
+            return self.summary(state, place) != FlowInit.Empty
+                && self.owned_arrays_assigned(state, place);
+        }
         if (self.own_counts(place) && self.init_at(state, place) != FlowInit.Init) { return false; }
         i64 child = info.first_child;
         while (child >= 0) {
             if (!self.assigned(state, child)) { return false; }
             child = self.places.get(child).next_sibling;
+        }
+        return true;
+    }
+
+    /// Whether each array of owned elements among `place`'s fields, at any
+    /// depth, counts as assigned: a struct built field by field zero-fills
+    /// its other fields, but not such an array.
+    bool owned_arrays_assigned(MoveFlow* self, FlowState* state, i64 place) {
+        i64 child = self.places.get(place).first_child;
+        while (child >= 0) {
+            FlowPlace info = self.places.get(child);
+            if (info.is_array) {
+                if (!self.is_copy(info.type_id) && !self.assigned(state, child)) { return false; }
+            } else if (info.expanded && !self.owned_arrays_assigned(state, child)) {
+                return false;
+            }
+            child = info.next_sibling;
         }
         return true;
     }

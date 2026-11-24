@@ -933,14 +933,16 @@ class NativeLsp(unittest.TestCase):
                 "i64 fields() {\n Opts a[1];\n a[0].n = 1;\n Opts b[1] = move a;\n return b[0].items.len();\n}\n"
                 "struct Holder { i64 n; Text items[2]; }\n"
                 "i64 holder() {\n Holder h;\n h.n = 1;\n h.items[0] = { .n = 1 };\n Text moved[2] = move h.items;\n return moved[1].len();\n}\n"
-                "i64 main() { return built() + empty() + element() + whole() + full() + fields() + holder(); }\n")
+                "i64 nested() {\n Holder h;\n h.n = 1;\n h.items[0] = { .n = 1 };\n Holder g = move h;\n return g.n;\n}\n"
+                "i64 main() { return built() + empty() + element() + whole() + full() + fields() + holder() + nested(); }\n")
         uri = self.open(text)
         diagnostics = self.session.published(uri, 1)["diagnostics"]
         self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
                          [(12, "use of uninitialized value 'o'"),
                           (17, "use of uninitialized value 'a[1]'"),
                           (22, "use of 'a' before 'a[...]' is initialized"),
-                          (43, "use of 'h.items' before 'h.items[...]' is initialized")])
+                          (43, "use of 'h.items' before 'h.items[...]' is initialized"),
+                          (50, "use of 'h' before 'h.items[...]' is initialized")])
 
     def test_returned_pointee_places_and_unrelated_c_results_are_not_local_escapes(self):
         # A result of the parameter's pointee type (`i64*` from `i64**`) is a
