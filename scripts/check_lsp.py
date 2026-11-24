@@ -859,7 +859,7 @@ class NativeLsp(unittest.TestCase):
                           (9, "type mismatch: expected str, found i32")])
 
     def test_moves_and_initialization_are_checked_at_each_control_flow_boundary(self):
-        # Each function from `branch` to `loop_field` misuses one boundary; `controls`
+        # Each function from `branch` to `read_tail` misuses one boundary; `controls`
         # moves and reinitializes on every path and must stay accepted.
         text = ("trait Drop { void drop(*self); }\n"
                 "struct Tok { i64 id; }\n"
@@ -881,6 +881,7 @@ class NativeLsp(unittest.TestCase):
                 "impl Bag { Pair __index_get(*self, i64 i) { return self.data[i]; } }\n"
                 "i64 element(Bag b) { take(move b[0].left); return peek(&b[0].right); }\n"
                 "i64 loop_field(i64 n) { Pair p; p.right = mk(1); while (n > 0) { take(move p.left); n -= 1; } return 0; }\n"
+                "i64 read_tail(Slot s) { return (match s { Full(move x) : x, Empty : { Tok k = mk(1); defer take(k); k; } }).id; }\n"
                 "i64 controls(bool f) {\n"
                 "    Tok t = mk(1);\n"
                 "    if (f) { take(t); t = mk(2); }\n"
@@ -903,7 +904,8 @@ class NativeLsp(unittest.TestCase):
                           (15, "use of moved value 'x'"),
                           (18, "cannot move an element out of 'Bag' by indexing: the container still owns it; "
                                "use take, pop, swap_remove, or a reference"),
-                          (19, "use of moved value 'p.left'")])
+                          (19, "use of moved value 'p.left'"),
+                          (20, "use of moved value 'k'")])
 
     def test_a_local_callable_is_checked_against_its_own_signature(self):
         # The parameter `f` shadows the function `f`, so its signature rules.

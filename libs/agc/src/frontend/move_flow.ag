@@ -875,7 +875,9 @@ impl MoveFlow {
                 self.walk_stmt(state, self.pool.block_stmts.get((i64)expr.inner0 + i));
                 i += 1;
             }
-            self.walk_expr(state, expr.aux, use);
+            // The block hands its result out before its defers run, whatever
+            // the result is used for, so a defer cannot consume it.
+            self.walk_expr(state, expr.aux, use == FlowUse.Read ? FlowUse.Consume : use);
             self.pop_scope(state);
         } else if (expr.kind == ExprKind.UnwrapOr) {
             // `value ? fallback` consumes an owned value whatever its result
