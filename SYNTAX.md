@@ -1114,7 +1114,7 @@ Accessors that return a copy of an element (`get`, `try_get`, `iter`,
 guard's `get`)
 live in `impl<T: Copy>` blocks. For a non-Copy element, borrow it with
 `get_ref` or `get_mut`, or take it out. Iterating `for x in v` consumes `v`
-and moves each element out.
+and moves each element out; `v` is left empty and stays usable.
 
 ### 8.2 Moves Across Control Flow
 
