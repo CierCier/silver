@@ -1399,6 +1399,14 @@ impl MoveChecker {
         scopes: &mut Vec<Vec<ScopeEntry>>,
         var_types: &mut FxHashMap<String, ast::Type>,
     ) {
+        // A conditional or a match passes the value of the path that ran.
+        if matches!(
+            argument.kind.as_ref(),
+            ast::ExpressionKind::Ternary { .. } | ast::ExpressionKind::Match { .. }
+        ) {
+            self.transfer_place(argument, state, scopes, var_types, false);
+            return;
+        }
         self.reject_locked_move(argument, var_types);
         if self.reject_container_element_move(argument, var_types) {
             self.check_expr(argument, state, scopes, var_types);
@@ -3018,10 +3026,11 @@ impl MoveChecker {
                     for (binding, ty) in self.move_payload_bindings(&arm.pattern, scrutinee.as_ref()) {
                         self.declare(&binding, Some(&ty), &mut arm_state, &mut arm_scopes, var_types);
                     }
-                    self.check_expr(&arm.body, &mut arm_state, &mut arm_scopes, var_types);
-                    self.pop_scope(&mut arm_state, &mut arm_scopes, var_types);
                     // The arm's result is consumed even when the match is a
-                    // statement, so it cannot hold the arm's locked payloads.
+                    // statement: codegen moves it out, as it does a block's
+                    // result, and it cannot hold the arm's locked payloads.
+                    self.transfer_place(&arm.body, &mut arm_state, &mut arm_scopes, var_types, false);
+                    self.pop_scope(&mut arm_state, &mut arm_scopes, var_types);
                     self.reject_locked_move(&arm.body, var_types);
                     self.locked_bindings = saved;
                     if !expression_terminates(&arm.body) {
@@ -3675,6 +3684,18 @@ mod tests {
                  Text out = match b { Full(x): { t; }, Empty: fresh() }; i64 n = t.inspect();",
                 "t",
             ),
+            // A match arm and a conditional argument pass the taken value on.
+            (
+                "Text t; Bin b = Bin.Empty; \
+                 Text out = match b { Full(x): t, Empty: fresh() }; i64 n = t.inspect();",
+                "t",
+            ),
+            ("Text t; bool f = true; eat(f ? t : fresh()); i64 n = t.inspect();", "t"),
+            (
+                "Text t; Bin b = Bin.Empty; eat(match b { Full(x): t, Empty: fresh() }); \
+                 i64 n = t.inspect();",
+                "t",
+            ),
         ] {
             let errors = errors_in(misuse);
             assert!(
@@ -3693,6 +3714,8 @@ mod tests {
             "Text t; while (false) { eat(t); } i64 n = t.inspect();",
             "Text t; { eat(t); return 0; } i64 n = t.inspect();",
             "Text t; bool f = true; Text u = f ? fresh() : fresh(); i64 n = t.inspect();",
+            "Text t; bool f = true; eat(f ? t : fresh());",
+            "Text t; Bin b = Bin.Empty; eat(match b { Full(x): t, Empty: fresh() });",
             "Bin b = Bin.Empty; \
              Text out = match b { Full(x): { Text leaf = fresh(); defer leaf.inspect(); fresh(); }, \
              Empty: fresh() };",
