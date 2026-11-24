@@ -858,6 +858,18 @@ class NativeLsp(unittest.TestCase):
                          [(3, "type mismatch: expected str, found i32"),
                           (9, "type mismatch: expected str, found i32")])
 
+    def test_a_local_callable_is_checked_against_its_own_signature(self):
+        # The parameter `f` shadows the function `f`, so its signature rules.
+        text = ("void f(i64 a, i64 b) { }\n"
+                "i64 run(void(str) f) {\n f(\"ok\");\n f();\n f(true);\n return 0;\n}\n"
+                "void print_it(str s) { }\n"
+                "i64 main() { return run(print_it); }\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
+                         [(3, "argument count mismatch: expected 1, found 0"),
+                          (4, "type mismatch in argument 1: expected str, found bool")])
+
     def test_returned_pointee_places_and_unrelated_c_results_are_not_local_escapes(self):
         # A result of the parameter's pointee type (`i64*` from `i64**`) is a
         # loaded value; any other pointer result may view the argument.
