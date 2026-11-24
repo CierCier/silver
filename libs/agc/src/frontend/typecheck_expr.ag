@@ -1132,9 +1132,6 @@ SyntaxNode* typecheck_overload_by_symbol(TypeTable* types, Interner* names, Synt
     return (SyntaxNode*)0;
 }
 
-/// Resolves a free-function call to the overload whose parameters fit its
-/// arguments. Returns null when none fits or several do; sets `*overloaded`
-/// and `*ambiguous` for the caller to report.
 /// The declaration of the one imported Silver function `name` that takes
 /// `arity` arguments, or null. Its signature decides how each argument is
 /// passed, as for a local function.
@@ -1163,6 +1160,9 @@ SyntaxNode* typecheck_imported_function(SymbolTable* symbols, str name, i64 arit
     return found;
 }
 
+/// Resolves a free-function call to the overload whose parameters fit its
+/// arguments. Returns null when none fits or several do; sets `*overloaded`
+/// and `*ambiguous` for the caller to report.
 SyntaxNode* typecheck_resolve_free_function(AstPool* pool, TypeTable* types,
                                            SymbolTable* symbols, SyntaxNode* root,
                                            TypeEnv* env, str name, AstExpr* call,
@@ -3858,9 +3858,15 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
             bool ambiguous = false;
             bool no_match = false;
             u32 resolved_symbol_id = 0;
-            SyntaxNode* callee_fn = typecheck_resolve_free_function(
-                pool, types, symbols, root, env, callee_name, expr, diagnostics, ok,
-                &overloaded, &ambiguous, &no_match, &resolved_symbol_id);
+            // A local callable shadows every function of the same name, so
+            // its own signature checks the arguments.
+            u32 local_type = types.resolve_subst(env.lookup(callee.aux));
+            bool local_callable = local_type != TYPE_UNKNOWN
+                && types.get(local_type).kind == TypeKind.Function;
+            SyntaxNode* callee_fn = local_callable ? (SyntaxNode*)0
+                : typecheck_resolve_free_function(
+                    pool, types, symbols, root, env, callee_name, expr, diagnostics, ok,
+                    &overloaded, &ambiguous, &no_match, &resolved_symbol_id);
             if (ambiguous || no_match) {
                 String message = ambiguous
                     ? String.from_str("call to overloaded function '")
