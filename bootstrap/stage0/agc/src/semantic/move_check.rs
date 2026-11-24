@@ -2910,9 +2910,13 @@ impl MoveChecker {
                 self.check_expr(else_expr, state, scopes, var_types);
             }
             // `value ? fallback` consumes an owned value; codegen releases it.
+            // The fallback runs, and moves into the result, only when the
+            // value is absent.
             ast::ExpressionKind::UnwrapOr { value, fallback } => {
                 self.transfer_place(value, state, scopes, var_types, false);
-                self.check_expr(fallback, state, scopes, var_types);
+                let mut absent = state.clone();
+                self.transfer_place(fallback, &mut absent, scopes, var_types, false);
+                join_changed(state, &absent);
             }
             ast::ExpressionKind::If {
                 condition,
@@ -3692,6 +3696,11 @@ mod tests {
             ),
             ("Text t; bool f = true; eat(f ? t : fresh()); i64 n = t.inspect();", "t"),
             (
+                "Text t; Optional<Text> none = Optional<Text>.None; Text u = none ? t; \
+                 i64 n = t.inspect();",
+                "t",
+            ),
+            (
                 "Text t; Bin b = Bin.Empty; eat(match b { Full(x): t, Empty: fresh() }); \
                  i64 n = t.inspect();",
                 "t",
@@ -3715,6 +3724,7 @@ mod tests {
             "Text t; { eat(t); return 0; } i64 n = t.inspect();",
             "Text t; bool f = true; Text u = f ? fresh() : fresh(); i64 n = t.inspect();",
             "Text t; bool f = true; eat(f ? t : fresh());",
+            "Text t; Optional<Text> none = Optional<Text>.None; Text u = none ? t;",
             "Text t; Bin b = Bin.Empty; eat(match b { Full(x): t, Empty: fresh() });",
             "Bin b = Bin.Empty; \
              Text out = match b { Full(x): { Text leaf = fresh(); defer leaf.inspect(); fresh(); }, \
