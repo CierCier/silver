@@ -581,6 +581,21 @@ void stress_conditional_and_borrowed_transfers() {
     }
     assert_eq_i32(leaf_drop_count, 2, "a match or fallback result drops once");
     assert_eq_i64(leaf_bytes_freed, 6, "a match or fallback result frees once");
+
+    reset_owner_counters();
+    {
+        Optional<OwnedLeaf> first = Optional<OwnedLeaf>.Some(OwnedLeaf.new(40, 2));
+        Optional<OwnedLeaf> second = first;
+        OwnedLeaf kept = OwnedLeaf.new(41, 3);
+        OwnedLeaf taken = second ? kept;
+        OwnedLeaf named = OwnedLeaf.new(42, 4);
+        Optional<OwnedLeaf> missing = Optional<OwnedLeaf>.None;
+        OwnedLeaf used = missing ? named;
+        assert_eq_i32(taken.first() + used.first(), 82, "a payload and a named fallback were taken");
+        assert_eq_i32(leaf_drop_count, 0, "a moved Optional and its fallbacks are still owned");
+    }
+    assert_eq_i32(leaf_drop_count, 3, "a moved Optional and a named fallback drop once");
+    assert_eq_i64(leaf_bytes_freed, 9, "a moved Optional and a named fallback free once");
 }
 
 void stress_defer_and_break_continue() {

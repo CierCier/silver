@@ -1305,12 +1305,23 @@ void llvm_drop_active_unmoved_payloads(LlvmContext* ctx) {
     llvm_drop_active_unmoved_payloads_above(ctx, 0);
 }
 
+/// Whether the value `src_id` reads is drop-tracked. A local registered for
+/// drop counts even when the type predicate cannot judge its type, as for a
+/// generic enum instance like `Maybe<Buf>`.
+bool llvm_source_needs_tracking(LlvmContext* ctx, u32 src_id) {
+    AstExpr* source = ctx.pool.get_expr(src_id);
+    if (source.kind == ExprKind.Var) {
+        LlvmLocal* local = ctx.find_local(source.aux);
+        if (local != (LlvmLocal*)0 && local.drop_flag != (LLVMOpaqueValue*)0) { return true; }
+    }
+    return llvm_type_needs_tracking(ctx, llvm_expr_type(ctx, src_id));
+}
+
 /// Moves drop ownership from place operand `src_id` to the value built from
 /// it: the source bits stay readable, but only the destination drops.
 void llvm_clear_copy_source(LlvmContext* ctx, u32 src_id) {
     if (src_id == 0) { return; }
-    u32 src_ty = llvm_expr_type(ctx, src_id);
-    if (!llvm_type_needs_tracking(ctx, src_ty)) { return; }
+    if (!llvm_source_needs_tracking(ctx, src_id)) { return; }
     AstExpr* source = ctx.pool.get_expr(src_id);
     if (source.kind == ExprKind.Ternary) {
         llvm_clear_ternary_sources(ctx, src_id, source.inner1, source.aux);

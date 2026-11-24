@@ -4945,7 +4945,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         // through a borrow stay owned by their source: dropping the copy
         // would free the caller's buffer.
         bool scrut_borrowed = llvm_place_reached_through_borrow(ctx, expr.inner0);
-        bool scrut_owned = !scrut_borrowed && llvm_type_needs_tracking(ctx, val_ty_id);
+        bool scrut_owned = !scrut_borrowed && llvm_source_needs_tracking(ctx, expr.inner0);
         if (scrut_owned && llvm_place_indexes_array(ctx, expr.inner0)) {
             ctx.note_unresolved("unwrap-or", "owned array element");
             return (LLVMOpaqueValue*)0;
@@ -4977,6 +4977,8 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             u32 none_fallback_ty = llvm_expr_type(ctx, expr.inner1);
             none_fallback = llvm_compat_value(ctx, none_fallback, none_fallback_ty, result_ty_id);
             LLVMBuildStore(ctx.builder, none_fallback, slot);
+            // The result owns a fallback taken from a place, as it owns the payload.
+            llvm_clear_copy_source(ctx, expr.inner1);
         }
         LLVMBuildBr(ctx.builder, merge_bb);
         LLVMPositionBuilderAtEnd(ctx.builder, merge_bb);
