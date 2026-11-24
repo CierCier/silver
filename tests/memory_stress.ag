@@ -427,6 +427,16 @@ void stress_conditional_and_borrowed_transfers() {
     assert_eq_i64(leaf_bytes_freed, 4, "conditional transfer frees once");
 
     reset_owner_counters();
+    {
+        OwnedLeaf a = OwnedLeaf.new(20, 4);
+        bool pick = leaf_drop_count != 0;
+        OwnedLeaf b = pick ? a : OwnedLeaf.new(19, 2);
+        assert_eq_i32(b.first(), 19, "conditional built the other leaf");
+    }
+    assert_eq_i32(leaf_drop_count, 2, "both leaves drop once when the other arm runs");
+    assert_eq_i64(leaf_bytes_freed, 6, "both leaves free once when the other arm runs");
+
+    reset_owner_counters();
     assert_eq_i32(defer_sees_outer_leaf(), 22, "inner leaf returned its id");
     assert_eq_i32(deferred_leaf_id, 21, "defer read the leaf in its own scope");
     assert_eq_i32(leaf_drop_count, 2, "both shadowing leaves dropped once");
@@ -441,6 +451,17 @@ void stress_conditional_and_borrowed_transfers() {
     }
     assert_eq_i32(leaf_drop_count, 2, "vec viewed as a slice drops its leaves once");
     assert_eq_i64(leaf_bytes_freed, 5, "vec viewed as a slice frees once");
+
+    reset_owner_counters();
+    {
+        OwnedLeaf a = OwnedLeaf.new(29, 4);
+        bool outer = leaf_drop_count == 0;
+        bool inner = leaf_drop_count != 0;
+        OwnedLeaf b = outer ? (inner ? a : OwnedLeaf.new(30, 2)) : OwnedLeaf.new(31, 1);
+        assert_eq_i32(b.first(), 30, "nested conditional built the inner leaf");
+    }
+    assert_eq_i32(leaf_drop_count, 2, "nested conditional drops each leaf once");
+    assert_eq_i64(leaf_bytes_freed, 6, "nested conditional frees each leaf once");
 
     reset_owner_counters();
     {

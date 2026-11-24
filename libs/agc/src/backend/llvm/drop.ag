@@ -1298,7 +1298,8 @@ void llvm_clear_ternary_sources(LlvmContext* ctx, u32 ternary_id, u32 then_id, u
     i64 i = ctx.ternary_conditions.len() - 1;
     while (i >= 0 && ctx.ternary_conditions.get(i).expr_id != ternary_id) { i -= 1; }
     if (i < 0 || ctx.is_terminated()) { return; }
-    LLVMOpaqueValue* condition = ctx.ternary_conditions.get(i).value;
+    LLVMOpaqueValue* condition = LLVMBuildLoad2(ctx.builder, LLVMInt1TypeInContext(ctx.ctx),
+        ctx.ternary_conditions.get(i).slot, "tern_release_cond");
     LLVMOpaqueBasicBlock* then_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "tern_release_then");
     LLVMOpaqueBasicBlock* else_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "tern_release_else");
     LLVMOpaqueBasicBlock* done_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "tern_release_done");

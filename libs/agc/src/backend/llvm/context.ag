@@ -39,11 +39,13 @@ struct LlvmDefer {
     i64 locals_len;
 }
 
-/// The condition a ternary expression branched on, so a consumer of its
-/// result can release the source of the arm that ran.
+/// The entry-block slot holding the condition a ternary expression branched
+/// on, so a consumer of its result can release the source of the arm that
+/// ran. A slot stays valid after the join, even for a nested ternary whose
+/// condition only one outer arm computed.
 struct LlvmTernaryCondition {
     u32 expr_id;
-    LLVMOpaqueValue* value;
+    LLVMOpaqueValue* slot;
 }
 
 /// Locals that name lookup skips while a defer is emitted: those declared
