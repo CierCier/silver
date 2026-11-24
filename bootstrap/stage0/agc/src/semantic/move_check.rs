@@ -1315,7 +1315,8 @@ impl MoveChecker {
 
     /// A borrow passed to a call lives until the call returns, so it must
     /// still be valid after every argument has been evaluated:
-    /// `f(&t, move t)` is rejected.
+    /// `f(&t, move t)` and `f(&v[next()], move v)` are rejected. A computed
+    /// index is not evaluated again; its plain owner is checked instead.
     fn recheck_borrowed_arguments(
         &mut self,
         arguments: &[ast::Expression],
@@ -1324,10 +1325,13 @@ impl MoveChecker {
         var_types: &mut FxHashMap<String, ast::Type>,
     ) {
         for argument in arguments {
-            if let ast::ExpressionKind::Reference { expression, .. } = argument.kind.as_ref()
-                && is_plain_place(expression)
-            {
+            let ast::ExpressionKind::Reference { expression, .. } = argument.kind.as_ref() else {
+                continue;
+            };
+            if is_plain_place(expression) {
                 self.check_expr(argument, state, scopes, var_types);
+            } else if let Some(owner) = plain_prefix(expression) {
+                self.check_expr(owner, state, scopes, var_types);
             }
         }
     }
@@ -3155,6 +3159,18 @@ impl MoveChecker {
     }
 }
 
+/// The longest plain place that `expr` projects from: `v` in `v[next()]`.
+fn plain_prefix(expr: &ast::Expression) -> Option<&ast::Expression> {
+    if is_plain_place(expr) {
+        return Some(expr);
+    }
+    match expr.kind.as_ref() {
+        ast::ExpressionKind::FieldAccess { object, .. }
+        | ast::ExpressionKind::Index { object, .. } => plain_prefix(object),
+        _ => None,
+    }
+}
+
 /// A place whose re-evaluation has no effects: a local, its fields, and
 /// elements at a literal or local index. A borrow of such a place can be
 /// checked again without repeating a move its operands made.
@@ -3229,7 +3245,10 @@ mod tests {
         struct Sink { i64 n; }\n\
         impl Sink { void take(&self, Text text) {} }\n\
         struct Slot<T> { T value; }\n\
-        impl<T: Copy> Slot<T> { T get(&self) { return self.value; } }\n";
+        impl<T: Copy> Slot<T> { T get(&self) { return self.value; } }\n\
+        struct Shelf { Text items[2]; }\n\
+        i64 pick() { return 0; }\n\
+        void keep(&Text seen, Shelf shelf) {}\n";
 
     /// Messages from the type checker and from the move checker, kept apart
     /// because each reports some moves out of a lock.
@@ -3405,7 +3424,14 @@ mod tests {
                 "{misuse}: {errors:?}"
             );
         }
+        // The computed index is not evaluated twice, but its owner is checked.
+        let errors = errors_in("Shelf s; keep(&s.items[pick()], move s);");
+        assert!(
+            errors.moves.iter().any(|message| message.contains("moved value 's")),
+            "{errors:?}"
+        );
         for control in [
+            "Shelf s; Shelf other; keep(&s.items[pick()], move other);",
             "Text t; while (false) { eat(t); } i64 n = t.inspect();",
             "Text t; { eat(t); return 0; } i64 n = t.inspect();",
             "Text t; bool f = true; Text u = f ? fresh() : fresh(); i64 n = t.inspect();",
