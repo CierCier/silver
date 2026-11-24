@@ -923,7 +923,8 @@ class NativeLsp(unittest.TestCase):
     def test_an_unassigned_field_of_a_value_built_field_by_field_reads_as_zero(self):
         # Array elements are not zero-filled: a whole-array read needs each one,
         # though an element built field by field counts, and so does an array
-        # field of a struct built field by field.
+        # field of a struct built field by field. An incomplete owned array
+        # blocks a read of the value that holds it, not of a sibling field.
         text = ("trait Drop { void drop(*self); }\nstruct Text { i64 n; }\n"
                 "impl Text { i64 len(&self) { return self.n; } }\nimpl Drop for Text { void drop(*self) { } }\n"
                 "struct Opts { i64 n; Text items; }\n"
@@ -933,10 +934,14 @@ class NativeLsp(unittest.TestCase):
                 "i64 whole() {\n Text a[2];\n a[0] = { .n = 1 };\n Text b[2] = move a;\n return b[0].len();\n}\n"
                 "i64 full() {\n Text a[2];\n a[0] = { .n = 1 };\n a[1] = { .n = 2 };\n Text b[2] = move a;\n return b[1].len();\n}\n"
                 "i64 fields() {\n Opts a[1];\n a[0].n = 1;\n Opts b[1] = move a;\n return b[0].items.len();\n}\n"
-                "struct Holder { i64 n; Text items[2]; }\n"
+                "struct Holder { i64 n; Text spare; Text items[2]; }\n"
                 "i64 holder() {\n Holder h;\n h.n = 1;\n h.items[0] = { .n = 1 };\n Text moved[2] = move h.items;\n return moved[1].len();\n}\n"
                 "i64 nested() {\n Holder h;\n h.n = 1;\n h.items[0] = { .n = 1 };\n Holder g = move h;\n return g.n;\n}\n"
-                "i64 main() { return built() + empty() + element() + whole() + full() + fields() + holder() + nested(); }\n")
+                "i64 sibling() {\n Holder h;\n h.n = 1;\n return h.spare.len();\n}\n"
+                "struct Shelf { i64 n; Holder inner; }\n"
+                "i64 inner() {\n Shelf s;\n s.n = 1;\n Holder h = move s.inner;\n return h.n;\n}\n"
+                "i64 main() { return built() + empty() + element() + whole() + full() + fields() + holder() + nested()\n"
+                "  + sibling() + inner(); }\n")
         uri = self.open(text)
         diagnostics = self.session.published(uri, 1)["diagnostics"]
         self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
@@ -944,7 +949,8 @@ class NativeLsp(unittest.TestCase):
                           (17, "use of uninitialized value 'a[1]'"),
                           (22, "use of 'a' before 'a[...]' is initialized"),
                           (43, "use of 'h.items' before 'h.items[...]' is initialized"),
-                          (50, "use of 'h' before 'h.items[...]' is initialized")])
+                          (50, "use of 'h' before 'h.items[...]' is initialized"),
+                          (62, "use of uninitialized value 's.inner'")])
 
     def test_returned_pointee_places_and_unrelated_c_results_are_not_local_escapes(self):
         # A result of the parameter's pointee type (`i64*` from `i64**`) is a

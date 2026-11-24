@@ -226,6 +226,52 @@ impl MoveFlow {
         return index;
     }
 
+    /// The index of the struct named `name_id` in `struct_properties` when
+    /// all its field names are known, or -1.
+    i64 struct_definition(MoveFlow* self, u32 name_id) {
+        i64 index = 0;
+        while (index < self.types.struct_properties.len()) {
+            TypeStructProperties* definition = self.types.struct_properties.get_ptr(index);
+            if (definition.name_id == name_id) {
+                return definition.field_count == definition.field_name_count ? index : -1;
+            }
+            index += 1;
+        }
+        return -1;
+    }
+
+    /// Whether a value of `type_id` holds an array of owned elements, itself
+    /// or in a field at any depth.
+    bool holds_owned_array(MoveFlow* self, u32 type_id, i64 depth) {
+        if (depth >= MAX_FLOW_PLACE_DEPTH) { return false; }
+        u32 resolved = self.types.resolve_subst(type_id);
+        TypeEntry entry = *self.types.get(resolved);
+        if (entry.kind == TypeKind.Array) { return !self.is_copy(resolved); }
+        if (entry.kind == TypeKind.Tuple) {
+            i64 index = 0;
+            while (index < entry.count) {
+                if (self.holds_owned_array(self.types.type_args.get(entry.inner + (u32)index), depth + 1)) {
+                    return true;
+                }
+                index += 1;
+            }
+            return false;
+        }
+        if (entry.kind != TypeKind.Named || self.is_copy(resolved)) { return false; }
+        i64 definition_index = self.struct_definition(entry.name_id);
+        if (definition_index < 0) { return false; }
+        TypeStructProperties definition = self.types.struct_properties.get(definition_index);
+        u32 offset = 0;
+        while (offset < definition.field_count) {
+            str field = self.types.names.get(
+                self.types.struct_field_names.get(definition.field_name_start + offset));
+            u32 field_type = typecheck_struct_field_type(self.types, self.root, resolved, field);
+            if (field_type != TYPE_UNKNOWN && self.holds_owned_array(field_type, depth + 1)) { return true; }
+            offset += 1;
+        }
+        return false;
+    }
+
     /// Creates the field places of a struct or tuple place. Returns false when
     /// its fields are unknown, so the place stays a single unit.
     bool expand(MoveFlow* self, i64 place) {
@@ -248,14 +294,9 @@ impl MoveFlow {
             return true;
         }
         if (entry.kind != TypeKind.Named) { return false; }
-        i64 definition_index = 0;
-        while (definition_index < self.types.struct_properties.len()
-            && self.types.struct_properties.get_ptr(definition_index).name_id != entry.name_id) {
-            definition_index += 1;
-        }
-        if (definition_index == self.types.struct_properties.len()) { return false; }
+        i64 definition_index = self.struct_definition(entry.name_id);
+        if (definition_index < 0) { return false; }
         TypeStructProperties definition = self.types.struct_properties.get(definition_index);
-        if (definition.field_count != definition.field_name_count) { return false; }
         u32 offset = 0;
         while (offset < definition.field_count) {
             str field = self.types.names.get(
@@ -569,7 +610,7 @@ impl MoveFlow {
         if (!info.expanded) { return self.init_at(state, place) == FlowInit.Init; }
         if (!info.is_array) {
             return self.summary(state, place) != FlowInit.Empty
-                && self.owned_arrays_assigned(state, place);
+                && self.owned_array_gap(state, place) < 0;
         }
         if (self.own_counts(place) && self.init_at(state, place) != FlowInit.Init) { return false; }
         i64 child = info.first_child;
@@ -580,44 +621,67 @@ impl MoveFlow {
         return true;
     }
 
-    /// Whether each array of owned elements among `place`'s fields, at any
-    /// depth, counts as assigned: a struct built field by field zero-fills
-    /// its other fields, but not such an array.
-    bool owned_arrays_assigned(MoveFlow* self, FlowState* state, i64 place) {
-        i64 child = self.places.get(place).first_child;
+    /// The first unassigned part of an array of owned elements among
+    /// `place`'s fields, at any depth, or -1. A struct built field by field
+    /// zero-fills its other fields, but not such an array. A field never
+    /// expanded into places is a gap when its type holds such an array.
+    i64 owned_array_gap(MoveFlow* self, FlowState* state, i64 place) {
+        FlowPlace owner = self.places.get(place);
+        if (!owner.expanded) {
+            bool missing = self.init_at(state, place) != FlowInit.Init
+                && self.holds_owned_array(owner.type_id, owner.depth);
+            return missing ? place : -1;
+        }
+        i64 child = owner.first_child;
         while (child >= 0) {
             FlowPlace info = self.places.get(child);
-            if (info.is_array) {
-                if (!self.is_copy(info.type_id) && !self.assigned(state, child)) { return false; }
-            } else if (info.expanded && !self.owned_arrays_assigned(state, child)) {
-                return false;
+            i64 gap = -1;
+            if (!info.is_array) {
+                gap = self.owned_array_gap(state, child);
+            } else if (!self.is_copy(info.type_id) && !self.assigned(state, child)) {
+                gap = self.first_gap(state, child, false);
+                if (gap < 0) { gap = child; }
             }
+            if (gap >= 0) { return gap; }
             child = info.next_sibling;
         }
-        return true;
+        return -1;
     }
 
-    /// Whether `place` or a struct value that contains it counts as assigned.
-    /// An unassigned field of a value built field by field keeps its zero
-    /// value; an array of owned elements and its elements are not zero-filled.
-    bool assigned_in_struct(MoveFlow* self, FlowState* state, i64 place) {
+    /// Whether `place` keeps the zero value of declared storage: it, or a
+    /// struct value that holds it with no array in between, has some field
+    /// assigned. An array of owned elements is never zero-filled.
+    bool zero_filled(MoveFlow* self, FlowState* state, i64 place) {
+        FlowPlace info = self.places.get(place);
+        if (info.is_array && !self.is_copy(info.type_id)) { return false; }
         while (place >= 0) {
-            if (self.assigned(state, place)) { return true; }
-            FlowPlace info = self.places.get(place);
-            if (info.is_array && !self.is_copy(info.type_id)) { return false; }
+            info = self.places.get(place);
+            if (!info.is_array && info.expanded && self.summary(state, place) != FlowInit.Empty) {
+                return true;
+            }
             place = info.parent;
             if (place >= 0 && self.places.get(place).is_array) { return false; }
         }
         return false;
     }
 
+    /// Whether `place` counts as assigned, directly or by zero-fill. Only
+    /// owned arrays inside `place` itself must be complete; an incomplete
+    /// one elsewhere in the struct does not block this read.
+    bool assigned_in_struct(MoveFlow* self, FlowState* state, i64 place) {
+        if (self.assigned(state, place)) { return true; }
+        return self.zero_filled(state, place) && self.owned_array_gap(state, place) < 0;
+    }
+
     /// Requires `place` to be usable: nothing in it may be moved out on any
-    /// path, and it must have been assigned.
+    /// path, and it must have been assigned. A zero-filled value is reported
+    /// by the owned array it is missing.
     void require(MoveFlow* self, FlowState* state, i64 place, Span span) {
         if (!state.reachable) { return; }
         i64 gap = self.first_gap(state, place, true);
         if (gap < 0 && !self.assigned_in_struct(state, place)) {
-            gap = self.first_gap(state, place, false);
+            if (self.zero_filled(state, place)) { gap = self.owned_array_gap(state, place); }
+            if (gap < 0) { gap = self.first_gap(state, place, false); }
         }
         if (gap >= 0) { self.report_gap(state, place, gap, span); }
     }
