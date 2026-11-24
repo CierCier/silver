@@ -404,7 +404,7 @@ void artifact_write_strings(String* out, Vec<String>* values) {
     artifact_write_u32(out, (u32)values.len());
     i64 i = 0;
     while (i < values.len()) {
-        artifact_write_string(out, values.get(i).to_str());
+        artifact_write_string(out, values.get_ref(i).to_str());
         i += 1;
     }
 }

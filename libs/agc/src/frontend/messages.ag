@@ -246,6 +246,17 @@ String generic_method_bound_failed(str type_name, str trait_name) {
     return move message;
 }
 
+/// Diagnostic text: "'{}' is not Copy, so a copy of a borrowed one would
+/// be dropped twice; borrow it with a reference method such as get_ref".
+String bound_requires_copy(str type_name) {
+    return @format("'{}' is not Copy, so a copy of a borrowed one would be dropped twice; borrow it with a reference method such as get_ref", type_name);
+}
+
+/// Diagnostic text: "'{}' is not available on '{}': {}".
+String method_bound_not_met(str method_name, str owner, str reason) {
+    return @format("'{}' is not available on '{}': {}", method_name, owner, reason);
+}
+
 /// Diagnostic text: "cannot move '{}' out of '{}' because it implements
 /// Drop". Returns an owned string.
 String cannot_move_field_out_of_drop_type(str place, str owner) {

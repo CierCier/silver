@@ -1281,7 +1281,7 @@ impl TypeChecker {
 
                     if let Some(init) = &let_stmt.initializer {
                         let init_type = self.check_expr(init, Some(&declared));
-                        if !self.lambdas.frames.is_empty() && !self.lambda_copy_type(&init_type) {
+                        if !self.lambdas.frames.is_empty() && !self.type_is_copy(&init_type) {
                             self.consume_capture(init);
                         }
                         if !self.is_assignable(&declared, &init_type)
@@ -1298,7 +1298,7 @@ impl TypeChecker {
                         return;
                     };
                     let inferred = self.check_expr(init, None);
-                    if !self.lambdas.frames.is_empty() && !self.lambda_copy_type(&inferred) {
+                    if !self.lambdas.frames.is_empty() && !self.type_is_copy(&inferred) {
                         self.consume_capture(init);
                     }
                     if Self::is_void_like(&inferred) {
@@ -1323,7 +1323,7 @@ impl TypeChecker {
                     let expected = self.current_return.clone();
                     let found = value.as_ref().map(|value| {
                         let found = self.check_expr(value, expected.as_ref());
-                        if !self.lambda_copy_type(&found) {
+                        if !self.type_is_copy(&found) {
                             self.consume_capture(value);
                         }
                         found
@@ -1902,7 +1902,7 @@ impl TypeChecker {
                 ast::BinaryOperator::Assign => {
                     let left_ty = self.check_expr(left, None);
                     let right_ty = self.check_expr(right, None);
-                    if !self.lambdas.frames.is_empty() && !self.lambda_copy_type(&right_ty) {
+                    if !self.lambdas.frames.is_empty() && !self.type_is_copy(&right_ty) {
                         self.consume_capture(right);
                     }
                     if is_mutex_type(&left_ty) && !is_mutex_type(&right_ty) && right_ty != Type::Unknown {
@@ -5347,7 +5347,10 @@ impl TypeChecker {
                     .map(|arg| Type::from_ast(arg).substitute(mapping))
                     .collect::<Vec<_>>();
                 let has_impl = self.has_trait_impl(&trait_name, &bounded, &args, 0);
-                if !has_impl {
+                if !has_impl && trait_name == crate::traits::BUILTIN_COPY && args.is_empty() {
+                    self.error(msg::bound_requires_copy(&bounded), span);
+                    ok = false;
+                } else if !has_impl {
                     self.error(
                         format!("missing impl for bound '{}' on {:?}", trait_name, bounded),
                         span,
@@ -6210,6 +6213,9 @@ impl TypeChecker {
     fn has_trait_impl(&self, trait_name: &str, ty: &Type, args: &[Type], depth: usize) -> bool {
         if depth >= MAX_TYPE_CHECK_DEPTH {
             return false;
+        }
+        if trait_name == crate::traits::BUILTIN_COPY && args.is_empty() {
+            return self.type_is_copy(ty);
         }
         self.source_trait_impls
             .get(trait_name)

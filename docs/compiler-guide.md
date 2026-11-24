@@ -528,6 +528,13 @@ whole to another generic function. A call to a method
 with its own type parameters fails when no declaration takes that many
 arguments, or when monomorphization cannot infer the method's type arguments.
 
+Both stages check the bounds of a method's inherent impl at each call. The
+built-in bound `Copy` is satisfied by the `TypeProperties` Copy rule and has
+no impl. Stage1 skips the check while the receiver's type arguments are still
+open, as in a generic body, and checks again on each concrete instantiation.
+Stage1 also resolves a call to an imported free function against the retained
+declaration, so the call's arguments move or borrow as the signature says.
+
 ## 7. Diagnostics
 
 Compiler diagnostic messages are rendered using the `diagnostics::render` utility.

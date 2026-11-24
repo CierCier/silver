@@ -163,12 +163,6 @@ impl<T> Guard<T> {
         return &self.owner.value;
     }
 
-    /// Copy of the guarded value.  For owned element types prefer get_ptr —
-    /// a copy shares resources with the guarded value (std-wide caveat).
-    T get(&self) {
-        return self.owner.value;
-    }
-
     /// Overwrite the guarded value.
     void set(&mut self, T value) {
         self.owner.value = move value;
@@ -177,6 +171,15 @@ impl<T> Guard<T> {
     /// Pointer to the underlying RawMutex.
     RawMutex* raw_mutex(&self) {
         return &self.owner.mu;
+    }
+}
+
+/// A copy of an owned guarded value would be dropped twice, so `get` needs
+/// a Copy value type; use `get_ptr` otherwise.
+impl<T: Copy> Guard<T> {
+    /// Copy of the guarded value.
+    T get(&self) {
+        return self.owner.value;
     }
 }
 
@@ -435,7 +438,11 @@ impl<T> ReadGuard<T> {
     T* get_ptr(&self) {
         return &self.owner.value;
     }
+}
 
+/// A copy of an owned guarded value would be dropped twice, so `get` needs
+/// a Copy value type; use `get_ptr` otherwise.
+impl<T: Copy> ReadGuard<T> {
     /// Copy of the guarded value.
     T get(&self) {
         return self.owner.value;
@@ -459,14 +466,18 @@ impl<T> WriteGuard<T> {
         return &self.owner.value;
     }
 
-    /// Copy of the guarded value.
-    T get(&self) {
-        return self.owner.value;
-    }
-
     /// Overwrite the guarded value.
     void set(&mut self, T value) {
         self.owner.value = move value;
+    }
+}
+
+/// A copy of an owned guarded value would be dropped twice, so `get` needs
+/// a Copy value type; use `get_ptr` otherwise.
+impl<T: Copy> WriteGuard<T> {
+    /// Copy of the guarded value.
+    T get(&self) {
+        return self.owner.value;
     }
 }
 

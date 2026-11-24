@@ -2998,7 +2998,9 @@ mod tests {
         impl<T> Guard<T> { T* get_ptr(&self) { return &self.owner.value; } }\n\
         enum Bin { Full(Text); Empty; }\n\
         struct Sink { i64 n; }\n\
-        impl Sink { void take(&self, Text text) {} }\n";
+        impl Sink { void take(&self, Text text) {} }\n\
+        struct Slot<T> { T value; }\n\
+        impl<T: Copy> Slot<T> { T get(&self) { return self.value; } }\n";
 
     /// Messages from the type checker and from the move checker, kept apart
     /// because each reports some moves out of a lock.
@@ -3153,5 +3155,16 @@ mod tests {
                 "{control}: {errors:?}"
             );
         }
+    }
+
+    /// A copying accessor behind `T: Copy` serves Copy payloads only, since a
+    /// copy of an owned payload would be dropped twice.
+    #[test]
+    fn a_copy_bound_rejects_owned_payloads() {
+        let errors = errors_in("Slot<i64> n; n.value = 1; i64 v = n.get();");
+        assert!(errors.types.is_empty() && errors.moves.is_empty(), "{errors:?}");
+        let errors = errors_in("Slot<Text> t; t.value = fresh(); Text v = t.get();");
+        let rejected = crate::diagnostics::messages::bound_requires_copy(&"Text");
+        assert!(errors.types.iter().any(|message| message.contains(&rejected)), "{errors:?}");
     }
 }

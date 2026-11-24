@@ -167,12 +167,6 @@ impl<T> Slice<T> {
         return &self.data[index];
     }
 
-    /// Returns the element at index, aborting if out of bounds.
-    T get(&self, i64 index) {
-        if (index < 0 || index >= self.len) { abort(); }
-        return self.data[index];
-    }
-
     /// Reverse slice in-place.
     void reverse(&mut self) {
         if (self.data == (T*)0 || self.len <= 1) { return; }
@@ -186,6 +180,17 @@ impl<T> Slice<T> {
             i = i + 1;
             j = j - 1;
         }
+    }
+
+}
+
+/// Accessors that return copies of elements. A copy of an owned element
+/// would be dropped twice, so these need a Copy element type.
+impl<T: Copy> Slice<T> {
+    /// Returns the element at index, aborting if out of bounds.
+    T get(&self, i64 index) {
+        if (index < 0 || index >= self.len) { abort(); }
+        return self.data[index];
     }
 
     /// Returns a reverse iterator over the slice.
@@ -263,7 +268,7 @@ impl<T> Iterator for SliceIter<T> {
     }
 }
 
-impl<T> IntoIterator for Slice<T> {
+impl<T: Copy> IntoIterator for Slice<T> {
     type Item = T;
     type IntoIter = SliceIter<T>;
     SliceIter<T> into_iter(self) {

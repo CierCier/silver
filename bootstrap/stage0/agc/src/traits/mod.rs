@@ -350,7 +350,11 @@ impl TraitRegistry {
                         continue;
                     }
                     let trait_name = trait_name_from_ref(&bound.trait_ref);
-                    if trait_name.is_empty() || bound.trait_ref.path.len() > 1 {
+                    // The type checker judges the built-in `Copy` bound.
+                    if trait_name.is_empty()
+                        || trait_name == BUILTIN_COPY
+                        || bound.trait_ref.path.len() > 1
+                    {
                         continue;
                     }
                     if !self.has_impl(&trait_name, &type_key(arg_type), program) {
@@ -592,6 +596,10 @@ fn trait_name_from_ref(trait_ref: &ast::TraitRef) -> String {
         .unwrap_or_default()
 }
 
+/// The bound satisfied exactly by implicitly copied types. It has no
+/// declaration; the type checker decides it from the type's ownership.
+pub const BUILTIN_COPY: &str = "Copy";
+
 fn validate_bound_trait(
     trait_names: &HashSet<String>,
     bound: &ast::TraitBound,
@@ -612,7 +620,7 @@ fn validate_bound_trait(
         });
         return;
     }
-    if !trait_names.contains(&name) {
+    if !trait_names.contains(&name) && name != BUILTIN_COPY {
         errors.push(TraitError {
             message: format!("unknown trait '{}'", trait_path_key(&bound.trait_ref.path)),
             span: bound.trait_ref.span,
@@ -681,6 +689,7 @@ fn validate_impl_bounds(
                 if concrete {
                     let trait_name = trait_name_from_ref(&bound.trait_ref);
                     if !trait_name.is_empty()
+                        && trait_name != BUILTIN_COPY
                         && !registry.has_impl(&trait_name, &type_key(&bounded), program)
                     {
                         errors.push(TraitError {

@@ -778,7 +778,10 @@ void mono_check_bound_list(SyntaxNode* root, TypeTable* types, SyntaxNode* curso
                     String trait_text = mono_bound_trait_text(&cursor, end, &outer_closed);
                     bool implemented = mono_type_implements_trait(root, types, parameter,
                         trait_text.to_str(), depth + 1);
-                    if (!implemented) {
+                    if (!implemented && strcmp(trait_text.to_str(), "Copy") == 0) {
+                        failure.push_str(bound_requires_copy(
+                            types.type_name(types.resolve_subst(parameter))).to_str());
+                    } else if (!implemented) {
                         failure.push_str(generic_method_bound_failed(types.type_name(parameter), trait_text.to_str()).to_str());
                     }
                     if (!implemented || outer_closed) { return; }
@@ -910,25 +913,97 @@ bool mono_bind_owner_arguments(TypeTable* types, SyntaxNode* target, u32 owner_t
     return matched;
 }
 
-/// The implementation's own parameter bounds must hold for the bound types.
-bool mono_impl_bounds_hold(SyntaxNode* root, TypeTable* types, SyntaxNode* item,
-                           SyntaxNode* target, u32 depth) {
+/// Writes why the implementation's own parameter bounds fail for the bound
+/// types; writes nothing when they hold.
+void mono_impl_bound_failure(SyntaxNode* root, TypeTable* types, SyntaxNode* item,
+                             SyntaxNode* target, u32 depth, String* failure) {
     SyntaxNode* generics = mono_impl_generics(item);
-    String failure = String.new();
     if (generics != (SyntaxNode*)0 && generics.token_kind == TokenKind.Less) {
-        mono_check_bound_list(root, types, generics.next_sibling, target, &failure, depth);
+        mono_check_bound_list(root, types, generics.next_sibling, target, failure, depth);
     }
     SyntaxNode* scan = target.next_sibling;
-    while (scan != (SyntaxNode*)0 && scan.kind != NodeKind.Block) {
+    while (failure.len() == 0 && scan != (SyntaxNode*)0 && scan.kind != NodeKind.Block) {
         if (strcmp(scan.text, "where") == 0) {
-            mono_check_bound_list(root, types, scan.next_sibling, (SyntaxNode*)0, &failure, depth);
+            mono_check_bound_list(root, types, scan.next_sibling, (SyntaxNode*)0, failure, depth);
             break;
         }
         scan = scan.next_sibling;
     }
+}
+
+/// The implementation's own parameter bounds must hold for the bound types.
+bool mono_impl_bounds_hold(SyntaxNode* root, TypeTable* types, SyntaxNode* item,
+                           SyntaxNode* target, u32 depth) {
+    String failure = String.new();
+    mono_impl_bound_failure(root, types, item, target, depth, &failure);
     bool holds = failure.len() == 0;
     failure.drop();
     return holds;
+}
+
+/// Returns true when some type in `type_ids` still contains a type
+/// parameter: a generic body's bounds are judged where it is instantiated.
+bool mono_any_open(SyntaxNode* root, TypeTable* types, Vec<u32>* type_ids) {
+    i64 i = 0;
+    while (i < type_ids.len()) {
+        if (mono_type_is_open(root, types, type_ids.get(i), 0)) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+/// Returns true when `type_id` contains a type parameter. Inside a generic
+/// body a parameter is a bare name that no struct or enum declares.
+bool mono_type_is_open(SyntaxNode* root, TypeTable* types, u32 type_id, i64 depth) {
+    u32 resolved = types.resolve_subst(type_id);
+    if (depth > 16 || (i64)resolved >= types.types.len()) { return false; }
+    TypeEntry* entry = types.get(resolved);
+    if (entry.kind == TypeKind.TypeParam) { return true; }
+    if (entry.kind == TypeKind.Named && entry.count == 0) {
+        str name = types.names.get(entry.name_id);
+        return find_item_by_name(root, NodeKind.Struct, name) == (SyntaxNode*)0
+            && find_enum_item(root, name) == (SyntaxNode*)0;
+    }
+    if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference
+        || entry.kind == TypeKind.Array || entry.kind == TypeKind.Slice) {
+        return mono_type_is_open(root, types, entry.inner, depth + 1);
+    }
+    i64 count = entry.kind == TypeKind.Named || entry.kind == TypeKind.Tuple ? entry.count : 0;
+    i64 i = 0;
+    while (i < count) {
+        if (mono_type_is_open(root, types, types.type_args.get(entry.inner + (u32)i), depth + 1)) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+/// Writes why implementation `item`'s parameter bounds fail once its
+/// parameters are bound from `owner_type`'s type arguments. Writes nothing
+/// when they hold or when the arguments do not bind the parameters.
+void mono_owner_bound_failure(SyntaxNode* root, TypeTable* types, SyntaxNode* item,
+                              u32 owner_type, String* failure) {
+    SyntaxNode* target = impl_target_identifier(item);
+    if (target == (SyntaxNode*)0) { return; }
+    Vec<u32> declared = Vec<u32>.new();
+    mono_impl_type_parameters(item, types, &declared);
+    Vec<u32> names = Vec<u32>.new();
+    Vec<u32> values = Vec<u32>.new();
+    if (declared.len() > 0
+        && mono_bind_owner_arguments(types, target, owner_type, &declared, &names, &values)
+        && !mono_any_open(root, types, &values)) {
+        i64 pushed = 0;
+        while (pushed < names.len()) {
+            types.push_subst(names.get(pushed), values.get(pushed));
+            pushed += 1;
+        }
+        mono_impl_bound_failure(root, types, item, target, 0, failure);
+        types.pop_subst(pushed);
+    }
+    names.drop();
+    values.drop();
+    declared.drop();
 }
 
 /// Decide whether one implementation satisfies the requested trait for the
@@ -984,6 +1059,10 @@ bool mono_impl_matches(SyntaxNode* root, TypeTable* types, SyntaxNode* item,
 /// Recursion through impl bounds stops at depth 64.
 bool mono_type_implements_trait(SyntaxNode* root, TypeTable* types, u32 type_id, str trait_name, u32 depth) {
     if (depth > 64) { return false; }
+    // `Copy` is built in: it holds exactly for implicitly copied types.
+    if (strcmp(trait_name, "Copy") == 0) {
+        return typecheck_type_is_copy(root, types, type_id);
+    }
     u32 owner_type = types.resolve_subst(type_id);
     u32 required_trait = types.parse_type_name(trait_name);
     u32 required_name = types.get(required_trait).name_id;

@@ -246,6 +246,12 @@ pub fn single_binding_let_only() -> &'static str {
 // Move & Escape Checker Messages
 // =========================================================================
 
+pub fn bound_requires_copy(ty: &impl std::fmt::Display) -> String {
+    format!(
+        "'{ty}' is not Copy, so a copy of a borrowed one would be dropped twice; borrow it with a reference method such as get_ref"
+    )
+}
+
 pub fn cannot_move_out_of_indexed_element(container: &str) -> String {
     format!(
         "cannot move an element out of '{container}' by indexing: the container still owns it; use take, pop, swap_remove, or a reference"

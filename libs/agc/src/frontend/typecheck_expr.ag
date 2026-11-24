@@ -2544,6 +2544,24 @@ void typecheck_method_call_target(AstPool* pool, TypeTable* types, SyntaxNode* r
                                        args_start, true, &ret_start, &name)
                 != (SyntaxNode*)0);
     types.pop_subst(1);
+    // A method of a bounded implementation, such as `get` in
+    // `impl<T: Copy> Vec<T>`, exists only where the bounds hold.
+    SyntaxNode* declaring = name == (SyntaxNode*)0 || name.parent == (SyntaxNode*)0
+        ? (SyntaxNode*)0 : name.parent.parent;
+    if (selected && declaring != (SyntaxNode*)0 && declaring.kind == NodeKind.Impl) {
+        declaring = typecheck_receiver_impl(root, types, receiver_type, owner_name,
+                                            method_name, declaring);
+        String failure = String.new();
+        mono_owner_bound_failure(root, types, declaring, owner_type, &failure);
+        bool bounds_hold = failure.len() == 0;
+        if (!bounds_hold) {
+            diagnostics.error(span, method_bound_not_met(method_name,
+                types.type_name(owner_type), failure.to_str()));
+            *ok = false;
+        }
+        failure.drop();
+        if (!bounds_hold) { return; }
+    }
     // Overload selection does not infer a method's own type parameters. A
     // generic declaration whose arity fits is matched by monomorphization,
     // which reports its own failure where the call's type is inferred.
@@ -2564,6 +2582,34 @@ void typecheck_method_call_target(AstPool* pool, TypeTable* types, SyntaxNode* r
                                                          types.type_name(owner_type)));
         *ok = false;
     }
+}
+
+/// The implementation that declares `method_name` for a receiver as
+/// indirect as `receiver_type`: `(&v).into_iter()` uses `impl ... for
+/// Vec<T>*`, not the by-value impl. Falls back to `selected`.
+SyntaxNode* typecheck_receiver_impl(SyntaxNode* root, TypeTable* types, u32 receiver_type,
+                                    str owner_name, str method_name, SyntaxNode* selected) {
+    u32 depth = 0;
+    TypeEntry* entry = types.get(types.resolve_subst(receiver_type));
+    while (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) {
+        depth += 1;
+        entry = types.get(types.resolve_subst(entry.inner));
+    }
+    if (impl_target_pointer_depth(selected) == depth) { return selected; }
+    SyntaxNode* item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Impl && impl_target_pointer_depth(item) == depth) {
+            SyntaxNode* target = impl_target_identifier(item);
+            i64 count = 0;
+            i64 generic = 0;
+            if (target != (SyntaxNode*)0 && strcmp(target.text, owner_name) == 0) {
+                typecheck_count_block_methods(item, method_name, &count, &generic);
+            }
+            if (count > 0) { return item; }
+        }
+        item = item.next_sibling;
+    }
+    return selected;
 }
 
 /// Returns the type parameter `type_args` binds for a callee parameter

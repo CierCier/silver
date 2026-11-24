@@ -435,6 +435,21 @@ impl Display for Vector2 {
 }
 ```
 
+A bound on an impl's parameters limits where its methods apply. A call to one
+of them on a type that misses the bound is rejected at the call site. The
+built-in bound `Copy` holds for the Copy types of §8.1 and needs no impl:
+
+```silver
+impl<T: Copy> Vec<T> {
+    T get(&self, i64 index) { ... }   // a copy is safe only for Copy elements
+}
+
+Vec<i64> ids;     i64 first = ids.get(0);        // accepted
+Vec<String> names; &String n = names.get_ref(0);  // borrow an owned element
+// names.get(0)  error: 'get' is not available on 'Vec<String>': 'String' is
+//               not Copy, so a copy of a borrowed one would be dropped twice
+```
+
 ### External Declarations (`extern`)
 
 ```silver
@@ -1090,6 +1105,12 @@ still owns its elements, so a non-Copy element cannot be moved out by
 indexing: `move v[i]` and `T x = v[i]` are rejected. Use `v.take(i)`,
 `v.pop()`, `v.swap_remove(i)`, or borrow the element.
 
+Accessors that return a copy of an element (`get`, `try_get`, `iter`,
+`for x in &v`, `HashMap.get`, `values`, `peek`, `front`, a lock guard's `get`)
+live in `impl<T: Copy>` blocks. For a non-Copy element, borrow it with
+`get_ref` or `get_mut`, or take it out. Iterating `for x in v` consumes `v`
+and moves each element out.
+
 ### 8.2 Moves Across Control Flow
 
 Each path through a function carries its own record of which places hold a
@@ -1423,11 +1444,9 @@ All futex-based primitives are seq_cst by default.
   a detached task keeps its slot until a waiter or the exit-time join-all
   reaps it. A launch that finds no free slot yields a task whose
   `started()` is false.
-- A `Task` can be stored in a collection. A bitwise copy of a handle, such as
-  one read with `Vec.get`, becomes stale once any copy is waited: dropping a
-  stale copy does nothing, and waiting it aborts. Move handles out with
-  `pop`, `take` or `swap_remove` instead. Waiting one task from two threads
-  at once is not supported.
+- A `Task` can be stored in a collection. It is not Copy, so `Vec.get` on a
+  `Vec<Task<T>>` is rejected. Move handles out with `pop`, `take` or
+  `swap_remove`. Waiting one task from two threads at once is not supported.
 - The runtime entry (`std.sys.entry`) is imported automatically and provides
   `_start`; every binary links statically against the pure-Silver runtime —
   there is no libc, and `--dynamic-runtime` no longer exists.
