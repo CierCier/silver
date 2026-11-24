@@ -1340,13 +1340,13 @@ impl MoveChecker {
         }
         fields.reverse();
         let path = fields.join(".");
-        // typeck's `__index_get` result, or the container's type argument;
-        // the move leaves a container that still owns it if either is owned.
-        let owned = [self.indexed_element(element), index_element_type(&container, index)]
-            .into_iter()
-            .flatten()
-            .filter_map(|element| self.field_type(element, &path))
-            .any(|moved| self.facts.is_tracked(&moved));
+        // The type typeck resolved for the index (an `__index_get` result may
+        // differ from the type argument); the type argument only as a fallback.
+        let owned = self
+            .indexed_element(element)
+            .or_else(|| index_element_type(&container, index))
+            .and_then(|element| self.field_type(element, &path))
+            .is_some_and(|moved| self.facts.is_tracked(&moved));
         if !owned {
             return false;
         }
@@ -3295,6 +3295,7 @@ mod tests {
           void __index_set(*self, i64 index, Item value); }\n\
         struct Bag<T> { T* data; }\n\
         struct Card { Text text; i64 n; }\n\
+        struct Other { Text n; }\n\
         struct Deck<T> { Card* data; }\n\
         impl<T> IndexedAccess for Deck<T> {\n\
           type Item = Card;\n\
@@ -3373,6 +3374,8 @@ mod tests {
             "Bag<Card> bag; i64 n = bag[0].text.inspect();",
             "Bag<Bag<Card>> bags; i64 n = bags[0][0].n;",
             "Deck<i64> deck; i64 n = deck[0].n;",
+            // `Item` is Card, whose `n` is i64, though Other's `n` is owned.
+            "Deck<Other> deck; i64 n = deck[0].n;",
         ] {
             let errors = errors_in(control);
             assert!(errors.types.is_empty() && errors.moves.is_empty(), "{control}: {errors:?}");
