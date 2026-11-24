@@ -3268,8 +3268,9 @@ fn is_plain_place(expr: &ast::Expression) -> bool {
 /// The element type of indexing `ty`: an array's or slice's element, or the
 /// one type argument of a container such as `Vec<T>`.
 /// The type `ty[index]` yields; a tuple field needs a constant index.
-/// Binds each bare type name in `pattern` (`Crate<T*>`) to the matching part
-/// of `actual` (`Crate<Text*>`, so `T` is `Text`). A reference or pointer on
+/// Binds each bare type name in `pattern` (`Crate<T*>`, `Crate<[T, i64]>`) to
+/// the matching part of `actual` (`Crate<Text*>`, so `T` is `Text`). A
+/// reference or pointer on
 /// one side only is looked through, since typeck may record a borrowed
 /// container.
 fn bind_type_arguments(
@@ -3277,7 +3278,7 @@ fn bind_type_arguments(
     actual: &ast::Type,
     bindings: &mut FxHashMap<String, ast::Type>,
 ) {
-    use ast::TypeKind::{Generic, Named, Pointer, Reference};
+    use ast::TypeKind::{Array, Generic, Named, Pointer, Reference, Slice, Tuple};
     match (pattern.kind.as_ref(), actual.kind.as_ref()) {
         (Reference(pattern), Reference(actual)) => {
             bind_type_arguments(&pattern.inner, &actual.inner, bindings);
@@ -3299,6 +3300,17 @@ fn bind_type_arguments(
             for (parameter, argument) in parameters.iter().zip(arguments) {
                 bind_type_arguments(parameter, argument, bindings);
             }
+        }
+        (Tuple(parameters), Tuple(arguments)) => {
+            for (parameter, argument) in parameters.iter().zip(arguments) {
+                bind_type_arguments(parameter, argument, bindings);
+            }
+        }
+        (Array(pattern), Array(actual)) => {
+            bind_type_arguments(&pattern.element_type, &actual.element_type, bindings);
+        }
+        (Slice(pattern), Slice(actual)) => {
+            bind_type_arguments(&pattern.element_type, &actual.element_type, bindings);
         }
         (Reference(pattern), _) => bind_type_arguments(&pattern.inner, actual, bindings),
         (Pointer(pattern), _) => bind_type_arguments(&pattern.inner, actual, bindings),
@@ -3502,13 +3514,17 @@ mod tests {
                       T __index_get(*self, i64 index) { return *(self.data[index]); }\n\
                       void __index_set(*self, i64 index, T value) {}\n\
                     }\n\
-                    void unrack<T>(Rack<T*> rack) { sink(rack[0]); }\n";
+                    void unrack<T>(Rack<T*> rack) { sink(rack[0]); }\n\
+                    void pair<T>(Crate<[T, i64]> crate) { sink(crate[0].inner); }\n";
         for (body, container, owned) in [
             ("Crate<i64> copies; pull(copies);", "Crate<Text>", false),
             ("Crate<i64> copies; Crate<Text> texts; pull(copies); pull(texts);", "Crate<Text>", true),
             // The parameter sits under a pointer in the impl's container.
             ("Rack<i64*> copies; unrack(copies);", "Rack<Text*>", false),
             ("Rack<Text*> texts; unrack(texts);", "Rack<Text*>", true),
+            // The parameter sits inside a tuple argument.
+            ("Crate<[i64, i64]> copies; pair(copies);", "Crate<[Text, i64]>", false),
+            ("Crate<[Text, i64]> texts; pair(texts);", "Crate<[Text, i64]>", true),
         ] {
             let rejected = super::msg::cannot_move_out_of_indexed_element(container);
             let errors = errors_with_items(pull, body);
