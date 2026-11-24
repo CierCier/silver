@@ -162,6 +162,10 @@ impl OwnedLeaf {
     bool valid(OwnedLeaf* self) {
         return self.owns && self.bytes != (i8*)0 && self.len > 0;
     }
+
+    i64 size(&self) {
+        return self.len;
+    }
 }
 
 impl Drop for OwnedLeaf {
@@ -565,6 +569,18 @@ void stress_conditional_and_borrowed_transfers() {
     }
     assert_eq_i32(leaf_drop_count, 1, "an explicitly dropped temporary drops once");
     assert_eq_i64(leaf_bytes_freed, 3, "an explicitly dropped temporary frees once");
+
+    reset_owner_counters();
+    {
+        Optional<i64> pick = Optional<i64>.Some(1);
+        i32 id = (match pick { Some(n): OwnedLeaf.new(37, 2), None: OwnedLeaf.new(38, 9) }).id;
+        Optional<OwnedLeaf> missing = Optional<OwnedLeaf>.None;
+        i64 len = (missing ? OwnedLeaf.new(39, 4)).size();
+        assert_eq_i64((i64)id + len, 41, "a match result and a fallback were readable");
+        assert_eq_i32(leaf_drop_count, 0, "a match or fallback result lives to the end of its block");
+    }
+    assert_eq_i32(leaf_drop_count, 2, "a match or fallback result drops once");
+    assert_eq_i64(leaf_bytes_freed, 6, "a match or fallback result frees once");
 }
 
 void stress_defer_and_break_continue() {

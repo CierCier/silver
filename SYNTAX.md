@@ -1153,7 +1153,8 @@ Passing a `Vec<T>` or an array to a `Slice<T>` parameter lends a view; the
 caller keeps the container and its elements.
 
 A temporary that owns a resource, such as the result of `make()` in
-`make().id`, lives like an unnamed local: it drops once when its enclosing
+`make().id` or of a `match` or `?` fallback whose field or method is used,
+lives like an unnamed local: it drops once when its enclosing
 block exits, on every exit path, and a loop body drops its temporaries on
 each pass.
 
