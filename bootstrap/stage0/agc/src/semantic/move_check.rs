@@ -2022,10 +2022,12 @@ impl MoveChecker {
         scopes: &mut Vec<Vec<ScopeEntry>>,
         var_types: &mut FxHashMap<String, ast::Type>,
     ) {
-        // Bare identifier returns are implicit moves (the drop flag is
-        // cleared on the return path); the variable is dead afterwards.
-        // Field returns (`return x.field;`) are views and do not move.
+        // Returning a tracked local or field moves it out; the source is
+        // dead afterwards. A heap container keeps its elements.
         self.reject_locked_move(expr, var_types);
+        if self.reject_container_element_move(expr, var_types) {
+            return;
+        }
         match expr.kind.as_ref() {
             ast::ExpressionKind::Identifier(ident) => {
                 self.check_expr(expr, state, scopes, var_types);

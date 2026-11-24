@@ -2414,26 +2414,21 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(aggregate.as_basic_value_enum())
     }
 
-    /// Builds `{ ... }` for `target_type`. An element taken from an owned
-    /// place moves out of it, so its drop state is cleared once all
-    /// elements are built.
-    pub(crate) fn emit_typed_initializer_value(
+    /// Emits one initializer element. An element taken from an owned place
+    /// moves out of it before the next element runs, matching the order in
+    /// which the move checker records the transfer.
+    fn emit_initializer_element(
         &mut self,
-        items: &[ast::InitializerItem],
-        target_type: &ast::Type,
-        span: &Span,
+        element: &ast::Expression,
+        element_type: &ast::Type,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
-        let value = self.emit_typed_initializer_elements(items, target_type, span)?;
-        for item in items {
-            let (ast::InitializerItem::Positional(element)
-            | ast::InitializerItem::Field { value: element, .. }
-            | ast::InitializerItem::Index { value: element, .. }) = item;
-            self.transfer_owner_value(element)?;
-        }
+        let value = self.emit_expression_value_for_expected(element, element_type)?;
+        self.transfer_owner_value(element)?;
         Ok(value)
     }
 
-    fn emit_typed_initializer_elements(
+    /// Builds `{ ... }` for `target_type`.
+    pub(crate) fn emit_typed_initializer_value(
         &mut self,
         items: &[ast::InitializerItem],
         target_type: &ast::Type,
@@ -2495,7 +2490,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             ));
                         };
                         let value =
-                            self.emit_expression_value_for_expected(value_expr, field_ty)?;
+                            self.emit_initializer_element(value_expr, field_ty)?;
                         let llvm_field_ty = struct_ty
                             .get_field_type_at_index(index as u32)
                             .ok_or_else(|| {
@@ -2546,7 +2541,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 expr.span,
                             )
                         })?;
-                        let value = self.emit_expression_value_for_expected(expr, field_ty)?;
+                        let value = self.emit_initializer_element(expr, field_ty)?;
                         let llvm_field_ty = struct_ty
                             .get_field_type_at_index(index as u32)
                             .ok_or_else(|| {
@@ -2602,7 +2597,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             *span,
                         ));
                     };
-                    let value = self.emit_expression_value_for_expected(expr, &types[index])?;
+                    let value = self.emit_initializer_element(expr, &types[index])?;
                     let value =
                         self.cast_value_to_basic_type(value, field_types[index], &expr.span)?;
                     aggregate = self
@@ -2665,7 +2660,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 unreachable!()
                             };
                             let value =
-                                self.emit_expression_value_for_expected(expr, &base_elem)?;
+                                self.emit_initializer_element(expr, &base_elem)?;
                             let value =
                                 self.cast_value_to_basic_type(value, base_llvm_ty, &expr.span)?;
                             let mut indices = vec![self.context.i32_type().const_zero()];
@@ -2710,7 +2705,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 unreachable!()
                             };
                             let value =
-                                self.emit_expression_value_for_expected(expr, &array.element_type)?;
+                                self.emit_initializer_element(expr, &array.element_type)?;
                             let value =
                                 self.cast_value_to_basic_type(value, element_llvm_ty, &expr.span)?;
                             let indices = [
@@ -2750,7 +2745,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                         index.span,
                                     ));
                                 };
-                                let elem_val = self.emit_expression_value_for_expected(
+                                let elem_val = self.emit_initializer_element(
                                     value,
                                     &array.element_type,
                                 )?;

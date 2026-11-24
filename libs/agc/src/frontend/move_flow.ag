@@ -573,9 +573,11 @@ impl MoveFlow {
     }
 
     /// Resolves expression `id` to a tracked place. `*unknown_element` is set
-    /// for an array element with a non-constant index, which resolves to the
-    /// array. `create` builds field and element places for a write or move;
-    /// a read resolves to the deepest existing place instead.
+    /// when the place is only part of the result: an array element with a
+    /// non-constant index, or a path deeper than the tracked depth. `create`
+    /// builds field and element places for a write or move; a read resolves
+    /// to the deepest existing place, except that a constant element of an
+    /// array with tracked elements gets its own place.
     i64 resolve(MoveFlow* self, u32 id, bool create, bool* unknown_element) {
         AstExpr expr = *self.pool.get_expr(id);
         if (expr.kind == ExprKind.Var) {
@@ -586,7 +588,10 @@ impl MoveFlow {
             if (owner < 0 || *unknown_element) { return owner; }
             TypeKind kind = self.types.get(self.places.get(owner).type_id).kind;
             if (kind == TypeKind.Pointer || kind == TypeKind.Reference) { return -1; }
-            if (create && !self.expand(owner)) { return owner; }
+            if (create && !self.expand(owner)) {
+                *unknown_element = true;
+                return owner;
+            }
             i64 field = self.child(owner, expr.aux, false);
             return field < 0 ? owner : field;
         }
@@ -606,9 +611,16 @@ impl MoveFlow {
                 *unknown_element = true;
                 return owner;
             }
-            if (create && !self.expand(owner)) { return owner; }
-            i64 element = self.child(owner, (u32)value, create);
-            if (element < 0 && self.places.get(owner).is_array && create) {
+            if (create && !self.expand(owner)) {
+                *unknown_element = true;
+                return owner;
+            }
+            // A sibling of a moved element reads its own state, not the
+            // array's gap.
+            FlowPlace array = self.places.get(owner);
+            i64 element = self.child(owner, (u32)value,
+                create || (array.is_array && array.expanded));
+            if (element < 0 && array.is_array && create) {
                 *unknown_element = true;
             }
             return element < 0 ? owner : element;
