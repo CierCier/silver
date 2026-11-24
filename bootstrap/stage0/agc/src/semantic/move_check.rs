@@ -8,7 +8,7 @@ use crate::parser::ast;
 use crate::semantic::init;
 use crate::semantic::move_path::{InitState, MovePathTree};
 use crate::semantic::place::{Place, Projection};
-use crate::semantic::typeck::MethodCallKey;
+use crate::semantic::typeck::{CallSiteKey, MethodCallKey};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 // Phase 4 scaffolding (parallel, not yet hot): `Place`/`MovePathTree`/`InitOp`
@@ -472,6 +472,9 @@ struct Facts {
     /// Whether the overload typeck selected at a method call takes its
     /// receiver by value; it overrides `value_receivers` for that call.
     consuming_calls: FxHashMap<MethodCallKey, bool>,
+    /// Element type of each `container[i]` that typeck resolved through
+    /// `__index_get`, keyed by the index expression's span.
+    indexed_elements: FxHashMap<CallSiteKey, ast::Type>,
     /// (function/method name, param index) pairs with a value (non-view) param.
     value_args: FxHashSet<(String, usize)>,
     /// (owner, method, explicit argument index) pairs with value parameters.
@@ -871,13 +874,16 @@ pub struct MoveReport {
 
 /// `consuming_calls` is typeck's receiver mode per method call; a call typeck
 /// did not record falls back to the declared methods' arities.
+/// `indexed_elements` is typeck's element type for each user-defined index.
 pub fn analyze_program_with_imports(
     program: &ast::Program,
     imported_modules: &[ModuleArtifact],
     consuming_calls: &FxHashMap<MethodCallKey, bool>,
+    indexed_elements: &FxHashMap<CallSiteKey, ast::Type>,
 ) -> MoveReport {
     let mut facts = Facts::build(program, imported_modules);
     facts.consuming_calls = consuming_calls.clone();
+    facts.indexed_elements = indexed_elements.clone();
     let mut checker = MoveChecker {
         layouts: OwnerLayouts(facts.clone()),
         facts,
@@ -1209,10 +1215,32 @@ impl MoveChecker {
         // `locked_bindings`.
         self.locked_place(receiver, var_types)
             .map(|(_, ty)| ty)
-            .or_else(|| {
-                let (root, path) = expr_root_and_path(receiver)?;
-                self.get_field_type(&root, &path, var_types)
+            .or_else(|| match receiver.kind.as_ref() {
+                ast::ExpressionKind::Index { object, index } => {
+                    self.indexed_element(receiver).or_else(|| {
+                        index_element_type(&self.receiver_type(object, var_types)?, index)
+                    })
+                }
+                ast::ExpressionKind::FieldAccess { object, field }
+                    if matches!(object.kind.as_ref(), ast::ExpressionKind::Index { .. }) =>
+                {
+                    self.field_type(self.receiver_type(object, var_types)?, &field.name)
+                }
+                _ => {
+                    let (root, path) = expr_root_and_path(receiver)?;
+                    self.get_field_type(&root, &path, var_types)
+                }
             })
+    }
+
+    /// The element type typeck resolved for `container[i]` through
+    /// `__index_get`.
+    fn indexed_element(&self, index: &ast::Expression) -> Option<ast::Type> {
+        let span = index.span;
+        self.facts
+            .indexed_elements
+            .get(&(span.file, span.start, span.end, span.expansion))
+            .cloned()
     }
 
     /// Checks a value stored into a new place (`T u = t`, `u = t`, a struct
@@ -1311,10 +1339,15 @@ impl MoveChecker {
             return false;
         }
         fields.reverse();
-        if !index_element_type(&container, index)
-            .and_then(|element| self.field_type(element, &fields.join(".")))
-            .is_some_and(|moved| self.facts.is_tracked(&moved))
-        {
+        let path = fields.join(".");
+        // typeck's `__index_get` result, or the container's type argument;
+        // the move leaves a container that still owns it if either is owned.
+        let owned = [self.indexed_element(element), index_element_type(&container, index)]
+            .into_iter()
+            .flatten()
+            .filter_map(|element| self.field_type(element, &path))
+            .any(|moved| self.facts.is_tracked(&moved));
+        if !owned {
             return false;
         }
         let name = crate::types::Type::from_ast(&container).to_string();
@@ -3262,6 +3295,12 @@ mod tests {
           void __index_set(*self, i64 index, Item value); }\n\
         struct Bag<T> { T* data; }\n\
         struct Card { Text text; i64 n; }\n\
+        struct Deck<T> { Card* data; }\n\
+        impl<T> IndexedAccess for Deck<T> {\n\
+          type Item = Card;\n\
+          Card __index_get(*self, i64 index) { return self.data[index]; }\n\
+          void __index_set(*self, i64 index, Card value) { self.data[index] = move value; }\n\
+        }\n\
         impl<T> IndexedAccess for Bag<T> {\n\
           type Item = T;\n\
           T __index_get(*self, i64 index) { return self.data[index]; }\n\
@@ -3288,7 +3327,12 @@ mod tests {
         let inferred_lets = checker.take_inferred_lets();
         crate::semantic::typeck::populate_inferred_let_types(&mut program, &inferred_lets);
         let moves =
-            super::analyze_program_with_imports(&program, &[], checker.consuming_method_calls())
+            super::analyze_program_with_imports(
+                &program,
+                &[],
+                checker.consuming_method_calls(),
+                checker.indexed_elements(),
+            )
                 .errors;
         Errors {
             types: types.into_iter().map(|error| error.message).collect(),
@@ -3315,6 +3359,8 @@ mod tests {
             ("Bag<Text>", "Bag<Text> bag; Text t = bag[pick()];"),
             ("Bag<Card>", "Bag<Card> bag; Text t = move bag[0].text;"),
             ("Bag<Card>", "Bag<Card> bag; eat(bag[0].text);"),
+            ("Bag<Card>", "Bag<Bag<Card>> bags; eat(bags[0][0].text);"),
+            ("Deck<i64>", "Deck<i64> deck; eat(deck[0].text);"),
         ] {
             let rejected = super::msg::cannot_move_out_of_indexed_element(container);
             let errors = errors_in(misuse);
@@ -3325,6 +3371,8 @@ mod tests {
             "Bag<Text> bag; i64 n = bag[0].inspect();",
             "Bag<Card> bag; i64 n = bag[0].n;",
             "Bag<Card> bag; i64 n = bag[0].text.inspect();",
+            "Bag<Bag<Card>> bags; i64 n = bags[0][0].n;",
+            "Deck<i64> deck; i64 n = deck[0].n;",
         ] {
             let errors = errors_in(control);
             assert!(errors.types.is_empty() && errors.moves.is_empty(), "{control}: {errors:?}");
