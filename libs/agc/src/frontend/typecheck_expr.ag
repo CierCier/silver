@@ -45,11 +45,14 @@ struct LocalVar {
 /// The locals in scope during expression checking, innermost last, plus
 /// the current nesting depth. `launched_call` is the call a `launch` wraps;
 /// the launch pass judges how its reference parameters are borrowed.
+/// `cfg` is the build's active configuration for in-body `@cfg`; null means
+/// the Linux debug defaults.
 struct TypeEnv {
     Vec<LocalVar> locals;
     u32 expression_depth;
     u32 expected_return;
     u32 launched_call;
+    CfgSet* cfg;
 }
 
 impl TypeEnv {
@@ -60,6 +63,7 @@ impl TypeEnv {
         env.expression_depth = 0;
         env.expected_return = TYPE_UNKNOWN;
         env.launched_call = 0;
+        env.cfg = (CfgSet*)0;
         return move env;
     }
 
@@ -69,6 +73,7 @@ impl TypeEnv {
         TypeEnv env = TypeEnv.new();
         env.expression_depth = self.expression_depth;
         env.expected_return = self.expected_return;
+        env.cfg = self.cfg;
         i64 i = 0;
         while (i < self.locals.len()) {
             env.locals.push(self.locals.get(i));
@@ -4907,6 +4912,7 @@ void typecheck_generic_call_drop_ownership(
 
     TypeEnv callee_env = TypeEnv.new();
     callee_env.expression_depth = caller_env.expression_depth;
+    callee_env.cfg = caller_env.cfg;
     u32 expected_return = function_return_type_id(types, function);
     callee_env.expected_return = expected_return;
     bool concrete_args = true;
@@ -4952,6 +4958,7 @@ void typecheck_generic_call_drop_ownership(
     AstPool probe_pool = AstPool.new();
     ExprLowerer lowerer = ExprLowerer.new(&probe_pool, types, &symbols.names);
     lowerer.unit_root = root;
+    lowerer.cfg = caller_env.cfg;
     Vec<u32> stmt_ids = Vec<u32>.new();
     lowerer.lower_block(body, &stmt_ids);
     if (lowerer.unsupported) {
@@ -5013,6 +5020,7 @@ void typecheck_body(AstPool* pool, TypeTable* types, SymbolTable* symbols, Synta
                     bool* unsupported_out) {
     TypeEnv env = TypeEnv.new();
     env.expected_return = expected_return;
+    env.cfg = cfg;
     Vec<Binding> params = Vec<Binding>.new();
     collect_parameter_bindings(parameters, &params);
     i64 p = 0;
