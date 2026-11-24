@@ -40,6 +40,34 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .map_err(|e| CodegenError::new(format!("failed to allocate local `{name}`: {e}")))
     }
 
+    /// An entry-block drop flag that starts false on every path. A temporary
+    /// built on only some paths, such as in the right operand of `&&`, sets it
+    /// where it is built; block-exit cleanup then reads a defined value.
+    pub(crate) fn create_entry_drop_flag(
+        &self,
+        function: FunctionValue<'ctx>,
+        name: &str,
+    ) -> CodegenResult<PointerValue<'ctx>> {
+        let bool_type = self.context.bool_type();
+        let flag = self.create_entry_alloca(function, name, bool_type.as_basic_type_enum())?;
+        let builder = self.context.create_builder();
+        match flag
+            .as_instruction_value()
+            .and_then(|alloca| alloca.get_next_instruction())
+        {
+            Some(next) => builder.position_before(&next),
+            None => builder.position_at_end(
+                flag.as_instruction_value()
+                    .and_then(|alloca| alloca.get_parent())
+                    .ok_or_else(|| CodegenError::new("drop flag has no entry block"))?,
+            ),
+        }
+        builder
+            .build_store(flag, bool_type.const_zero())
+            .map_err(|e| CodegenError::new(format!("failed to clear drop flag `{name}`: {e}")))?;
+        Ok(flag)
+    }
+
     pub(crate) fn intern_string_literal(
         &mut self,
         value: &str,

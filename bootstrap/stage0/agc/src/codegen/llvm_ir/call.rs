@@ -1051,11 +1051,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         {
                             let flag_name = format!("method.recv.tmp.{}.drop", self.temp_counter);
                             self.temp_counter += 1;
-                            let flag_alloca = self.create_entry_alloca(
-                                function_ctx,
-                                &flag_name,
-                                self.context.bool_type().as_basic_type_enum(),
-                            )?;
+                            let flag_alloca =
+                                self.create_entry_drop_flag(function_ctx, &flag_name)?;
                             self.builder
                                 .build_store(
                                     flag_alloca,
