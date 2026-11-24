@@ -555,14 +555,20 @@ impl MoveFlow {
     }
 
     /// Whether `place` counts as assigned: a single value must hold one on
-    /// every path, and so must every element of an array; a struct needs some
-    /// field assigned on some path, its other fields keeping the zero value
-    /// of declared storage.
+    /// every path, and every element of an array must count as assigned; a
+    /// struct needs some field assigned on some path, its other fields keeping
+    /// the zero value of declared storage.
     bool assigned(MoveFlow* self, FlowState* state, i64 place) {
         FlowPlace info = self.places.get(place);
-        if (info.is_array) { return self.summary(state, place) == FlowInit.Init; }
         if (!info.expanded) { return self.init_at(state, place) == FlowInit.Init; }
-        return self.summary(state, place) != FlowInit.Empty;
+        if (!info.is_array) { return self.summary(state, place) != FlowInit.Empty; }
+        if (self.own_counts(place) && self.init_at(state, place) != FlowInit.Init) { return false; }
+        i64 child = info.first_child;
+        while (child >= 0) {
+            if (!self.assigned(state, child)) { return false; }
+            child = self.places.get(child).next_sibling;
+        }
+        return true;
     }
 
     /// Whether `place` or a struct value that contains it counts as assigned.
