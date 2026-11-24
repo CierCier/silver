@@ -764,11 +764,14 @@ impl Facts {
     }
 
     /// Pointer/reference types are views and are never consumed by value.
+    /// A parameter of a view type borrows its argument. A `Slice` parameter
+    /// views a `Vec` or array argument, which keeps its owner.
     fn is_view_type(ty: &ast::Type) -> bool {
-        matches!(
-            ty.kind.as_ref(),
-            ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)
-        )
+        match ty.kind.as_ref() {
+            ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_) => true,
+            ast::TypeKind::Named(named) => named.path.last().is_some_and(|seg| seg.name == "Slice"),
+            _ => false,
+        }
     }
 
     /// Base type name for matching impl owners (generics stripped).
@@ -816,6 +819,7 @@ fn is_noreturn_call(expr: &ast::Expression) -> bool {
                     | "sys_exit_group"
                     | "__optional_abort"
                     | "__result_abort"
+                    | "__silver_assert_failed"
             );
         }
     }
@@ -1221,6 +1225,33 @@ impl MoveChecker {
         scopes: &mut Vec<Vec<ScopeEntry>>,
         var_types: &mut FxHashMap<String, ast::Type>,
     ) {
+        self.transfer_place(value, state, scopes, var_types, true);
+    }
+
+    /// Moves the tracked place `value` reads. A conditional moves the arm it
+    /// takes; codegen moves that arm's value itself, so no owner transfer is
+    /// recorded for it.
+    fn transfer_place(
+        &mut self,
+        value: &ast::Expression,
+        state: &mut State,
+        scopes: &mut Vec<Vec<ScopeEntry>>,
+        var_types: &mut FxHashMap<String, ast::Type>,
+        record: bool,
+    ) {
+        if let ast::ExpressionKind::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } = value.kind.as_ref()
+        {
+            self.check_expr(condition, state, scopes, var_types);
+            let mut other = state.clone();
+            self.transfer_place(then_expr, state, scopes, var_types, false);
+            self.transfer_place(else_expr, &mut other, scopes, var_types, false);
+            join_changed(state, &other);
+            return;
+        }
         self.reject_locked_move(value, var_types);
         if self.reject_container_element_move(value, var_types) {
             self.check_expr(value, state, scopes, var_types);
@@ -1239,7 +1270,9 @@ impl MoveChecker {
         {
             return;
         }
-        self.record_transfer(value);
+        if record {
+            self.record_transfer(value);
+        }
         if let Some(var) = state.get_mut(&root) {
             if path.is_empty() {
                 var.mark_moved(value.span, msg::note_value_moved_here());
@@ -1291,10 +1324,9 @@ impl MoveChecker {
         var_types: &mut FxHashMap<String, ast::Type>,
     ) {
         for argument in arguments {
-            if matches!(
-                argument.kind.as_ref(),
-                ast::ExpressionKind::Reference { .. }
-            ) {
+            if let ast::ExpressionKind::Reference { expression, .. } = argument.kind.as_ref()
+                && is_plain_place(expression)
+            {
                 self.check_expr(argument, state, scopes, var_types);
             }
         }
@@ -1309,6 +1341,10 @@ impl MoveChecker {
         var_types: &mut FxHashMap<String, ast::Type>,
     ) {
         self.reject_locked_move(argument, var_types);
+        if self.reject_container_element_move(argument, var_types) {
+            self.check_expr(argument, state, scopes, var_types);
+            return;
+        }
         if let Some((root, path)) = expr_root_and_path(argument)
             && state.contains_key(&root)
             && self.is_path_tracked(&root, &path, var_types)
@@ -1920,8 +1956,12 @@ impl MoveChecker {
     ) {
         scopes.push(Vec::new());
         let depth = scopes.len();
+        // Statements after one that never falls through cannot run.
         for stmt in &block.statements {
             self.check_statement(stmt, state, scopes, var_types);
+            if statement_terminates(stmt) {
+                break;
+            }
         }
         let first = self
             .defers
@@ -1947,15 +1987,81 @@ impl MoveChecker {
         scopes: &mut Vec<Vec<ScopeEntry>>,
         var_types: &mut FxHashMap<String, ast::Type>,
     ) {
-        let pending: Vec<ast::Statement> = self
+        let pending: Vec<(usize, ast::Statement)> = self
             .defers
             .iter()
             .rev()
             .filter(|(owner, _)| *owner > depth)
-            .map(|(_, deferred)| deferred.clone())
+            .cloned()
             .collect();
-        for deferred in &pending {
-            self.check_statement(deferred, state, scopes, var_types);
+        for (owner, deferred) in &pending {
+            self.check_defer_where_written(*owner, deferred, state, scopes, var_types);
+        }
+    }
+
+    /// Checks `deferred`, registered when `owner` scopes were open, against
+    /// the bindings visible there: a binding that a later scope shadows is
+    /// read from, and moved in, that scope's saved entry.
+    fn check_defer_where_written(
+        &mut self,
+        owner: usize,
+        deferred: &ast::Statement,
+        state: &mut State,
+        scopes: &mut Vec<Vec<ScopeEntry>>,
+        var_types: &mut FxHashMap<String, ast::Type>,
+    ) {
+        let mut view = state.clone();
+        let mut view_types = var_types.clone();
+        let mut shadowed = FxHashSet::default();
+        let saved_owners = self.owner_bindings.clone();
+        let saved_locked = self.locked_bindings.clone();
+        for scope in scopes.iter().skip(owner).rev() {
+            for (name, old_state, old_type, old_owner, old_locked) in scope.iter().rev() {
+                shadowed.insert(name.clone());
+                self.owner_bindings.remove(name);
+                if let Some(old) = old_owner {
+                    self.owner_bindings.insert(name.clone(), old.clone());
+                }
+                self.locked_bindings.remove(name);
+                if let Some(old) = old_locked {
+                    self.locked_bindings.insert(name.clone(), old.clone());
+                }
+                match old_state {
+                    Some(old) => {
+                        view.insert(name.clone(), old.clone());
+                    }
+                    None => {
+                        view.remove(name);
+                    }
+                }
+                match old_type {
+                    Some(old) => {
+                        view_types.insert(name.clone(), old.clone());
+                    }
+                    None => {
+                        view_types.remove(name);
+                    }
+                }
+            }
+        }
+        self.check_statement(deferred, &mut view, scopes, &mut view_types);
+        self.owner_bindings = saved_owners;
+        self.locked_bindings = saved_locked;
+        for (name, var) in view {
+            if !shadowed.contains(&name) {
+                state.insert(name, var);
+                continue;
+            }
+            // The outermost later scope saved the binding the defer sees.
+            if let Some(entry) = scopes
+                .iter_mut()
+                .skip(owner)
+                .flat_map(|scope| scope.iter_mut())
+                .find(|entry| entry.0 == name)
+                && entry.1.is_some()
+            {
+                entry.1 = Some(var);
+            }
         }
     }
 
@@ -2082,6 +2188,15 @@ impl MoveChecker {
                 ast::ExpressionKind::Literal(ast::Literal::Bool(true))
             )
         });
+        if let Some(condition) = condition
+            && matches!(
+                condition.kind.as_ref(),
+                ast::ExpressionKind::Literal(ast::Literal::Bool(false))
+            )
+        {
+            self.check_expr(condition, state, scopes, var_types);
+            return;
+        }
         let mut head = state.clone();
         let mut exit: Option<State> = None;
         for _ in 0..MAX_LOOP_PASSES {
@@ -2139,6 +2254,20 @@ impl MoveChecker {
             return;
         };
         self.check_exit_defers(depth, state, scopes, var_types);
+        // The exit sees the bindings that scopes inside the loop shadowed.
+        let mut exit = state.clone();
+        for scope in scopes.iter().skip(depth).rev() {
+            for (name, old_state, ..) in scope.iter().rev() {
+                match old_state {
+                    Some(old) => {
+                        exit.insert(name.clone(), old.clone());
+                    }
+                    None => {
+                        exit.remove(name);
+                    }
+                }
+            }
+        }
         let frame = self.loops.last_mut().expect("loop frame");
         join_state(
             if is_break {
@@ -2146,7 +2275,7 @@ impl MoveChecker {
             } else {
                 &mut frame.continues
             },
-            state,
+            &exit,
         );
     }
 
@@ -2692,8 +2821,9 @@ impl MoveChecker {
                 self.check_expr(then_expr, state, scopes, var_types);
                 self.check_expr(else_expr, state, scopes, var_types);
             }
+            // `value ? fallback` consumes an owned value; codegen releases it.
             ast::ExpressionKind::UnwrapOr { value, fallback } => {
-                self.check_expr(value, state, scopes, var_types);
+                self.transfer_place(value, state, scopes, var_types, false);
                 self.check_expr(fallback, state, scopes, var_types);
             }
             ast::ExpressionKind::If {
@@ -2749,9 +2879,14 @@ impl MoveChecker {
                 // The header declares into the loop's own scope, which ends
                 // with the loop and restores what the header shadowed.
                 scopes.push(Vec::new());
+                // The header is a `let`, and codegen emits it as one.
+                if let ast::PatternKind::Identifier(name) = &init.pattern.kind
+                    && let Some(ty) = &init.type_annotation
+                {
+                    self.record_owner(name, ty, init.initializer.is_some());
+                }
                 if let Some(init_expr) = &init.initializer {
-                    self.reject_locked_move(init_expr, var_types);
-                    self.check_expr(init_expr, state, scopes, var_types);
+                    self.transfer_value(init_expr, state, scopes, var_types);
                 }
                 self.declare_pattern(
                     &init.pattern,
@@ -2773,6 +2908,7 @@ impl MoveChecker {
             ast::ExpressionKind::Match { expression, arms } => {
                 self.check_expr(expression, state, scopes, var_types);
                 let locked = self.locked_place(expression, var_types).map(|(_, ty)| ty);
+                let scrutinee = self.receiver_type(expression, var_types);
                 // Each arm is an independent path from the pre-match state;
                 // arms that never fall through do not contribute.
                 let mut merged = state.clone();
@@ -2785,12 +2921,25 @@ impl MoveChecker {
                     }
                     // The guard sees the arm's locked payloads too.
                     let saved = self.bind_locked_payloads(&arm.pattern, locked.as_ref());
+                    // A guard runs only after its pattern matched, so a
+                    // refutable arm misses with or without the guard's effects.
+                    let missed = (arm.guard.is_some() && Self::pattern_is_refutable(&arm.pattern))
+                        .then(|| state.clone());
                     if let Some(guard) = &arm.guard {
                         self.check_expr(guard, state, scopes, var_types);
                     }
                     let mut arm_state = state.clone();
                     let mut arm_scopes = scopes.clone();
+                    if let Some(missed) = &missed {
+                        join_changed(state, missed);
+                    }
+                    // A `move` binding owns its payload within the arm.
+                    arm_scopes.push(Vec::new());
+                    for (binding, ty) in self.move_payload_bindings(&arm.pattern, scrutinee.as_ref()) {
+                        self.declare(&binding, Some(&ty), &mut arm_state, &mut arm_scopes, var_types);
+                    }
                     self.check_expr(&arm.body, &mut arm_state, &mut arm_scopes, var_types);
+                    self.pop_scope(&mut arm_state, &mut arm_scopes, var_types);
                     // The arm's result is consumed even when the match is a
                     // statement, so it cannot hold the arm's locked payloads.
                     self.reject_locked_move(&arm.body, var_types);
@@ -2934,6 +3083,66 @@ impl MoveChecker {
         saved
     }
 
+    /// A pattern that can fail to match: anything but a binding or `_`.
+    fn pattern_is_refutable(pattern: &ast::Pattern) -> bool {
+        !matches!(
+            pattern.kind,
+            ast::PatternKind::Identifier(_) | ast::PatternKind::Wildcard
+        )
+    }
+
+    /// The `move` payload bindings of `pattern` on a `scrutinee` value, with
+    /// the payload type each takes.
+    fn move_payload_bindings(
+        &self,
+        pattern: &ast::Pattern,
+        scrutinee: Option<&ast::Type>,
+    ) -> Vec<(ast::Identifier, ast::Type)> {
+        let ast::PatternKind::Enum {
+            variant,
+            data: Some(data),
+            ..
+        } = &pattern.kind
+        else {
+            return Vec::new();
+        };
+        let bindings: Vec<Option<&ast::Identifier>> = match &data.kind {
+            ast::PatternKind::Tuple(items) => items
+                .iter()
+                .map(|item| match &item.kind {
+                    ast::PatternKind::Move(binding) => Some(binding),
+                    _ => None,
+                })
+                .collect(),
+            ast::PatternKind::Move(binding) => vec![Some(binding)],
+            _ => return Vec::new(),
+        };
+        let Some(scrutinee) = scrutinee else {
+            return Vec::new();
+        };
+        let owner = Facts::owner_key(scrutinee);
+        let Some(payloads) = self
+            .facts
+            .variant_payloads
+            .get(&(owner.clone(), variant.name.clone()))
+        else {
+            return Vec::new();
+        };
+        let substitutions = self
+            .facts
+            .struct_fields
+            .get(&owner)
+            .map(|info| Self::generic_substitutions(scrutinee, info))
+            .unwrap_or_default();
+        bindings
+            .into_iter()
+            .zip(payloads)
+            .filter_map(|(binding, payload)| {
+                Some((binding?.clone(), Self::substitute_type(payload, &substitutions)))
+            })
+            .collect()
+    }
+
     fn pattern_has_move(pattern: &ast::Pattern) -> bool {
         match &pattern.kind {
             ast::PatternKind::Move(_) => true,
@@ -2943,6 +3152,24 @@ impl MoveChecker {
             ast::PatternKind::Tuple(items) => items.iter().any(Self::pattern_has_move),
             _ => false,
         }
+    }
+}
+
+/// A place whose re-evaluation has no effects: a local, its fields, and
+/// elements at a literal or local index. A borrow of such a place can be
+/// checked again without repeating a move its operands made.
+fn is_plain_place(expr: &ast::Expression) -> bool {
+    match expr.kind.as_ref() {
+        ast::ExpressionKind::Identifier(_) => true,
+        ast::ExpressionKind::FieldAccess { object, .. } => is_plain_place(object),
+        ast::ExpressionKind::Index { object, index } => {
+            is_plain_place(object)
+                && matches!(
+                    index.kind.as_ref(),
+                    ast::ExpressionKind::Literal(_) | ast::ExpressionKind::Identifier(_)
+                )
+        }
+        _ => false,
     }
 }
 
@@ -3156,6 +3383,35 @@ mod tests {
                 errors.types.is_empty() && errors.moves.is_empty(),
                 "{control}: {errors:?}"
             );
+        }
+    }
+
+    #[test]
+    fn moves_follow_conditionals_headers_defers_and_payload_bindings() {
+        for (misuse, name) in [
+            ("Text t; bool f = true; Text u = f ? t : fresh(); i64 n = t.inspect();", "t"),
+            ("Text t; for (Text u = t; false; ) {} i64 n = t.inspect();", "t"),
+            ("Text t; while (true) { eat(t); { Text t = fresh(); break; } } i64 n = t.inspect();", "t"),
+            ("Text t; defer t.inspect(); eat(t); { Text t = fresh(); return 0; }", "t"),
+            (
+                "Bin b = Bin.Full(fresh()); \
+                 match b { Full(move p): { eat(p); i64 n = p.inspect(); }, Empty: {} };",
+                "p",
+            ),
+        ] {
+            let errors = errors_in(misuse);
+            assert!(
+                errors.moves.iter().any(|message| message.contains(&format!("moved value '{name}'"))),
+                "{misuse}: {errors:?}"
+            );
+        }
+        for control in [
+            "Text t; while (false) { eat(t); } i64 n = t.inspect();",
+            "Text t; { eat(t); return 0; } i64 n = t.inspect();",
+            "Text t; bool f = true; Text u = f ? fresh() : fresh(); i64 n = t.inspect();",
+        ] {
+            let errors = errors_in(control);
+            assert!(errors.moves.is_empty(), "{control}: {errors:?}");
         }
     }
 

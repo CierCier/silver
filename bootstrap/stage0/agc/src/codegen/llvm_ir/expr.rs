@@ -2838,7 +2838,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             let tuple_ty = self.context.struct_type(&field_types, false);
             let mut aggregate = tuple_ty.get_undef();
             for (index, item) in items.iter().enumerate() {
-                let value = self.emit_expression_value_for_expected(item, &types[index])?;
+                let value = self.emit_initializer_element(item, &types[index])?;
                 let value = self.cast_value_to_basic_type(value, field_types[index], &item.span)?;
                 aggregate = self
                     .builder

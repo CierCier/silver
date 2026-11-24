@@ -155,6 +155,9 @@ pub struct LlvmIrGenerator<'ctx> {
     pub(crate) enum_payload_layouts: HashMap<String, StructType<'ctx>>,
     pub(crate) enum_variant_payload_types: HashMap<String, HashMap<String, Vec<ast::Type>>>,
     pub(crate) defers: Vec<Vec<DeferredEntry<'ctx>>>,
+    /// Variable scopes `[start, end)` that name lookup skips while a defer
+    /// runs: scopes opened after the defer was registered.
+    pub(crate) hidden_scopes: Vec<(usize, usize)>,
     pub(crate) volatile_globals: HashSet<String>,
     /// Names declared as `type X = ...` aliases; consulted by the generic-
     /// placeholder classifier so an alias may share a generic-param name.
