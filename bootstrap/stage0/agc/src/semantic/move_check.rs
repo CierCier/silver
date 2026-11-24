@@ -3268,44 +3268,43 @@ fn is_plain_place(expr: &ast::Expression) -> bool {
 /// The element type of indexing `ty`: an array's or slice's element, or the
 /// one type argument of a container such as `Vec<T>`.
 /// The type `ty[index]` yields; a tuple field needs a constant index.
-/// Binds each bare type name in `pattern` (`Crate<T>`) to the matching part
-/// of `actual` (`Crate<Text>`), looking through references and pointers.
+/// Binds each bare type name in `pattern` (`Crate<T*>`) to the matching part
+/// of `actual` (`Crate<Text*>`, so `T` is `Text`). A reference or pointer on
+/// one side only is looked through, since typeck may record a borrowed
+/// container.
 fn bind_type_arguments(
     pattern: &ast::Type,
     actual: &ast::Type,
     bindings: &mut FxHashMap<String, ast::Type>,
 ) {
-    let peel = |ty: &ast::Type| -> ast::Type {
-        let mut ty = ty.clone();
-        loop {
-            ty = match ty.kind.as_ref() {
-                ast::TypeKind::Reference(reference) => reference.inner.as_ref().clone(),
-                ast::TypeKind::Pointer(pointer) => pointer.inner.as_ref().clone(),
-                _ => return ty,
-            };
+    use ast::TypeKind::{Generic, Named, Pointer, Reference};
+    match (pattern.kind.as_ref(), actual.kind.as_ref()) {
+        (Reference(pattern), Reference(actual)) => {
+            bind_type_arguments(&pattern.inner, &actual.inner, bindings);
         }
-    };
-    let (pattern, actual) = (peel(pattern), peel(actual));
-    let (ast::TypeKind::Named(pattern), ast::TypeKind::Named(actual)) =
-        (pattern.kind.as_ref(), actual.kind.as_ref())
-    else {
-        return;
-    };
-    let (Some(parameters), Some(arguments)) = (&pattern.generics, &actual.generics) else {
-        return;
-    };
-    for (parameter, argument) in parameters.iter().zip(arguments) {
-        match parameter.kind.as_ref() {
-            ast::TypeKind::Named(named)
-                if named.path.len() == 1 && named.generics.as_ref().is_none_or(Vec::is_empty) =>
-            {
-                bindings.insert(named.path[0].name.clone(), argument.clone());
-            }
-            ast::TypeKind::Generic(generic) if generic.args.is_empty() => {
-                bindings.insert(generic.name.name.clone(), argument.clone());
-            }
-            _ => bind_type_arguments(parameter, argument, bindings),
+        (Pointer(pattern), Pointer(actual)) => {
+            bind_type_arguments(&pattern.inner, &actual.inner, bindings);
         }
+        (Named(named), _)
+            if named.path.len() == 1 && named.generics.as_ref().is_none_or(Vec::is_empty) =>
+        {
+            bindings.insert(named.path[0].name.clone(), actual.clone());
+        }
+        (Generic(generic), _) if generic.args.is_empty() => {
+            bindings.insert(generic.name.name.clone(), actual.clone());
+        }
+        (Named(pattern), Named(actual)) => {
+            let parameters = pattern.generics.as_deref().unwrap_or_default();
+            let arguments = actual.generics.as_deref().unwrap_or_default();
+            for (parameter, argument) in parameters.iter().zip(arguments) {
+                bind_type_arguments(parameter, argument, bindings);
+            }
+        }
+        (Reference(pattern), _) => bind_type_arguments(&pattern.inner, actual, bindings),
+        (Pointer(pattern), _) => bind_type_arguments(&pattern.inner, actual, bindings),
+        (_, Reference(actual)) => bind_type_arguments(pattern, &actual.inner, bindings),
+        (_, Pointer(actual)) => bind_type_arguments(pattern, &actual.inner, bindings),
+        _ => {}
     }
 }
 
@@ -3496,12 +3495,22 @@ mod tests {
     /// `inner` cannot leave by index although `Crate<T>`'s may be Copy.
     #[test]
     fn an_element_move_is_checked_against_every_instantiation() {
-        let pull = "void pull<T>(Crate<T> crate) { sink(crate[0].inner); }\n";
-        let rejected = super::msg::cannot_move_out_of_indexed_element("Crate<Text>");
-        for (body, owned) in [
-            ("Crate<i64> copies; pull(copies);", false),
-            ("Crate<i64> copies; Crate<Text> texts; pull(copies); pull(texts);", true),
+        let pull = "void pull<T>(Crate<T> crate) { sink(crate[0].inner); }\n\
+                    struct Rack<T> { T* data; }\n\
+                    impl<T> IndexedAccess for Rack<T*> {\n\
+                      type Item = T;\n\
+                      T __index_get(*self, i64 index) { return *(self.data[index]); }\n\
+                      void __index_set(*self, i64 index, T value) {}\n\
+                    }\n\
+                    void unrack<T>(Rack<T*> rack) { sink(rack[0]); }\n";
+        for (body, container, owned) in [
+            ("Crate<i64> copies; pull(copies);", "Crate<Text>", false),
+            ("Crate<i64> copies; Crate<Text> texts; pull(copies); pull(texts);", "Crate<Text>", true),
+            // The parameter sits under a pointer in the impl's container.
+            ("Rack<i64*> copies; unrack(copies);", "Rack<Text*>", false),
+            ("Rack<Text*> texts; unrack(texts);", "Rack<Text*>", true),
         ] {
+            let rejected = super::msg::cannot_move_out_of_indexed_element(container);
             let errors = errors_with_items(pull, body);
             assert!(errors.types.is_empty(), "{body}: {errors:?}");
             assert_eq!(errors.moves.contains(&rejected), owned, "{body}: {errors:?}");
