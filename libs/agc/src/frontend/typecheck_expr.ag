@@ -3880,7 +3880,8 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 if (parameter_kind == TypeKind.Pointer) { pool.mutable_borrows.set((i64)arg_id); }
                 if (parameter_kind != TypeKind.Pointer
                     && parameter_kind != TypeKind.Reference
-                    && pool.get_expr(arg_id).kind != ExprKind.Move) {
+                    && pool.get_expr(arg_id).kind != ExprKind.Move
+                    && !typecheck_coerces_to_view(types, parameter_type, actual_type)) {
                     typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
                                                        arg_id, diagnostics, ok);
                 }

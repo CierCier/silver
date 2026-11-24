@@ -447,6 +447,8 @@ void stress_conditional_and_borrowed_transfers() {
         leaves.push(OwnedLeaf.new(23, 2));
         leaves.push(OwnedLeaf.new(24, 3));
         assert_eq_i64(leaf_count(leaves), 2, "slice parameter viewed the vec");
+        i64(Slice<OwnedLeaf>) count = leaf_count;
+        assert_eq_i64(count(leaves), 2, "a local callable's slice parameter viewed the vec");
         assert_eq_i64(leaves.len(), 2, "vec still owns its leaves after the call");
     }
     assert_eq_i32(leaf_drop_count, 2, "vec viewed as a slice drops its leaves once");
