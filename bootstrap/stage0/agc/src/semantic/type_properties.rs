@@ -268,6 +268,10 @@ fn is_copy_inner(
             if base == "Slice" {
                 return true;
             }
+            // A task handle owns its thread; it is never Copy, whatever its payload.
+            if named.path.len() == 1 && base == "Task" {
+                return false;
+            }
             if let Some(fields) = context.fields_for(named) {
                 // Guard against recursive structs: if we're already visiting this
                 // type, consider it Copy to break the cycle (conservative for

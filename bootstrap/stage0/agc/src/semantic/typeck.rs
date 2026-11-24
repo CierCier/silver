@@ -9320,4 +9320,43 @@ mod tests {
             assert!(errors.iter().any(|message| message.contains(&copy)), "{rejected} {errors:?}");
         }
     }
+
+    /// A named variant field of a precompiled enum owns its value, and a task
+    /// handle is never Copy, whatever its payload.
+    #[test]
+    fn a_copy_bound_rejects_imported_named_variants_and_tasks() {
+        let dir = std::env::temp_dir().join(format!("agc-enum-import-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("msgs.ag");
+        std::fs::write(
+            &path,
+            "trait Drop { void drop(*self); }\n\
+             struct Text { u8* bytes; }\n\
+             impl Drop for Text { void drop(*self) {} }\n\
+             enum Msg { Note { Text body; }; Empty; }\n\
+             enum Mode { On; Off; }\n",
+        )
+        .expect("write module");
+        let module = crate::module_artifact::ModuleArtifact::from_source(&path).expect("module");
+        std::fs::remove_dir_all(&dir).ok();
+        let check = |target: &str| {
+            let source = format!(
+                "i64 pick<T: Copy>(T value) {{ return 0; }}\ni64 run({target} value) {{ return pick(value); }}\n"
+            );
+            let tokens = lexer::lex(&source).expect("probe should lex");
+            let (mut program, errors) = Parser::new(tokens).parse_program();
+            assert!(errors.is_empty(), "probe should parse: {errors:?}");
+            TypeChecker::resolve_type_aliases_in_program(&mut program);
+            let (errors, _) = TypeChecker::new()
+                .with_imported_modules(&[module.clone()])
+                .check_program_with_table(&program, &mut CompilerSymbolTable::new());
+            errors.into_iter().map(|error| error.message).collect::<Vec<_>>()
+        };
+        for owner in ["Msg", "Task<i64>"] {
+            let copy = crate::diagnostics::messages::bound_requires_copy(&owner);
+            let errors = check(owner);
+            assert!(errors.iter().any(|message| message.contains(&copy)), "{owner} {errors:?}");
+        }
+        assert!(check("Mode").is_empty(), "{:?}", check("Mode"));
+    }
 }
