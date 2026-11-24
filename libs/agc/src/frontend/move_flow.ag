@@ -366,13 +366,28 @@ impl MoveFlow {
         }
     }
 
+    /// Whether `place`'s own entry holds state: a single value's does, and an
+    /// array's does while some element has no place of its own.
+    bool own_counts(MoveFlow* self, i64 place) {
+        FlowPlace info = self.places.get(place);
+        if (!info.expanded) { return true; }
+        if (!info.is_array) { return false; }
+        i64 elements = 0;
+        i64 child = info.first_child;
+        while (child >= 0) {
+            elements += 1;
+            child = self.places.get(child).next_sibling;
+        }
+        return elements < self.types.get(info.type_id).count;
+    }
+
     /// The first place at or below `place` that is not initialized on every
     /// path, or -1 when the whole subtree holds a value.
     /// With `moved_only`, only places a move may have emptied count: storage
     /// declared without a value is zeroed and may be initialized in place.
     i64 first_gap(MoveFlow* self, FlowState* state, i64 place, bool moved_only) {
         FlowPlace info = self.places.get(place);
-        bool own_counts = !info.expanded || info.is_array;
+        bool own_counts = self.own_counts(place);
         if (own_counts && self.init_at(state, place) != FlowInit.Init
             && (!moved_only || self.cause_at(state, place) == FlowCause.Moved)) { return place; }
         i64 child = info.first_child;
@@ -388,7 +403,7 @@ impl MoveFlow {
     /// holds a value, otherwise Maybe.
     FlowInit summary(MoveFlow* self, FlowState* state, i64 place) {
         FlowPlace info = self.places.get(place);
-        bool own_counts = !info.expanded || info.is_array;
+        bool own_counts = self.own_counts(place);
         bool any_init = own_counts && self.init_at(state, place) == FlowInit.Init;
         bool any_gap = own_counts && self.init_at(state, place) != FlowInit.Init;
         bool all_empty = !own_counts || self.init_at(state, place) == FlowInit.Empty;
@@ -501,6 +516,9 @@ impl MoveFlow {
         self.place_text(used, &name);
         String part = String.new();
         self.place_text(gap, &part);
+        // An array's own entry stands for the elements without a place.
+        FlowPlace gap_info = self.places.get(gap);
+        if (gap_info.is_array && gap_info.first_child >= 0) { part.push_str("[...]"); }
         String message = String.new();
         String note = String.new();
         if (cause == FlowCause.Moved) {
@@ -537,10 +555,12 @@ impl MoveFlow {
     }
 
     /// Whether `place` counts as assigned: a single value must hold one on
-    /// every path; an aggregate needs some field assigned on some path, its
-    /// other fields keeping the zero value of declared storage.
+    /// every path, and so must every element of an array; a struct needs some
+    /// field assigned on some path, its other fields keeping the zero value
+    /// of declared storage.
     bool assigned(MoveFlow* self, FlowState* state, i64 place) {
         FlowPlace info = self.places.get(place);
+        if (info.is_array) { return self.summary(state, place) == FlowInit.Init; }
         if (!info.expanded) { return self.init_at(state, place) == FlowInit.Init; }
         return self.summary(state, place) != FlowInit.Empty;
     }

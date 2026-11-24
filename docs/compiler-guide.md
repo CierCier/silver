@@ -501,7 +501,9 @@ arguments. The pass reads only those facts and the inferred types.
 Each owned (non-Copy) local is a tree of places: the local, its struct and
 tuple fields, and the constant-index elements of a fixed-size array. A path
 state records `Init`, `Empty`, or `Maybe` per place, with the cause (moved or
-declared without a value) and its span for the note. Branches fork the state;
+declared without a value) and its span for the note. An array's own entry
+stands for its elements without a place, so a whole-array read needs every
+element. Branches fork the state;
 joins mark disagreeing places `Maybe`. A loop repeats its condition and body,
 joining the `continue` states before the step, until the head state is stable.
 Its exit joins the false-condition state with the `break` states. `return`,

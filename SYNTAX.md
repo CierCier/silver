@@ -1158,6 +1158,7 @@ each pass.
 A local declared without a value starts as zeroed storage. It must be assigned
 on every path before it is read or moved, unless part of it is assigned: the
 unassigned fields of a value built field by field keep their zero value. A
+whole array needs every element assigned before it is read or moved. A
 method that takes `*self` or `&mut self`, and `&mut x` or `&x` passed to a `T*`
 parameter, may initialize the storage in place, so `Vec<i64> v; v.push(1);`
 is accepted. Such a borrow of a value that was moved out is still rejected.
