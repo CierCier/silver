@@ -220,9 +220,11 @@ pub struct TypeChecker {
     /// Whether the overload selected at each instance method call takes its
     /// receiver by value.
     consuming_method_calls: HashMap<MethodCallKey, bool>,
-    /// Element type of each index through `__index_get`, keyed by the index
-    /// expression's span. An impl's `Item` need not be its type argument.
-    indexed_elements: HashMap<CallSiteKey, ast::Type>,
+    /// The container and element type of each index through `__index_get`,
+    /// keyed by the index expression's span. An impl's `Item` need not be its
+    /// type argument; a monomorph shares its generic body's span, so the move
+    /// checker maps the recorded container onto the one it sees.
+    indexed_elements: HashMap<CallSiteKey, (ast::Type, ast::Type)>,
     /// Resolved iterator types for ForIn expressions, populated during typeck.
     /// Maps (expr start, expr end) → AST type of the IntoIter associated type.
     /// Used to populate the ForIn AST node after typeck for codegen.
@@ -357,18 +359,11 @@ impl TypeChecker {
     pub fn new() -> Self {
         Self::default()
     }
-    /// Records the element type of `container[i]`. A body checked once per
-    /// instantiation keeps the first owning element type it sees, so the
-    /// move checker rejects an element move that any instantiation forbids.
-    fn record_indexed_element(&mut self, span: Span, element: &Type) {
+    /// Records the element type `container[i]` resolves to through
+    /// `__index_get`, with the container type it was resolved for.
+    fn record_indexed_element(&mut self, span: Span, container: &Type, element: &Type) {
         let key = (span.file, span.start, span.end, span.expansion);
-        if self
-            .indexed_elements
-            .get(&key)
-            .is_none_or(|known| self.type_is_copy(&Type::from_ast(known)))
-        {
-            self.indexed_elements.insert(key, element.to_ast());
-        }
+        self.indexed_elements.entry(key).or_insert_with(|| (container.to_ast(), element.to_ast()));
     }
 
     fn type_from_ast(&mut self, source: &ast::Type) -> Type {
@@ -553,7 +548,7 @@ impl TypeChecker {
         &self.consuming_method_calls
     }
 
-    pub fn indexed_elements(&self) -> &HashMap<CallSiteKey, ast::Type> {
+    pub fn indexed_elements(&self) -> &HashMap<CallSiteKey, (ast::Type, ast::Type)> {
         &self.indexed_elements
     }
 
@@ -2967,7 +2962,7 @@ impl TypeChecker {
                                 None,
                                 object.span,
                             ) {
-                                self.record_indexed_element(expr.span, &result_ty);
+                                self.record_indexed_element(expr.span, &object_ty, &result_ty);
                                 result_ty
                             } else {
                                 self.error(
@@ -3039,7 +3034,7 @@ impl TypeChecker {
                             None,
                             object.span,
                         ) {
-                            self.record_indexed_element(expr.span, &result_ty);
+                            self.record_indexed_element(expr.span, &object_ty, &result_ty);
                             result_ty
                         } else {
                             self.error(

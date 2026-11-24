@@ -472,9 +472,9 @@ struct Facts {
     /// Whether the overload typeck selected at a method call takes its
     /// receiver by value; it overrides `value_receivers` for that call.
     consuming_calls: FxHashMap<MethodCallKey, bool>,
-    /// Element type of each `container[i]` that typeck resolved through
-    /// `__index_get`, keyed by the index expression's span.
-    indexed_elements: FxHashMap<CallSiteKey, ast::Type>,
+    /// The container and element type of each `container[i]` that typeck
+    /// resolved through `__index_get`, keyed by the index's span.
+    indexed_elements: FxHashMap<CallSiteKey, (ast::Type, ast::Type)>,
     /// (function/method name, param index) pairs with a value (non-view) param.
     value_args: FxHashSet<(String, usize)>,
     /// (owner, method, explicit argument index) pairs with value parameters.
@@ -879,7 +879,7 @@ pub fn analyze_program_with_imports(
     program: &ast::Program,
     imported_modules: &[ModuleArtifact],
     consuming_calls: &FxHashMap<MethodCallKey, bool>,
-    indexed_elements: &FxHashMap<CallSiteKey, ast::Type>,
+    indexed_elements: &FxHashMap<CallSiteKey, (ast::Type, ast::Type)>,
 ) -> MoveReport {
     let mut facts = Facts::build(program, imported_modules);
     facts.consuming_calls = consuming_calls.clone();
@@ -1217,12 +1217,14 @@ impl MoveChecker {
             .map(|(_, ty)| ty)
             .or_else(|| match receiver.kind.as_ref() {
                 ast::ExpressionKind::Index { object, index } => {
-                    self.indexed_element(receiver).or_else(|| {
-                        index_element_type(&self.receiver_type(object, var_types)?, index)
-                    })
+                    let container = self.receiver_type(object, var_types);
+                    self.indexed_element(receiver, container.as_ref())
+                        .or_else(|| index_element_type(&container?, index))
                 }
+                // A field reached through an index (`boxes[0].inner.items`)
+                // has no root local path.
                 ast::ExpressionKind::FieldAccess { object, field }
-                    if matches!(object.kind.as_ref(), ast::ExpressionKind::Index { .. }) =>
+                    if expr_root_and_path(receiver).is_none() =>
                 {
                     self.field_type(self.receiver_type(object, var_types)?, &field.name)
                 }
@@ -1234,13 +1236,24 @@ impl MoveChecker {
     }
 
     /// The element type typeck resolved for `container[i]` through
-    /// `__index_get`.
-    fn indexed_element(&self, index: &ast::Expression) -> Option<ast::Type> {
+    /// `__index_get`. A monomorph shares its generic body's span, so the type
+    /// arguments of the recorded container are mapped onto `container`'s:
+    /// `Wrap<T>` recorded for `Crate<T>` reads as `Wrap<Text>` in `Crate<Text>`.
+    fn indexed_element(
+        &self,
+        index: &ast::Expression,
+        container: Option<&ast::Type>,
+    ) -> Option<ast::Type> {
         let span = index.span;
-        self.facts
+        let (recorded, element) = self
+            .facts
             .indexed_elements
-            .get(&(span.file, span.start, span.end, span.expansion))
-            .cloned()
+            .get(&(span.file, span.start, span.end, span.expansion))?;
+        let mut substitutions = FxHashMap::default();
+        if let Some(container) = container {
+            bind_type_arguments(recorded, container, &mut substitutions);
+        }
+        Some(Self::substitute_type(element, &substitutions))
     }
 
     /// Checks a value stored into a new place (`T u = t`, `u = t`, a struct
@@ -1343,7 +1356,7 @@ impl MoveChecker {
         // The type typeck resolved for the index (an `__index_get` result may
         // differ from the type argument); the type argument only as a fallback.
         let owned = self
-            .indexed_element(element)
+            .indexed_element(element, Some(&container))
             .or_else(|| index_element_type(&container, index))
             .and_then(|element| self.field_type(element, &path))
             .is_some_and(|moved| self.facts.is_tracked(&moved));
@@ -3234,6 +3247,47 @@ fn is_plain_place(expr: &ast::Expression) -> bool {
 /// The element type of indexing `ty`: an array's or slice's element, or the
 /// one type argument of a container such as `Vec<T>`.
 /// The type `ty[index]` yields; a tuple field needs a constant index.
+/// Binds each bare type name in `pattern` (`Crate<T>`) to the matching part
+/// of `actual` (`Crate<Text>`), looking through references and pointers.
+fn bind_type_arguments(
+    pattern: &ast::Type,
+    actual: &ast::Type,
+    bindings: &mut FxHashMap<String, ast::Type>,
+) {
+    let peel = |ty: &ast::Type| -> ast::Type {
+        let mut ty = ty.clone();
+        loop {
+            ty = match ty.kind.as_ref() {
+                ast::TypeKind::Reference(reference) => reference.inner.as_ref().clone(),
+                ast::TypeKind::Pointer(pointer) => pointer.inner.as_ref().clone(),
+                _ => return ty,
+            };
+        }
+    };
+    let (pattern, actual) = (peel(pattern), peel(actual));
+    let (ast::TypeKind::Named(pattern), ast::TypeKind::Named(actual)) =
+        (pattern.kind.as_ref(), actual.kind.as_ref())
+    else {
+        return;
+    };
+    let (Some(parameters), Some(arguments)) = (&pattern.generics, &actual.generics) else {
+        return;
+    };
+    for (parameter, argument) in parameters.iter().zip(arguments) {
+        match parameter.kind.as_ref() {
+            ast::TypeKind::Named(named)
+                if named.path.len() == 1 && named.generics.as_ref().is_none_or(Vec::is_empty) =>
+            {
+                bindings.insert(named.path[0].name.clone(), argument.clone());
+            }
+            ast::TypeKind::Generic(generic) if generic.args.is_empty() => {
+                bindings.insert(generic.name.name.clone(), argument.clone());
+            }
+            _ => bind_type_arguments(parameter, argument, bindings),
+        }
+    }
+}
+
 fn index_element_type(ty: &ast::Type, index: &ast::Expression) -> Option<ast::Type> {
     match ty.kind.as_ref() {
         ast::TypeKind::Tuple(fields) => match index.kind.as_ref() {
@@ -3296,6 +3350,22 @@ mod tests {
         struct Bag<T> { T* data; }\n\
         struct Card { Text text; i64 n; }\n\
         struct Other { Text n; }\n\
+        struct Inner { Bag<Text> items; }\n\
+        struct Outer { Inner inner; }\n\
+        struct Count<T> { i64* data; }\n\
+        impl<T> IndexedAccess for Count<T> {\n\
+          type Item = i64;\n\
+          i64 __index_get(*self, i64 index) { return self.data[index]; }\n\
+          void __index_set(*self, i64 index, i64 value) { self.data[index] = value; }\n\
+        }\n\
+        struct Wrap<T> { Text keep; T inner; }\n\
+        struct Crate<T> { Wrap<T>* data; }\n\
+        impl<T> IndexedAccess for Crate<T> {\n\
+          type Item = Wrap<T>;\n\
+          Wrap<T> __index_get(*self, i64 index) { return self.data[index]; }\n\
+          void __index_set(*self, i64 index, Wrap<T> value) { self.data[index] = move value; }\n\
+        }\n\
+        void sink<U>(U value) {}\n\
         struct Deck<T> { Card* data; }\n\
         impl<T> IndexedAccess for Deck<T> {\n\
           type Item = Card;\n\
@@ -3317,16 +3387,31 @@ mod tests {
     }
 
     fn errors_in(body: &str) -> Errors {
-        let source = format!("{PRELUDE}i64 main() {{\n{body}\nreturn 0;\n}}\n");
+        errors_with_items("", body)
+    }
+
+    /// Like `errors_in`, with top-level `items` declared before `main`. As in
+    /// the driver, generic instances are appended before move checking.
+    fn errors_with_items(items: &str, body: &str) -> Errors {
+        let source = format!("{PRELUDE}{items}i64 main() {{\n{body}\nreturn 0;\n}}\n");
         let tokens = lexer::lex(&source).expect("probe should lex");
         let (mut program, errors) = Parser::new(tokens).parse_program();
         assert!(errors.is_empty(), "probe should parse: {errors:?}");
         TypeChecker::resolve_type_aliases_in_program(&mut program);
         let mut checker = TypeChecker::new();
-        let (types, _) =
-            checker.check_program_with_table(&program, &mut CompilerSymbolTable::new());
+        let mut symbols = CompilerSymbolTable::new();
+        let (types, mut monomorphs) = checker.check_program_with_table(&program, &mut symbols);
         let inferred_lets = checker.take_inferred_lets();
         crate::semantic::typeck::populate_inferred_let_types(&mut program, &inferred_lets);
+        crate::semantic::monomorph::refresh_monomorph_bodies(&mut monomorphs, &program);
+        let items = crate::semantic::monomorph::append_monomorphs(&mut program, &monomorphs, &[]);
+        let instances = crate::parser::ast::Program {
+            attributes: Vec::new(),
+            items,
+            comments: Vec::new(),
+            span: program.span,
+        };
+        let _ = checker.check_program_with_table(&instances, &mut symbols);
         let moves =
             super::analyze_program_with_imports(
                 &program,
@@ -3362,6 +3447,7 @@ mod tests {
             ("Bag<Card>", "Bag<Card> bag; eat(bag[0].text);"),
             ("Bag<Card>", "Bag<Bag<Card>> bags; eat(bags[0][0].text);"),
             ("Deck<i64>", "Deck<i64> deck; eat(deck[0].text);"),
+            ("Bag<Text>", "Bag<Outer> boxes; eat(boxes[0].inner.items[0]);"),
         ] {
             let rejected = super::msg::cannot_move_out_of_indexed_element(container);
             let errors = errors_in(misuse);
@@ -3376,9 +3462,28 @@ mod tests {
             "Deck<i64> deck; i64 n = deck[0].n;",
             // `Item` is Card, whose `n` is i64, though Other's `n` is owned.
             "Deck<Other> deck; i64 n = deck[0].n;",
+            "Count<Text> counts; i64 n = counts[0];",
+            "Bag<Outer> boxes; i64 n = boxes[0].inner.items[0].inspect();",
         ] {
             let errors = errors_in(control);
             assert!(errors.types.is_empty() && errors.moves.is_empty(), "{control}: {errors:?}");
+        }
+    }
+
+    /// An instance of a generic body shares the body's index spans; its
+    /// element type follows its own container, so `Crate<Text>`'s owned
+    /// `inner` cannot leave by index although `Crate<T>`'s may be Copy.
+    #[test]
+    fn an_element_move_is_checked_against_every_instantiation() {
+        let pull = "void pull<T>(Crate<T> crate) { sink(crate[0].inner); }\n";
+        let rejected = super::msg::cannot_move_out_of_indexed_element("Crate<Text>");
+        for (body, owned) in [
+            ("Crate<i64> copies; pull(copies);", false),
+            ("Crate<i64> copies; Crate<Text> texts; pull(copies); pull(texts);", true),
+        ] {
+            let errors = errors_with_items(pull, body);
+            assert!(errors.types.is_empty(), "{body}: {errors:?}");
+            assert_eq!(errors.moves.contains(&rejected), owned, "{body}: {errors:?}");
         }
     }
 
