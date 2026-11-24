@@ -236,6 +236,22 @@ void test_eventfd_dup_and_fork() {
     efd.close();
 }
 
+/// A write that would pass the counter's maximum fails with EAGAIN on a
+/// non-blocking eventfd instead of wrapping.
+void test_eventfd_counter_limit() {
+    Result<EventFd, Error> efd_res = EventFd.new(0, true);
+    @assert(efd_res.is_ok());
+    EventFd efd = efd_res.unwrap();
+    u64 near_max = (u64)0xFFFFFFFFFFFFFFFE;
+    @assert(sys_write((i64)efd.fd, (i64)&near_max, 8) == 8);
+    u64 two = 2;
+    @assert(sys_write((i64)efd.fd, (i64)&two, 8) == -EAGAIN);
+    Result<u64, Error> r = efd.read_val();
+    @assert(r.is_ok());
+    @assert(r.unwrap() == near_max);
+    efd.close();
+}
+
 /// An eventfd that lands on descriptor 0 (stdin closed) still behaves as an
 /// eventfd. Runs last: it leaves stdin closed.
 void test_eventfd_on_descriptor_zero() {
@@ -258,6 +274,7 @@ i32 main() {
     test_socket_tuning_and_reuseport();
     test_zero_copy_sendfile();
     test_eventfd_dup_and_fork();
+    test_eventfd_counter_limit();
     test_eventfd_on_descriptor_zero();
     return 0;
 }

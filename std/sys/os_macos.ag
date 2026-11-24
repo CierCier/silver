@@ -2297,6 +2297,10 @@ bool mac_fd_is_socket(i64 fd) {
 
 /// Linux eventfd flags.
 const i64 LINUX_EFD_SEMAPHORE = 1;
+/// Largest eventfd counter value (Linux: 0xfffffffffffffffe).
+const u64 MAC_EVENTFD_COUNTER_MAX = 0xFFFFFFFFFFFFFFFE;
+/// os_sync flag: the address is in memory shared between processes.
+const u32 MAC_OS_SYNC_SHARED = 1;
 /// Most eventfd descriptors (duplicates included) alive at once.
 const i64 MAC_EVENTFD_MAX = 64;
 
@@ -2427,6 +2431,8 @@ i64 mac_eventfd_read(MacEventFd* e, i64 buf, i64 len) {
                     mac_write((i32)state.write_fd, (i64)&one, 1);
                 }
             }
+            // Room opened: wake writers blocked on a full counter.
+            mac_os_sync_wake_by_address_all((u8*)counter, 8, MAC_OS_SYNC_SHARED);
             *(u64*)buf = taken;
             return 8;
         }
@@ -2434,7 +2440,9 @@ i64 mac_eventfd_read(MacEventFd* e, i64 buf, i64 len) {
     return -5;
 }
 
-/// eventfd write: adds the 8-byte value to the counter.
+/// eventfd write: adds the 8-byte value to the counter. As on Linux, a sum
+/// past 0xfffffffffffffffe never wraps: the write fails with EAGAIN under
+/// EFD_NONBLOCK and otherwise waits until a read makes room.
 i64 mac_eventfd_write(MacEventFd* e, i64 buf, i64 len) {
     if (len < 8) {
         return -22;
@@ -2444,12 +2452,26 @@ i64 mac_eventfd_write(MacEventFd* e, i64 buf, i64 len) {
         return -22;
     }
     MacEventState* state = e.state;
-    i64 old = __atomic_fetch_add_i64((i64*)&state.counter, (i64)add, ATOMIC_ACQ_REL);
-    if (old == 0 && add != (u64)0) {
-        u8 one = (u8)1;
-        mac_write((i32)state.write_fd, (i64)&one, 1);
+    i64* counter = (i64*)&state.counter;
+    while (true) {
+        u64 c = (u64)__atomic_load_i64(counter, ATOMIC_ACQUIRE);
+        if (MAC_EVENTFD_COUNTER_MAX - c < add) {
+            if ((state.flags & O_NONBLOCK) != 0) {
+                return -11; // EAGAIN
+            }
+            // Sleeps until a read changes the counter (or it already has).
+            mac_os_sync_wait_on_address((u8*)counter, c, 8, MAC_OS_SYNC_SHARED);
+            continue;
+        }
+        if (__atomic_cmpxchg_i64(counter, (i64)c, (i64)(c + add), ATOMIC_SEQ_CST, ATOMIC_ACQUIRE)) {
+            if (c == (u64)0 && add != (u64)0) {
+                u8 one = (u8)1;
+                mac_write((i32)state.write_fd, (i64)&one, 1);
+            }
+            return 8;
+        }
     }
-    return 8;
+    return -5;
 }
 
 /// Frees `e`'s slot; when it was this process's last descriptor of the
