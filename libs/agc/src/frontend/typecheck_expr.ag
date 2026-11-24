@@ -3842,7 +3842,9 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         TypeKind callable_kind = callable_entry.kind;
         u32 callable_inner = callable_entry.inner;
         i64 callable_count = callable_entry.count;
-        bool named_function = callee.kind == ExprKind.Var
+        // A local binding shadows every function of the same name.
+        bool local_binding = callee.kind == ExprKind.Var && env.lookup(callee.aux) != TYPE_UNKNOWN;
+        bool named_function = callee.kind == ExprKind.Var && !local_binding
             && find_function_by_name(root, symbols.names.get(callee.aux)) != (SyntaxNode*)0;
         if (callable_kind == TypeKind.Function && !named_function) {
             u32 arg_count = expr.aux;
@@ -3892,11 +3894,8 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
             bool ambiguous = false;
             bool no_match = false;
             u32 resolved_symbol_id = 0;
-            // A local callable shadows every function of the same name, so
-            // its own signature checks the arguments.
-            u32 local_type = types.resolve_subst(env.lookup(callee.aux));
-            bool local_callable = local_type != TYPE_UNKNOWN
-                && types.get(local_type).kind == TypeKind.Function;
+            // The callable branch above checked a local callable's arguments.
+            bool local_callable = local_binding && callable_kind == TypeKind.Function;
             SyntaxNode* callee_fn = local_callable ? (SyntaxNode*)0
                 : typecheck_resolve_free_function(
                     pool, types, symbols, root, env, callee_name, expr, diagnostics, ok,
