@@ -13,8 +13,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Each job runs the stage0 (Rust) compiler only. Stage1 is not built or
+# tested in CI for now; use `nix run .#check` locally for the full gate.
 jobs:
-  test:
+  linux-x86_64:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -54,19 +56,10 @@ jobs:
       - name: Build bootstrap tools and Rust FFI
         run: cargo build --release --workspace
 
-      - name: Build Silver compiler
-        run: target/release/agc build silver.toml --bin agc --no-cache -o "$RUNNER_TEMP/agc-stage1"
-
       - name: Run stdlib suite with stage0
         run: python3 tests/run_tests.py --release --no-tui --jobs 4
 
-      - name: Run stdlib suite with native stage1
-        run: python3 tests/run_tests.py --compiler "$RUNNER_TEMP/agc-stage1" --no-tui --jobs 4
-
-  aarch64:
-    # Native arm64 runner: the stdlib suite on real hardware, with stage0
-    # built and run on the same architecture. Stage1 emits x86_64 only, so
-    # its suite stays in the x86_64 job.
+  linux-aarch64:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     env:
@@ -106,7 +99,77 @@ jobs:
       - name: Run stdlib suite with stage0
         run: python3 tests/run_tests.py --release --no-tui --jobs 4
 
-  wasm:
+  windows-x86_64:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      LLVM_VERSION: 22.1.8
+    steps:
+      - uses: actions/checkout@v5
+
+      # The LLVM installer has no llvm-config.exe or static libraries, so stage0
+      # links LLVM-C.dll through scripts/llvm-config-shim (docs/windows-port.md
+      # §2). The release tarball also carries the llvm-c and generated Config
+      # headers that the installer omits; keep only what the build needs.
+      - name: Cache LLVM 22
+        id: llvm-cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/llvm
+          key: ${{ runner.os }}-llvm-${{ env.LLVM_VERSION }}-llvm-c
+
+      - name: Install LLVM 22
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        run: |
+          $ErrorActionPreference = "Stop"
+          $name = "clang+llvm-$env:LLVM_VERSION-x86_64-pc-windows-msvc"
+          $archive = Join-Path $env:RUNNER_TEMP "$name.tar.xz"
+          curl.exe --fail --silent --show-error --location -o $archive `
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-$env:LLVM_VERSION/$name.tar.xz"
+          tar -xf $archive -C $env:RUNNER_TEMP `
+            "$name/bin/LLVM-C.dll" "$name/bin/lld.exe" "$name/bin/lld-link.exe" `
+            "$name/lib/LLVM-C.lib" "$name/include/llvm-c" "$name/include/llvm/Config"
+          if ($LASTEXITCODE -ne 0) { throw "LLVM extraction failed" }
+          Move-Item (Join-Path $env:RUNNER_TEMP $name) (Join-Path $env:RUNNER_TEMP "llvm")
+
+      - name: Configure LLVM
+        run: |
+          $ErrorActionPreference = "Stop"
+          $llvm = Join-Path $env:RUNNER_TEMP "llvm"
+          $shim = Join-Path $env:RUNNER_TEMP "llvm-shim"
+          cargo build --release --manifest-path scripts/llvm-config-shim/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw "llvm-config shim build failed" }
+          New-Item -ItemType Directory -Force -Path "$shim\bin" | Out-Null
+          Copy-Item scripts/llvm-config-shim/target/release/llvm-config.exe "$shim\bin\"
+          "SILVER_LLVM_ROOT=$llvm" >> $env:GITHUB_ENV
+          "SILVER_LLVM_VERSION=$env:LLVM_VERSION" >> $env:GITHUB_ENV
+          "SILVER_LLVM_HEADERS=$llvm\include" >> $env:GITHUB_ENV
+          "LLVM_SYS_221_PREFIX=$shim" >> $env:GITHUB_ENV
+          # LLVM-C.dll must resolve when agc runs; lld-link is the preferred linker.
+          "$llvm\bin" >> $env:GITHUB_PATH
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-llvm-22-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-llvm-22-cargo-
+
+      - name: Build bootstrap tools and Rust FFI
+        run: cargo build --release --workspace
+
+      - name: Run stdlib suite with stage0
+        run: python tests/run_tests.py --release --no-tui --jobs 4
+
+  wasi-wasm32:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
