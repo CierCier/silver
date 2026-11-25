@@ -513,7 +513,10 @@ locals declared after its registration are hidden, so its names resolve as
 written; both backends hide the same locals when they emit it. A `let` reuses
 its place on each loop pass, so the states converge. A conditional expression
 consumes each arm on its own branch, and the backends clear the source of the
-arm that ran. A `move` binding in a `match` arm is an owned place for that arm.
+arm that ran. A `match` arm, a `?` fallback, and a value block's result are
+consumed the same way, whatever the result is used for: the result is a new
+owner even when only its field or method is used. A `move` binding in a
+`match` arm is an owned place for that arm.
 
 Section 8.2 of [SYNTAX.md](../SYNTAX.md) states the rules the pass enforces.
 `ownership.ag` now only builds owner initialization plans before expression

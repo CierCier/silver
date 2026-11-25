@@ -6401,6 +6401,11 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                     rx_temporary = llvm_entry_alloca(ctx, val_ty, "method_rx_tmp");
                     LLVMBuildStore(ctx.builder, val, rx_temporary);
                     rx_val = rx_temporary;
+                    // The temporary, or a by-value `self`, now owns the arm a
+                    // conditional copied.
+                    if (ctx.pool.get_expr(expr.inner0).kind == ExprKind.Ternary) {
+                        llvm_clear_copy_source(ctx, expr.inner0);
+                    }
                 }
             }
             if (rx_val == (LLVMOpaqueValue*)0) {

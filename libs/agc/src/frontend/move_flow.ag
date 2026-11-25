@@ -927,10 +927,13 @@ impl MoveFlow {
             self.walk_expr(state, expr.inner1, FlowUse.Read);
             self.walk_expr(state, expr.aux, FlowUse.Read);
         } else if (expr.kind == ExprKind.Ternary) {
+            // A conditional, `match`, `?` fallback, or value block yields a
+            // new value that owns what its taken arm names, whatever the
+            // result is used for. Consuming a Copy value only reads it.
             self.walk_expr(state, expr.inner0, FlowUse.Read);
             FlowState other = state.clone();
-            self.walk_expr(state, expr.inner1, use);
-            self.walk_expr(&other, expr.aux, use);
+            self.walk_expr(state, expr.inner1, FlowUse.Consume);
+            self.walk_expr(&other, expr.aux, FlowUse.Consume);
             self.join(state, &other);
         } else if (expr.kind == ExprKind.Block) {
             self.push_scope();
@@ -939,9 +942,9 @@ impl MoveFlow {
                 self.walk_stmt(state, self.pool.block_stmts.get((i64)expr.inner0 + i));
                 i += 1;
             }
-            // The block hands its result out before its defers run, whatever
-            // the result is used for, so a defer cannot consume it.
-            self.walk_expr(state, expr.aux, use == FlowUse.Read ? FlowUse.Consume : use);
+            // The block hands its result out before its defers run, so a
+            // defer cannot consume it.
+            self.walk_expr(state, expr.aux, FlowUse.Consume);
             self.pop_scope(state);
         } else if (expr.kind == ExprKind.UnwrapOr) {
             // `value ? fallback` consumes an owned value whatever its result
@@ -950,9 +953,9 @@ impl MoveFlow {
                 self.pool.get_expr(expr.inner0).inferred_type)).kind;
             bool borrowed = source == TypeKind.Pointer || source == TypeKind.Reference;
             self.walk_expr(state, expr.inner0, borrowed ? FlowUse.Read : FlowUse.Consume);
-            self.walk_branch(state, expr.inner1, use);
+            self.walk_branch(state, expr.inner1, FlowUse.Consume);
         } else if (expr.kind == ExprKind.Match) {
-            self.walk_match(state, expr, use);
+            self.walk_match(state, expr);
         } else if (expr.kind == ExprKind.ArrayLit) {
             i64 i = 0;
             while (i < (i64)expr.aux) {
@@ -1039,7 +1042,7 @@ impl MoveFlow {
     /// guard runs only after its pattern matched, so a refutable arm misses
     /// with the state before or after its guard. A `move` payload binding
     /// consumes the scrutinee on its arm and owns the payload there.
-    void walk_match(MoveFlow* self, FlowState* state, AstExpr expr, FlowUse use) {
+    void walk_match(MoveFlow* self, FlowState* state, AstExpr expr) {
         self.walk_expr(state, expr.inner0, FlowUse.Read);
         bool unknown_element = false;
         i64 scrutinee = self.resolve(expr.inner0, true, &unknown_element);
@@ -1078,7 +1081,7 @@ impl MoveFlow {
             if (arm.body_stmt_id != 0) {
                 self.walk_stmt(&branch, arm.body_stmt_id);
             } else {
-                self.walk_expr(&branch, arm.value_id, use);
+                self.walk_expr(&branch, arm.value_id, FlowUse.Consume);
             }
             self.pop_scope(&branch);
             self.join(&merged, &branch);

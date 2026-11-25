@@ -246,6 +246,9 @@ LlvmPlace llvm_emit_reference_place(LlvmContext* ctx, u32 expr_id) {
         place.type_id = llvm_expr_type(ctx, expr_id);
         place.data = llvm_entry_alloca(ctx, LLVMTypeOf(value), "reference_temporary");
         LLVMBuildStore(ctx.builder, value, place.data);
+        // A conditional leaves its consumer to release the arm it copied; the
+        // temporary is that consumer here.
+        if (expression.kind == ExprKind.Ternary) { llvm_clear_copy_source(ctx, expr_id); }
         LlvmLocal* temporary = llvm_add_temporary_local(ctx, place.data, place.type_id,
                                                         expression.span);
         place.node = llvm_init_tree_node_ptr(ctx, temporary, 0);

@@ -1144,10 +1144,10 @@ defer in that block cannot consume it. Code after a `return`, `break`,
 A conditional expression moves only the arm it takes: in
 `Token t = ready ? a : make();`, `a` is moved when `ready` is true and still
 owned when it is false, so a later use of `a` is a use of a possibly moved
-value. A `match` arm moves its result the same way, and both rules hold when
-the conditional or the `match` is a call argument, as in `keep(ready ? a :
-make())`. `r ? fallback` consumes an owned `r`. In a `match`, a `move` binding
-owns its payload for the arm and can be moved on; the scrutinee no longer
+value. A `match` arm moves its result the same way. Both rules hold whatever
+the result is used for, as in `keep(ready ? a : make())` or
+`(ready ? a : make()).id`. `r ? fallback` consumes an owned `r`. In a
+`match`, a `move` binding owns its payload for the arm and can be moved on; the scrutinee no longer
 owns that payload. A guard that fails falls through to the next arm with
 the scrutinee intact.
 
