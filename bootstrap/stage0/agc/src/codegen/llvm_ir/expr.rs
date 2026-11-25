@@ -2958,6 +2958,18 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(value)
     }
 
+    /// Releases one element of a yielded aggregate. A name the checker
+    /// recorded as moved there already left when the aggregate was built,
+    /// so a later element that reinitializes it keeps its new value.
+    fn clear_yielded_element(&mut self, element: &ast::Expression) -> CodegenResult<()> {
+        if matches!(element.kind.as_ref(), ast::ExpressionKind::Identifier(_))
+            && self.records_move(element)
+        {
+            return Ok(());
+        }
+        self.clear_yielded_value_flags(element)
+    }
+
     fn clear_yielded_value_flags(&mut self, expression: &ast::Expression) -> CodegenResult<()> {
         if let ast::ExpressionKind::Identifier(ident) = expression.kind.as_ref() {
             if let Some(flag) = self
@@ -2974,12 +2986,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 ast::ExpressionKind::Tuple(items)
                 | ast::ExpressionKind::EnumVariant { fields: items, .. } => {
                     for item in items {
-                        self.clear_yielded_value_flags(item)?;
+                        self.clear_yielded_element(item)?;
                     }
                 }
                 ast::ExpressionKind::StructLiteral { fields, .. } => {
                     for field in fields {
-                        self.clear_yielded_value_flags(&field.value)?;
+                        self.clear_yielded_element(&field.value)?;
                     }
                 }
                 ast::ExpressionKind::Initializer { items } => {
@@ -2987,7 +2999,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         let (ast::InitializerItem::Positional(value)
                         | ast::InitializerItem::Field { value, .. }
                         | ast::InitializerItem::Index { value, .. }) = item;
-                        self.clear_yielded_value_flags(value)?;
+                        self.clear_yielded_element(value)?;
                     }
                 }
                 // A yielded field or element leaves its owner before the

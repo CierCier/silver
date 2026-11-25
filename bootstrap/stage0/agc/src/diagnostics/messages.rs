@@ -69,6 +69,10 @@ pub fn clear_yielded_value_drop_flag(error: impl std::fmt::Display) -> String {
     format!("clear yielded value drop flag: {error}")
 }
 
+pub fn clear_moved_value_drop_flag(error: impl std::fmt::Display) -> String {
+    format!("clear moved value drop flag: {error}")
+}
+
 // =========================================================================
 // General & Suggestions
 // =========================================================================

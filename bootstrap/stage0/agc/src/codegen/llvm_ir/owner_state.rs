@@ -620,21 +620,41 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         &mut self,
         expression: &ast::Expression,
     ) -> CodegenResult<()> {
-        let transfer = self
-            .owner_function
+        if !self.records_move(expression) {
+            self.release_rvalue_field(expression)?;
+            return Ok(());
+        }
+        self.transition_owner_expr(expression, false)?;
+        // A moved name's drop flags clear here too, so a reinitialization
+        // later in the same expression stays owned.
+        if let ast::ExpressionKind::Identifier(ident) = expression.kind.as_ref() {
+            if let Some(flag) = self
+                .lookup_variable(&ident.name)
+                .and_then(|var| var.drop_flag)
+            {
+                self.builder
+                    .build_store(flag, self.context.bool_type().const_int(0, false))
+                    .map_err(|e| {
+                        CodegenError::new(
+                            crate::diagnostics::messages::clear_moved_value_drop_flag(e),
+                        )
+                    })?;
+            }
+            self.clear_field_flags(&ident.name)?;
+        }
+        Ok(())
+    }
+
+    /// Whether the move checker recorded `expression` as moving its value.
+    pub(crate) fn records_move(&self, expression: &ast::Expression) -> bool {
+        self.owner_function
             .as_ref()
             .and_then(|id| self.ownership.functions.get(id))
             .is_some_and(|f| {
                 f.transitions.iter().any(|t| {
                     t.site == expression.span.into() && t.state == InitState::Uninitialized
                 })
-            });
-        if transfer {
-            self.transition_owner_expr(expression, false)?;
-        } else {
-            self.release_rvalue_field(expression)?;
-        }
-        Ok(())
+            })
     }
 
     pub(crate) fn transition_owner_path(
