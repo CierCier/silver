@@ -242,15 +242,22 @@ impl MoveFlow {
 
     /// Whether a value of `type_id` holds an array of owned elements, itself
     /// or in a field at any depth.
-    bool holds_owned_array(MoveFlow* self, u32 type_id, i64 depth) {
-        if (depth >= MAX_FLOW_PLACE_DEPTH) { return false; }
+    bool holds_owned_array(MoveFlow* self, u32 type_id) {
+        Vec<u32> enclosing = Vec<u32>.new();
+        return self.type_holds_owned_array(type_id, &enclosing);
+    }
+
+    /// `holds_owned_array` below the struct types in `enclosing`. A struct
+    /// that contains itself by value has no size, so the walk skips it.
+    bool type_holds_owned_array(MoveFlow* self, u32 type_id, Vec<u32>* enclosing) {
         u32 resolved = self.types.resolve_subst(type_id);
         TypeEntry entry = *self.types.get(resolved);
         if (entry.kind == TypeKind.Array) { return !self.is_copy(resolved); }
         if (entry.kind == TypeKind.Tuple) {
             i64 index = 0;
             while (index < entry.count) {
-                if (self.holds_owned_array(self.types.type_args.get(entry.inner + (u32)index), depth + 1)) {
+                if (self.type_holds_owned_array(self.types.type_args.get(entry.inner + (u32)index),
+                                                enclosing)) {
                     return true;
                 }
                 index += 1;
@@ -260,16 +267,24 @@ impl MoveFlow {
         if (entry.kind != TypeKind.Named || self.is_copy(resolved)) { return false; }
         i64 definition_index = self.struct_definition(entry.name_id);
         if (definition_index < 0) { return false; }
+        i64 seen = 0;
+        while (seen < enclosing.len()) {
+            if (enclosing.get(seen) == resolved) { return false; }
+            seen += 1;
+        }
+        enclosing.push(resolved);
         TypeStructProperties definition = self.types.struct_properties.get(definition_index);
+        bool holds = false;
         u32 offset = 0;
-        while (offset < definition.field_count) {
+        while (!holds && offset < definition.field_count) {
             str field = self.types.names.get(
                 self.types.struct_field_names.get(definition.field_name_start + offset));
             u32 field_type = typecheck_struct_field_type(self.types, self.root, resolved, field);
-            if (field_type != TYPE_UNKNOWN && self.holds_owned_array(field_type, depth + 1)) { return true; }
+            holds = field_type != TYPE_UNKNOWN && self.type_holds_owned_array(field_type, enclosing);
             offset += 1;
         }
-        return false;
+        enclosing.pop();
+        return holds;
     }
 
     /// Creates the field places of a struct or tuple place. Returns false when
@@ -629,7 +644,7 @@ impl MoveFlow {
         FlowPlace owner = self.places.get(place);
         if (!owner.expanded) {
             bool missing = self.init_at(state, place) != FlowInit.Init
-                && self.holds_owned_array(owner.type_id, owner.depth);
+                && self.holds_owned_array(owner.type_id);
             return missing ? place : -1;
         }
         i64 child = owner.first_child;

@@ -933,7 +933,8 @@ class NativeLsp(unittest.TestCase):
         # Array elements are not zero-filled: a whole-array read needs each one,
         # though an element built field by field counts, and so does an array
         # field of a struct built field by field. An incomplete owned array
-        # blocks a read of the value that holds it, not of a sibling field.
+        # blocks a read of the value that holds it, not of a sibling field,
+        # however deep it sits.
         text = ("trait Drop { void drop(*self); }\nstruct Text { i64 n; }\n"
                 "impl Text { i64 len(&self) { return self.n; } }\nimpl Drop for Text { void drop(*self) { } }\n"
                 "struct Opts { i64 n; Text items; }\n"
@@ -949,8 +950,12 @@ class NativeLsp(unittest.TestCase):
                 "i64 sibling() {\n Holder h;\n h.n = 1;\n return h.spare.len();\n}\n"
                 "struct Shelf { i64 n; Holder inner; }\n"
                 "i64 inner() {\n Shelf s;\n s.n = 1;\n Holder h = move s.inner;\n return h.n;\n}\n"
+                "struct D8 { Holder x; } struct D7 { D8 x; } struct D6 { D7 x; } struct D5 { D6 x; }\n"
+                "struct D4 { D5 x; } struct D3 { D4 x; } struct D2 { D3 x; } struct D1 { D2 x; }\n"
+                "struct Tower { i64 n; D1 base; }\n"
+                "i64 deep() {\n Tower t;\n t.n = 1;\n Tower u = move t;\n return u.n;\n}\n"
                 "i64 main() { return built() + empty() + element() + whole() + full() + fields() + holder() + nested()\n"
-                "  + sibling() + inner(); }\n")
+                "  + sibling() + inner() + deep(); }\n")
         uri = self.open(text)
         diagnostics = self.session.published(uri, 1)["diagnostics"]
         self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
@@ -959,7 +964,8 @@ class NativeLsp(unittest.TestCase):
                           (22, "use of 'a' before 'a[...]' is initialized"),
                           (43, "use of 'h.items' before 'h.items[...]' is initialized"),
                           (50, "use of 'h' before 'h.items[...]' is initialized"),
-                          (62, "use of uninitialized value 's.inner'")])
+                          (62, "use of uninitialized value 's.inner'"),
+                          (71, "use of 't' before 't.base' is initialized")])
 
     def test_returned_pointee_places_and_unrelated_c_results_are_not_local_escapes(self):
         # A result of the parameter's pointee type (`i64*` from `i64**`) is a
