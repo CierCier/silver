@@ -2072,8 +2072,11 @@ i64 sys_wait_readable(i64 fd, i64 timeout_ms) {
 // epoll over kqueue. The epoll fd is a kqueue; registrations become
 // EVFILT_READ / EVFILT_WRITE filters whose udata is the epoll data word.
 // Linux `struct epoll_event` is 16 bytes here (aarch64): events u32 @0,
-// data u64 @8. Limits: EPOLL_CTL_ADD on a registered fd updates it instead
-// of failing with EEXIST, and EPOLLEXCLUSIVE / EPOLLWAKEUP are ignored.
+// data u64 @8. EPOLLONESHOT registers both filters with EV_DISPATCH (each
+// disables itself after one event) and disables the other filter when one
+// fires, so the whole registration stays off until EPOLL_CTL_MOD re-enables
+// it. Limits: EPOLL_CTL_ADD on a registered fd updates it instead of failing
+// with EEXIST, and EPOLLEXCLUSIVE / EPOLLWAKEUP are ignored.
 // ---------------------------------------------------------------------------
 
 /// Darwin kevent filters and flags.
@@ -2081,7 +2084,9 @@ const i16 MAC_EVFILT_READ = -1;
 const i16 MAC_EVFILT_WRITE = -2;
 const u16 MAC_EV_ADD = 0x1;
 const u16 MAC_EV_DELETE = 0x2;
-const u16 MAC_EV_ONESHOT = 0x10;
+const u16 MAC_EV_ENABLE = 0x4;
+const u16 MAC_EV_DISABLE = 0x8;
+const u16 MAC_EV_DISPATCH = 0x80;
 const u16 MAC_EV_CLEAR = 0x20;
 const u16 MAC_EV_RECEIPT = 0x40;
 const u16 MAC_EV_ERROR = 0x4000;
@@ -2167,12 +2172,13 @@ i64 sys_epoll_ctl(i64 epfd, i64 op, i64 fd, i64 event) {
     u64 data = *(u64*)(event + 8);
     u16 extra = (u16)0;
     if ((events & LINUX_EPOLLET) != (u32)0) { extra = extra | MAC_EV_CLEAR; }
-    if ((events & LINUX_EPOLLONESHOT) != (u32)0) { extra = extra | MAC_EV_ONESHOT; }
+    if ((events & LINUX_EPOLLONESHOT) != (u32)0) { extra = extra | MAC_EV_DISPATCH; }
     bool want_read = (events & (LINUX_EPOLLIN | LINUX_EPOLLPRI | LINUX_EPOLLRDHUP)) != (u32)0
         || (events & LINUX_EPOLLOUT) == (u32)0;
     bool want_write = (events & LINUX_EPOLLOUT) != (u32)0;
-    u16 read_flags = want_read ? (MAC_EV_ADD | extra) : MAC_EV_DELETE;
-    u16 write_flags = want_write ? (MAC_EV_ADD | extra) : MAC_EV_DELETE;
+    // EV_ENABLE re-arms a filter a one-shot event disabled (EPOLL_CTL_MOD).
+    u16 read_flags = want_read ? (MAC_EV_ADD | MAC_EV_ENABLE | extra) : MAC_EV_DELETE;
+    u16 write_flags = want_write ? (MAC_EV_ADD | MAC_EV_ENABLE | extra) : MAC_EV_DELETE;
     mac_kevent_set(&changes[0], fd, MAC_EVFILT_READ, read_flags | MAC_EV_RECEIPT, data);
     mac_kevent_set(&changes[32], fd, MAC_EVFILT_WRITE, write_flags | MAC_EV_RECEIPT, data);
     i64 n = mac_ret((i64)mac_kevent((i32)epfd, &changes[0], 2, &results[0], 2, (i64*)0));
@@ -2224,6 +2230,15 @@ i64 sys_epoll_wait(i64 epfd, i64 events, i64 maxevents, i64 timeout_ms) {
         u16 flags = *(u16*)(kev + 10);
         u32 fflags = *(u32*)(kev + 12);
         u64 udata = *(u64*)(kev + 24);
+        if ((flags & MAC_EV_DISPATCH) != (u16)0) {
+            // One-shot: this filter disabled itself; disable the fd's other
+            // filter too (ENOENT when it is not registered is fine).
+            u8 change[32];
+            u8 result[32];
+            i16 other = filter == MAC_EVFILT_READ ? MAC_EVFILT_WRITE : MAC_EVFILT_READ;
+            mac_kevent_set(&change[0], fd, other, MAC_EV_DISABLE | MAC_EV_RECEIPT, (u64)0);
+            mac_kevent((i32)epfd, &change[0], 1, &result[0], 1, (i64*)0);
+        }
         u32 mask = (u32)0;
         if ((flags & MAC_EV_ERROR) != (u16)0) {
             mask = LINUX_EPOLLERR;

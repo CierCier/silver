@@ -202,6 +202,29 @@ void test_zero_copy_sendfile() {
     sys_unlink((i64)path);
 }
 
+/// An EPOLLONESHOT registration for both directions reports one event, then
+/// stays silent until EPOLL_CTL_MOD re-arms it.
+void test_epoll_oneshot_both_directions() {
+    Epoll ep = Epoll.new().unwrap();
+    i32 pair[2];
+    @assert(sys_socketpair((i64)AddressFamily.UNIX, (i64)SocketType.STREAM, 0, (i64)&pair[0]) == 0);
+    @assert(ep.add(pair[0], EPOLLIN | EPOLLOUT | EPOLLONESHOT, 0x51));
+    EpollEvent events[4];
+    // An idle connected socket is writable: the first event is EPOLLOUT.
+    @assert(ep.poll(&events[0], 4, 100) == 1);
+    @assert((events[0].events & EPOLLOUT) != 0);
+    // Readable data must not fire the disabled registration.
+    @assert(sys_write((i64)pair[1], (i64)"r", 1) == 1);
+    @assert(ep.poll(&events[0], 4, 0) == 0);
+    @assert(ep.modify(pair[0], EPOLLIN | EPOLLONESHOT, 0x52));
+    @assert(ep.poll(&events[0], 4, 100) == 1);
+    @assert(events[0].data == 0x52 && (events[0].events & EPOLLIN) != 0);
+    @assert(ep.poll(&events[0], 4, 0) == 0);
+    @assert(ep.delete(pair[0]));
+    sys_close((i64)pair[0]);
+    sys_close((i64)pair[1]);
+}
+
 /// A duplicated eventfd descriptor and a forked child's writes reach the
 /// same counter.
 void test_eventfd_dup_and_fork() {
@@ -273,6 +296,7 @@ i32 main() {
     test_vectorized_io();
     test_socket_tuning_and_reuseport();
     test_zero_copy_sendfile();
+    test_epoll_oneshot_both_directions();
     test_eventfd_dup_and_fork();
     test_eventfd_counter_limit();
     test_eventfd_on_descriptor_zero();
