@@ -640,6 +640,19 @@ void stress_conditional_and_borrowed_transfers() {
     }
     assert_eq_i32(leaf_drop_count, 18, "a field moved out of a temporary drops once");
     assert_eq_i64(leaf_bytes_freed, 42, "a field moved out of a temporary frees once");
+
+    // A shadowing local takes the outer value it names.
+    reset_owner_counters();
+    {
+        OwnedLeaf leaf = OwnedLeaf.new(61, 2);
+        {
+            OwnedLeaf leaf = leaf;
+            assert_eq_i32(leaf.first(), 61, "a shadowing local read the outer value");
+        }
+        assert_eq_i32(leaf_drop_count, 1, "a shadowing local drops the value it took");
+    }
+    assert_eq_i32(leaf_drop_count, 1, "a shadowed local does not drop again");
+    assert_eq_i64(leaf_bytes_freed, 2, "a shadowed value frees once");
 }
 
 void stress_defer_and_break_continue() {
