@@ -135,7 +135,7 @@ module: re-check against the wat control before touching the compiler.
 
 ## 5. Open items
 
-1. **CI leg** — added (`.github/workflows/ci.yml`, `wasm` job: LLVM 22 +
+1. **CI leg** — added (`.github/workflows/ci.yml`, `wasi-wasm32` job: LLVM 22 +
    node 24 + `run_tests.py --release --target wasm32-wasip1`), not yet
    observed on a remote runner.
 2. **Full wasm-leg suite run** — done: **143 passed, 0 failed, 57 skipped**
