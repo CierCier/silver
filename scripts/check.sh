@@ -8,7 +8,8 @@
 #   2. Rust tests for the workspace
 #   3. stdlib suite with stage0, natively and for the other Linux
 #      architecture under qemu user mode
-#   4. build stage1 with stage0, then the stdlib suite with stage1
+#   4. build stage1 with stage0, then the stdlib suite and the language
+#      server with stage1
 #   5. build the native language server, then the LSP protocol suite
 #
 # Every step runs even after a failure, except those that need a failed build.
@@ -91,8 +92,11 @@ fi
 if step "build stage1" "$stage0" build silver.toml --bin agc --no-cache -o "$stage1"; then
   step "stdlib suite (stage1)" \
     python3 tests/run_tests.py --no-tui --jobs "$jobs" --compiler "$stage1"
+  step "build language server (stage1)" \
+    "$stage1" build silver.toml --bin aglsp --no-cache -o "$work_dir/aglsp-stage1"
 else
   skip "stdlib suite (stage1)" "stage1 did not build"
+  skip "build language server (stage1)" "stage1 did not build"
 fi
 
 if step "build language server" "$stage0" build silver.toml --bin aglsp --no-cache -o "$aglsp"; then
