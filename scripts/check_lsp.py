@@ -859,7 +859,7 @@ class NativeLsp(unittest.TestCase):
                           (9, "type mismatch: expected str, found i32")])
 
     def test_moves_and_initialization_are_checked_at_each_control_flow_boundary(self):
-        # Each function from `branch` to `generic_element` misuses one boundary; `controls`
+        # Each function from `branch` to `subscript` misuses one boundary; `controls`
         # moves and reinitializes on every path and must stay accepted.
         text = ("trait Drop { void drop(*self); }\n"
                 "struct Tok { i64 id; }\n"
@@ -887,6 +887,7 @@ class NativeLsp(unittest.TestCase):
                 "struct Crate<T> { T* data; }\n"
                 "impl<T> Crate<T> { T __index_get(*self, i64 i) { return self.data[i]; } }\n"
                 "i64 generic_element(Crate<Tok> c) { take(c[0]); return 0; }\n"
+                "i64 subscript(Tok t) { Pair ps[2]; ps[slot(t)].left = mk(1); return peek(&t); }\n"
                 "i64 controls(bool f) {\n"
                 "    Tok t = mk(1);\n"
                 "    if (f) { take(t); t = mk(2); }\n"
@@ -895,6 +896,7 @@ class NativeLsp(unittest.TestCase):
                 "    p.left = mk(5);\n"
                 "    return peek(&t) + peek(&p.left);\n"
                 "}\n"
+                "i64 slot(Tok t) { return 0; }\n"
                 "i32 main() { return 0; }\n")
         uri = self.open(text)
         diagnostics = self.session.published(uri, 1)["diagnostics"]
@@ -914,7 +916,8 @@ class NativeLsp(unittest.TestCase):
                           (21, "use of possibly moved value 't'"),
                           (22, "use of possibly moved value 't'"),
                           (25, "cannot move an element out of 'Crate<Tok>' by indexing: the container still owns it; "
-                               "use take, pop, swap_remove, or a reference")])
+                               "use take, pop, swap_remove, or a reference"),
+                          (26, "use of moved value 't'")])
 
     def test_a_local_callable_is_checked_against_its_own_signature(self):
         # The parameter `f` shadows the function `f`, so its signature rules.

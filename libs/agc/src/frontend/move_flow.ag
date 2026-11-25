@@ -1274,7 +1274,9 @@ impl MoveFlow {
         bool unknown_element = false;
         i64 place = self.resolve(target, true, &unknown_element);
         AstExpr expr = *self.pool.get_expr(target);
-        if (expr.kind == ExprKind.Index) {
+        if (place >= 0) {
+            self.walk_subscripts(state, target);
+        } else if (expr.kind == ExprKind.Index) {
             self.walk_expr(state, expr.inner1, FlowUse.Read);
         }
         if (place < 0) {
