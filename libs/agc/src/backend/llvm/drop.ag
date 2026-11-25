@@ -862,19 +862,21 @@ void llvm_init_tree_build(LlvmContext* ctx, LlvmLocal* local, InitOwnerPlan* pla
     ctx.builder = saved_builder;
 }
 
-/// Keeps the initialized temporary at `ptr` as an unnamed local, so it drops
-/// once when the enclosing block exits. Returns that local.
+/// Keeps the initialized temporary at `ptr`, which holds rvalue `expr_id`, as
+/// an unnamed local, so it drops once when the enclosing block exits. Returns
+/// that local.
 ///
 /// A temporary can live in one arm of `?:` or `&&` while its block's cleanup
 /// runs on every path, so its state starts `UNINIT` at the end of the entry
 /// block and becomes live here. `ptr` must be an entry-block slot.
 LlvmLocal* llvm_add_temporary_local(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 type_id,
-                                    Span span) {
+                                    u32 expr_id, Span span) {
     String name = String.from_str("__temporary_");
     append_u32(&name, (u32)ctx.locals.len());
     u32 name_id = ctx.names.intern(name.to_str());
     name.drop();
     ctx.add_local(name_id, ptr, type_id, true);
+    ctx.locals.get_ptr(ctx.locals.len() - 1).temporary_of = expr_id;
     LLVMOpaqueValue* entry_end = LLVMGetBasicBlockTerminator(
         LLVMGetEntryBasicBlock(ctx.current_fn));
     if (entry_end == (LLVMOpaqueValue*)0) {
@@ -1363,7 +1365,8 @@ void llvm_clear_aggregate_sources(LlvmContext* ctx, u32 args_start, u32 args_cou
 }
 
 /// Collects the field path of place `expr_id` into `path`; returns its root
-/// local name id, or 0.
+/// local name id, or 0. A field of an rvalue is rooted in the temporary that
+/// holds it, so moving the field out releases only that field.
 u32 llvm_collect_drop_field_path(LlvmContext* ctx, u32 expr_id,
                                  Vec<Projection>* path) {
     if (expr_id == 0) { return 0; }
@@ -1372,9 +1375,11 @@ u32 llvm_collect_drop_field_path(LlvmContext* ctx, u32 expr_id,
     if (expr.kind == ExprKind.Move) {
         return llvm_collect_drop_field_path(ctx, expr.inner0, path);
     }
-    if ((expr.kind != ExprKind.Field && expr.kind != ExprKind.Index) || expr.inner0 == 0) {
-        return 0;
+    if (expr.kind != ExprKind.Field && expr.kind != ExprKind.Index) {
+        LlvmLocal* temporary = ctx.find_temporary(expr_id);
+        return temporary == (LlvmLocal*)0 ? 0 : temporary.name_id;
     }
+    if (expr.inner0 == 0) { return 0; }
     i64 old_len = path.len();
     u32 root_name = llvm_collect_drop_field_path(ctx, expr.inner0, path);
     if (root_name == 0) { return 0; }
@@ -1423,8 +1428,26 @@ bool llvm_validate_drop_field_transfer(LlvmContext* ctx, LlvmLocal* local,
     while (true) {
         u32 ancestor_type = local.init_nodes.get_ptr(ancestor).type_id;
         if (typecheck_type_has_drop_impl(ctx.root, ctx.types, ancestor_type)) {
+            // A temporary has no name, so its field path names the place.
+            String place = String.new();
+            if (local.temporary_of == 0) {
+                place.push_str(ctx.names.get(local.name_id));
+            } else {
+                i64 step = 0;
+                while (step < path.len()) {
+                    Projection projection = path.get(step);
+                    if (step > 0) { place.push('.'); }
+                    if (projection.kind == ProjectionKind.Field) {
+                        place.push_str(ctx.names.get(projection.field_name_id));
+                    } else {
+                        append_u32(&place, projection.field_name_id);
+                    }
+                    step += 1;
+                }
+            }
             String message = cannot_move_field_out_of_drop_type(
-                ctx.names.get(local.name_id), ctx.types.type_name(ancestor_type));
+                place.to_str(), ctx.types.type_name(ancestor_type));
+            place.drop();
             ctx.ownership_diagnostics.error(ctx.pool.get_expr(expr_id).span, move message);
             return false;
         }

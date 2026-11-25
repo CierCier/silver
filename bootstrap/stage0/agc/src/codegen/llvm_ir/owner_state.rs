@@ -545,6 +545,77 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(true)
     }
 
+    /// Releases a moved field of an rvalue's spilled temporary, such as
+    /// `make().leaf`, so the temporary drops only the fields it still owns.
+    /// A Copy field leaves the temporary whole.
+    pub(crate) fn release_rvalue_field(
+        &mut self,
+        expression: &ast::Expression,
+    ) -> CodegenResult<bool> {
+        let mut path = Vec::new();
+        let mut root = expression;
+        loop {
+            match root.kind.as_ref() {
+                ast::ExpressionKind::FieldAccess { object, field } => {
+                    path.push(field.name.clone());
+                    root = object;
+                }
+                ast::ExpressionKind::Index { object, index } => {
+                    let ast::ExpressionKind::Literal(ast::Literal::Integer(i)) =
+                        index.kind.as_ref()
+                    else {
+                        return Ok(false);
+                    };
+                    path.push(i.to_string());
+                    root = object;
+                }
+                _ => break,
+            }
+        }
+        if path.is_empty() {
+            return Ok(false);
+        }
+        let Some(data) = self.rvalue_temporaries.get(&root.span.into()).copied() else {
+            return Ok(false);
+        };
+        let Some(owner) = self.owner_states.get(&data).cloned() else {
+            return Ok(false);
+        };
+        let Some(ty) = self.resolve_argument_type(expression) else {
+            return Ok(false);
+        };
+        if !self.type_needs_drop_glue(&ty, &mut Vec::new())? {
+            return Ok(false);
+        }
+        path.reverse();
+        let node = owner.plan.node_for_path(&path.join(".")).map_err(|e| {
+            CodegenError::new(crate::diagnostics::messages::owner_init_plan_error(
+                &format!("{e:?}"),
+            ))
+        })?;
+        let Some(node) = node else {
+            return Ok(false);
+        };
+        let mut ancestor = owner.plan.nodes[node].parent;
+        while let Some(index) = ancestor {
+            let ancestor_ty = &owner.plan.nodes[index].ty;
+            if let ast::TypeKind::Named(named) = ancestor_ty.kind.as_ref()
+                && self.get_drop_function_name(ancestor_ty)?.is_some()
+            {
+                return Err(CodegenError::with_span(
+                    crate::diagnostics::messages::cannot_move_field_out_of_drop_type(
+                        &path.join("."),
+                        &Self::named_type_name(named),
+                    ),
+                    expression.span,
+                ));
+            }
+            ancestor = owner.plan.nodes[index].parent;
+        }
+        self.emit_owner_transition(self.owner_node_ptr(&owner, node)?, false)?;
+        Ok(true)
+    }
+
     pub(crate) fn transfer_owner_value(
         &mut self,
         expression: &ast::Expression,
@@ -560,6 +631,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             });
         if transfer {
             self.transition_owner_expr(expression, false)?;
+        } else {
+            self.release_rvalue_field(expression)?;
         }
         Ok(())
     }

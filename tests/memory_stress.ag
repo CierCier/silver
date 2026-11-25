@@ -166,6 +166,10 @@ impl OwnedLeaf {
     i64 size(&self) {
         return self.len;
     }
+
+    i32 into_first(self) {
+        return self.first();
+    }
 }
 
 impl Drop for OwnedLeaf {
@@ -418,6 +422,27 @@ struct LeafSlot {
     [OwnedLeaf, i64] pair;
 }
 
+/// Two leaves and no destructor of its own, so a field can move out.
+struct LeafPair {
+    OwnedLeaf left;
+    OwnedLeaf right;
+}
+
+LeafPair leaf_pair(i32 id) {
+    LeafPair pair;
+    pair.left = OwnedLeaf.new(id, 2);
+    pair.right = OwnedLeaf.new(id + 1, 3);
+    return move pair;
+}
+
+OwnedLeaf left_of_new_pair(i32 id) {
+    return leaf_pair(id).left;
+}
+
+i32 first_of(OwnedLeaf leaf) {
+    return leaf.first();
+}
+
 void stress_conditional_and_borrowed_transfers() {
     STDOUT.write_str("\n--- Conditional and borrowed transfers ---\n");
     reset_owner_counters();
@@ -596,6 +621,25 @@ void stress_conditional_and_borrowed_transfers() {
     }
     assert_eq_i32(leaf_drop_count, 3, "a moved Optional and a named fallback drop once");
     assert_eq_i64(leaf_bytes_freed, 9, "a moved Optional and a named fallback free once");
+
+    // A field moved out of a call result leaves; its temporary keeps and
+    // drops only the sibling.
+    reset_owner_counters();
+    {
+        OwnedLeaf named = leaf_pair(43).left;
+        OwnedLeaf returned = left_of_new_pair(45);
+        i32 consumed = first_of(leaf_pair(49).left) + leaf_pair(51).right.into_first();
+        OwnedLeaf assigned = OwnedLeaf.new(70, 1);
+        assigned = leaf_pair(53).left;
+        i32 id = leaf_pair(55).left.id;
+        i64 size = leaf_pair(57).right.size();
+        LeafPair rebuilt = { .left = leaf_pair(59).left, .right = OwnedLeaf.new(72, 1) };
+        i32 kept = named.first() + returned.first() + assigned.first() + rebuilt.left.first();
+        assert_eq_i32(consumed + kept, 301, "each moved field kept its own bytes");
+        assert_eq_i64((i64)id + size, 58, "a Copy field and a borrowed field were readable");
+    }
+    assert_eq_i32(leaf_drop_count, 18, "a field moved out of a temporary drops once");
+    assert_eq_i64(leaf_bytes_freed, 42, "a field moved out of a temporary frees once");
 }
 
 void stress_defer_and_break_continue() {

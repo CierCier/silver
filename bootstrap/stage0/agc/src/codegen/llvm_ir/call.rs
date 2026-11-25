@@ -558,6 +558,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             self.clear_field_flags(&ident.name)?;
         } else if let Some((root_name, path)) = self.lvalue_root_and_path(expr) {
             self.clear_field_flags_for_path(&root_name, &path)?;
+        } else {
+            self.release_rvalue_field(expr)?;
         }
         Ok(())
     }

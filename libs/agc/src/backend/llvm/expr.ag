@@ -6442,7 +6442,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             // A borrowed temporary receiver drops with the enclosing block; a
             // by-value `self` takes ownership of it instead.
             if (rx_temporary != (LLVMOpaqueValue*)0 && !rx_moved) {
-                llvm_add_temporary_local(ctx, rx_temporary, rx_type, expr.span);
+                llvm_add_temporary_local(ctx, rx_temporary, rx_type, expr.inner0, expr.span);
                 rx_temporary_index = ctx.locals.len() - 1;
             }
             call_args.push(rx_val);

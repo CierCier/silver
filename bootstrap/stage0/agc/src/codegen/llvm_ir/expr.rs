@@ -3834,9 +3834,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         })?;
                         let name = format!("field.rvalue.tmp.{}", self.temp_counter);
                         self.temp_counter += 1;
-                        self.register_owner_state(
+                        if self.register_owner_state(
                             &ast::Identifier { name, span: object.span }, &ty, temp, true,
-                        )?;
+                        )? {
+                            self.rvalue_temporaries.insert(object.span.into(), temp);
+                        }
                         let state = self.owner_node_for_storage(temp);
                         (temp, ty, state, false)
                     }

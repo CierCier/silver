@@ -205,6 +205,10 @@ pub struct LlvmIrGenerator<'ctx> {
     /// By-value C struct classification; `None` on a target without one.
     pub(crate) abi_handler: Option<Box<dyn AbiHandler>>,
     pub(crate) temp_counter: u64,
+    /// The spilled temporary that holds each rvalue whose field was read, so
+    /// moving that field out releases it in the temporary.
+    pub(crate) rvalue_temporaries:
+        rustc_hash::FxHashMap<crate::semantic::init_plan::SpanId, PointerValue<'ctx>>,
     /// Monotonic counter for per-launch-site trampoline function names.
     pub(crate) task_trampoline_counter: u64,
     pub(crate) leak_check: bool,

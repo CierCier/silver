@@ -250,7 +250,7 @@ LlvmPlace llvm_emit_reference_place(LlvmContext* ctx, u32 expr_id) {
         // temporary is that consumer here.
         if (expression.kind == ExprKind.Ternary) { llvm_clear_copy_source(ctx, expr_id); }
         LlvmLocal* temporary = llvm_add_temporary_local(ctx, place.data, place.type_id,
-                                                        expression.span);
+                                                        expr_id, expression.span);
         place.node = llvm_init_tree_node_ptr(ctx, temporary, 0);
         return place;
     }

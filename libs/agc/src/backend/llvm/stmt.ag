@@ -376,13 +376,10 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
         }
         // A copy initializer transfers drop ownership to the new local: the
         // bits stay readable from the source, but only the destination
-        // drops. Clearing runs before add_local so a shadowing `let x = x`
-        // resolves to the outer source. Temps and untracked sources are
-        // unaffected. A conditional initializer releases the arm that ran,
-        // so it clears after emission, with the new local hidden.
-        bool conditional = stmt.inner1 != 0
-            && ctx.pool.get_expr(stmt.inner1).kind == ExprKind.Ternary;
-        if (!conditional) { llvm_clear_copy_source(ctx, stmt.inner1); }
+        // drops. The source clears after emission, which makes the arm a
+        // conditional took and the temporary an rvalue's field lives in
+        // known. The new local stays hidden then, so a shadowing `let x = x`
+        // resolves to the outer source.
         ctx.add_local(var_name_id, ptr, type_id, true);
         LlvmLocalRange declared;
         declared.start = ctx.locals.len() - 1;
@@ -421,11 +418,9 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
                 ctx.note_unresolved("local-initializer", var_name);
             }
         }
-        if (conditional) {
-            ctx.hidden_locals.push(declared);
-            llvm_clear_copy_source(ctx, stmt.inner1);
-            LlvmLocalRange _declared = ctx.hidden_locals.pop();
-        }
+        ctx.hidden_locals.push(declared);
+        llvm_clear_copy_source(ctx, stmt.inner1);
+        LlvmLocalRange _declared = ctx.hidden_locals.pop();
         llvm_register_local_drops(ctx, var_name_id, ptr, type_id, stmt.inner1 != 0, stmt.span);
         return;
     }
