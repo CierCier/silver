@@ -4465,14 +4465,14 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 }
             } else if (entry.kind == TypeKind.Str) {
                 inferred = TYPE_U8;
-            } else if (entry.kind == TypeKind.Named && entry.count > 0) {
-                str base = types.names.get(entry.name_id);
-                if (strcmp(base, "Vec") == 0 || strcmp(base, "Slice") == 0) {
-                    inferred = types.resolve_subst(types.type_args.get(entry.inner));
-                }
             } else if (entry.kind == TypeKind.Named) {
-                inferred = typecheck_method_return_type(root, types, target_type,
-                                                        "__index_get", 2);
+                str base = types.names.get(entry.name_id);
+                if (entry.count > 0 && (strcmp(base, "Vec") == 0 || strcmp(base, "Slice") == 0)) {
+                    inferred = types.resolve_subst(types.type_args.get(entry.inner));
+                } else {
+                    inferred = typecheck_method_return_type(root, types, target_type,
+                                                            "__index_get", 2);
+                }
             }
         }
     } else if (expr.kind == ExprKind.Slice) {

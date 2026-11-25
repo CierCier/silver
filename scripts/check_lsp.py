@@ -859,7 +859,7 @@ class NativeLsp(unittest.TestCase):
                           (9, "type mismatch: expected str, found i32")])
 
     def test_moves_and_initialization_are_checked_at_each_control_flow_boundary(self):
-        # Each function from `branch` to `read_arm` misuses one boundary; `controls`
+        # Each function from `branch` to `generic_element` misuses one boundary; `controls`
         # moves and reinitializes on every path and must stay accepted.
         text = ("trait Drop { void drop(*self); }\n"
                 "struct Tok { i64 id; }\n"
@@ -884,6 +884,9 @@ class NativeLsp(unittest.TestCase):
                 "i64 read_tail(Slot s) { return (match s { Full(move x) : x, Empty : { Tok k = mk(1); defer take(k); k; } }).id; }\n"
                 "i64 read_branch(bool f) { Tok t = mk(1); i64 id = (f ? t : mk(2)).id; return peek(&t) + id; }\n"
                 "i64 read_arm(Slot s, Tok t) { i64 id = (match s { Full(x) : t, Empty : mk(2) }).id; return peek(&t) + id; }\n"
+                "struct Crate<T> { T* data; }\n"
+                "impl<T> Crate<T> { T __index_get(*self, i64 i) { return self.data[i]; } }\n"
+                "i64 generic_element(Crate<Tok> c) { take(c[0]); return 0; }\n"
                 "i64 controls(bool f) {\n"
                 "    Tok t = mk(1);\n"
                 "    if (f) { take(t); t = mk(2); }\n"
@@ -909,7 +912,9 @@ class NativeLsp(unittest.TestCase):
                           (19, "use of moved value 'p.left'"),
                           (20, "use of moved value 'k'"),
                           (21, "use of possibly moved value 't'"),
-                          (22, "use of possibly moved value 't'")])
+                          (22, "use of possibly moved value 't'"),
+                          (25, "cannot move an element out of 'Crate<Tok>' by indexing: the container still owns it; "
+                               "use take, pop, swap_remove, or a reference")])
 
     def test_a_local_callable_is_checked_against_its_own_signature(self):
         # The parameter `f` shadows the function `f`, so its signature rules.
