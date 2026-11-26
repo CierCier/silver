@@ -1880,7 +1880,12 @@ bool typecheck_reject_partial_drop_move(AstPool* pool, TypeTable* types, SymbolT
     }
     Vec<u32> fields = Vec<u32>.new();
     u32 root_name = typecheck_collect_place(pool, place_id, &fields);
-    if (root_name == 0 || fields.len() == 0) {
+    if (root_name == 0) {
+        fields.drop();
+        return typecheck_reject_rvalue_drop_move(pool, types, symbols, root, place_id,
+                                                 diagnostics, ok);
+    }
+    if (fields.len() == 0) {
         fields.drop();
         return false;
     }
@@ -1966,6 +1971,64 @@ bool typecheck_reject_partial_drop_move(AstPool* pool, TypeTable* types, SymbolT
     owner_text.drop();
     fields.drop();
     return false;
+}
+
+/// Rejects moving a non-Copy field out of a temporary when the temporary's
+/// type, or a field type on the way to the moved field, implements Drop:
+/// `take(make_guard().leaf)`. That destructor still needs the whole value.
+bool typecheck_reject_rvalue_drop_move(AstPool* pool, TypeTable* types, SymbolTable* symbols,
+                                       SyntaxNode* root, u32 place_id,
+                                       DiagnosticBag* diagnostics, bool* ok) {
+    // `fields` runs from the outermost projection inward.
+    Vec<u32> fields = Vec<u32>.new();
+    AstExpr* rvalue = pool.get_expr(place_id);
+    while (rvalue.kind == ExprKind.Move && rvalue.inner0 != 0) {
+        rvalue = pool.get_expr(rvalue.inner0);
+    }
+    while (rvalue.kind == ExprKind.Field && rvalue.inner0 != 0) {
+        fields.push(rvalue.aux);
+        rvalue = pool.get_expr(rvalue.inner0);
+    }
+    u32 moved_type = rvalue.inferred_type;
+    i64 i = fields.len() - 1;
+    while (i >= 0 && moved_type != TYPE_UNKNOWN) {
+        TypeEntry* entry = types.get(types.resolve_subst(moved_type));
+        if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) {
+            moved_type = TYPE_UNKNOWN;
+        } else {
+            moved_type = typecheck_struct_field_type(types, root, moved_type,
+                                                     symbols.names.get(fields.get(i)));
+        }
+        i -= 1;
+    }
+    bool rejected = false;
+    if (fields.len() > 0 && moved_type != TYPE_UNKNOWN
+        && !typecheck_type_is_copy(root, types, moved_type)) {
+        String place_text = String.new();
+        i = fields.len() - 1;
+        while (i >= 0) {
+            if (place_text.len() > 0) { place_text.push('.'); }
+            place_text.push_str(symbols.names.get(fields.get(i)));
+            i -= 1;
+        }
+        u32 owner_type = rvalue.inferred_type;
+        i = fields.len() - 1;
+        while (i >= 0 && !rejected) {
+            if (typecheck_type_has_drop_impl(root, types, owner_type)) {
+                String message = cannot_move_field_out_of_drop_type(place_text.to_str(),
+                                                                    types.type_name(owner_type));
+                diagnostics.error(pool.get_expr(place_id).span, move message);
+                *ok = false;
+                rejected = true;
+            }
+            owner_type = typecheck_struct_field_type(types, root, owner_type,
+                                                     symbols.names.get(fields.get(i)));
+            i -= 1;
+        }
+        place_text.drop();
+    }
+    fields.drop();
+    return rejected;
 }
 
 /// True when `owner.method(...)` constructs a variant of enum `owner`,
