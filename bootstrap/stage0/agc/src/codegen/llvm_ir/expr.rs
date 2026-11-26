@@ -3532,6 +3532,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                                 expression.kind.as_ref()
                                             {
                                                 self.clear_field_flags(&ident.name)?;
+                                            } else if let Some((root_name, path)) =
+                                                self.lvalue_root_and_path(expression)
+                                            {
+                                                // A field enum's owner must not
+                                                // drop the payloads the arm now owns.
+                                                self.clear_field_flags_for_path(&root_name, &path)?;
                                             }
                                             let orig_data = self
                                                 .builder

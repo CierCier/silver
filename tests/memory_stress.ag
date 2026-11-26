@@ -697,6 +697,7 @@ void stress_conditional_and_borrowed_transfers() {
             Neither: {},
         };
     }
+    assert_eq_i32(leaf_drop_count, 2, "a partly moved field enum drops each payload once");
     assert_eq_i64(leaf_bytes_freed, 192, "a partly moved field enum frees each payload once");
 
     // An arm block drops its own locals and runs its defers at the arm's end.
