@@ -441,6 +441,12 @@ LeafEvent event_of(i32 id) {
     return holder.event;
 }
 
+/// Takes a leaf and drops it at its end.
+void keep_leaf_id(OwnedLeaf leaf) {}
+
+/// A variant with two owned payloads.
+enum LeafTwin { Both(OwnedLeaf, OwnedLeaf); Neither; }
+
 /// Refills `place` with a fresh leaf and yields `id`, so a later element of
 /// an aggregate can reinitialize what an earlier element moved.
 macro refill_leaf(place, id) {
@@ -649,6 +655,30 @@ void stress_conditional_and_borrowed_transfers() {
     }
     assert_eq_i32(leaf_drop_count, 5, "a refilled aggregate source drops each leaf once");
     assert_eq_i64(leaf_bytes_freed, 11, "a refilled aggregate source frees each leaf once");
+
+    // Moving one payload of a two-payload arm out leaves the arm owning the
+    // other, named or not, which drops at the arm's end.
+    reset_owner_counters();
+    {
+        LeafTwin named = LeafTwin.Both(OwnedLeaf.new(49, 1), OwnedLeaf.new(50, 2));
+        match named {
+            Both(move left, right): { OwnedLeaf kept = move left; },
+            Neither: {},
+        };
+        assert_eq_i32(leaf_drop_count, 2, "a named sibling of a moved payload drops in its arm");
+        LeafTwin unnamed = LeafTwin.Both(OwnedLeaf.new(51, 4), OwnedLeaf.new(52, 8));
+        match unnamed {
+            Both(move left, _): { keep_leaf_id(move left); },
+            Neither: {},
+        };
+        LeafTwin both = LeafTwin.Both(OwnedLeaf.new(53, 16), OwnedLeaf.new(54, 32));
+        match both {
+            Both(move left, move right): { OwnedLeaf kept = move right; },
+            Neither: {},
+        };
+    }
+    assert_eq_i32(leaf_drop_count, 6, "each payload of a partly moved arm drops once");
+    assert_eq_i64(leaf_bytes_freed, 63, "each payload of a partly moved arm frees once");
 
     // An arm block drops its own locals and runs its defers at the arm's end.
     reset_owner_counters();

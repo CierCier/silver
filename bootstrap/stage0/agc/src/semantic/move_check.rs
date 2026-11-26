@@ -3666,6 +3666,26 @@ mod tests {
     }
 
     #[test]
+    fn move_bindings_of_a_multi_payload_variant_are_owned() {
+        let items = "enum Twin { Both(Text, Text); Neither; }\n";
+        let control = "Twin w = Twin.Both(fresh(), fresh()); \
+                       match w { Both(move a, b): { eat(a); i64 n = b.inspect(); }, Neither: {} };";
+        let errors = errors_with_items(items, control);
+        assert!(
+            errors.types.is_empty() && errors.moves.is_empty(),
+            "{control}: {errors:?}"
+        );
+        let misuse = "Twin w = Twin.Both(fresh(), fresh()); \
+                      match w { Both(a, move b): { eat(b); i64 n = b.inspect(); }, Neither: {} };";
+        let errors = errors_with_items(items, misuse);
+        assert!(errors.types.is_empty(), "{misuse}: {errors:?}");
+        assert!(
+            errors.moves.iter().any(|error| error.contains("'b'")),
+            "{misuse}: {errors:?}"
+        );
+    }
+
+    #[test]
     fn moves_follow_conditionals_headers_defers_and_payload_bindings() {
         for (misuse, name) in [
             ("Text t; bool f = true; Text u = f ? t : fresh(); i64 n = t.inspect();", "t"),

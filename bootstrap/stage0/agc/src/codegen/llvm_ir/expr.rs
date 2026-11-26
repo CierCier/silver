@@ -20,6 +20,43 @@ use crate::parser::ast;
 use crate::symbol_table::{CompilerPhase, SymbolKind};
 
 impl<'ctx> LlvmIrGenerator<'ctx> {
+    /// The bindings of an enum arm's payload pattern, one per payload as
+    /// `(name, is_move)`, and whether any is `move`. A `move` element releases
+    /// the whole scrutinee's drop state, so then the arm owns every other
+    /// payload too: an unnamed one gets a hidden binding that drops it.
+    pub(crate) fn match_payload_bindings(
+        data_pattern: &ast::Pattern,
+        payload_count: usize,
+    ) -> (Vec<Option<(ast::Identifier, bool)>>, bool) {
+        let element = |pattern: &ast::Pattern| match &pattern.kind {
+            ast::PatternKind::Identifier(binding) => Some((binding.clone(), false)),
+            ast::PatternKind::Move(binding) => Some((binding.clone(), true)),
+            _ => None,
+        };
+        let mut bindings: Vec<Option<(ast::Identifier, bool)>> = match &data_pattern.kind {
+            ast::PatternKind::Identifier(_) | ast::PatternKind::Move(_) => {
+                vec![element(data_pattern)]
+            }
+            ast::PatternKind::Tuple(items) => items.iter().map(element).collect(),
+            _ => Vec::new(),
+        };
+        let any_move = bindings.iter().flatten().any(|(_, is_move)| *is_move);
+        if any_move {
+            bindings.resize(payload_count.max(bindings.len()), None);
+            for (i, slot) in bindings.iter_mut().enumerate() {
+                if slot.is_none() {
+                    *slot = Some((
+                        ast::Identifier {
+                            name: format!("__unmoved_payload_{i}"),
+                            span: data_pattern.span,
+                        },
+                        false,
+                    ));
+                }
+            }
+        }
+        (bindings, any_move)
+    }
     pub(crate) fn create_entry_alloca(
         &self,
         function: FunctionValue<'ctx>,
@@ -3360,28 +3397,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             // (binding, is_move): a `move` binding extracts the
                             // payload OUT of the scrutinee (zeroing its slot) so
                             // ownership transfers instead of sharing.
-                            let bindings: Vec<Option<(&ast::Identifier, bool)>> =
-                                match &data_pattern.kind {
-                                    ast::PatternKind::Identifier(binding) => {
-                                        vec![Some((binding, false))]
-                                    }
-                                    ast::PatternKind::Move(binding) => {
-                                        vec![Some((binding, true))]
-                                    }
-                                    ast::PatternKind::Tuple(items) => items
-                                        .iter()
-                                        .map(|item| match &item.kind {
-                                            ast::PatternKind::Identifier(binding) => {
-                                                Some((binding, false))
-                                            }
-                                            ast::PatternKind::Move(binding) => {
-                                                Some((binding, true))
-                                            }
-                                            _ => None,
-                                        })
-                                        .collect(),
-                                    _ => Vec::new(),
-                                };
+                            let (bindings, any_move) =
+                                Self::match_payload_bindings(data_pattern, payload_types.len());
                             if !bindings.is_empty() {
                                 let data_ptr = self
                                     .builder
@@ -3397,8 +3414,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 for (i, concrete_pt) in concrete_payload.iter().enumerate() {
                                     let llvm_ty = self.lower_basic_type(concrete_pt)?;
                                     let byte_offset = offsets[i];
-                                    let binding = bindings.get(i).copied().flatten();
+                                    let binding = bindings.get(i).cloned().flatten();
                                     if let Some((binding, is_move)) = binding {
+                                        let binding = &binding;
                                         let field_ptr =
                                             if byte_offset == 0 {
                                                 data_ptr
@@ -3463,7 +3481,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                                 },
                                             );
                                         }
-                                        if is_move {
+                                        if is_move || any_move {
                                             if !self.register_owner_state(binding, concrete_pt, alloca, true)? {
                                                 self.register_drop_flag(&binding.name, concrete_pt, alloca)?;
                                             }

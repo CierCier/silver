@@ -1429,28 +1429,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             } else {
                                 HashMap::default()
                             };
-                            let bindings: Vec<Option<(&ast::Identifier, bool)>> =
-                                match &data_pattern.kind {
-                                    ast::PatternKind::Identifier(binding) => {
-                                        vec![Some((binding, false))]
-                                    }
-                                    ast::PatternKind::Move(binding) => {
-                                        vec![Some((binding, true))]
-                                    }
-                                    ast::PatternKind::Tuple(items) => items
-                                        .iter()
-                                        .map(|item| match &item.kind {
-                                            ast::PatternKind::Identifier(binding) => {
-                                                Some((binding, false))
-                                            }
-                                            ast::PatternKind::Move(binding) => {
-                                                Some((binding, true))
-                                            }
-                                            _ => None,
-                                        })
-                                        .collect(),
-                                    _ => Vec::new(),
-                                };
+                            let (bindings, any_move) =
+                                Self::match_payload_bindings(data_pattern, payload_types.len());
                             if !bindings.is_empty() {
                                 let data_ptr = self
                                     .builder
@@ -1466,8 +1446,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 for (i, concrete_pt) in concrete_payload.iter().enumerate() {
                                     let llvm_ty = self.lower_basic_type(concrete_pt)?;
                                     let byte_offset = offsets[i];
-                                    let binding = bindings.get(i).copied().flatten();
+                                    let binding = bindings.get(i).cloned().flatten();
                                     if let Some((binding, is_move)) = binding {
+                                        let binding = &binding;
                                         let field_ptr =
                                             if byte_offset == 0 {
                                                 data_ptr
@@ -1532,7 +1513,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                                 },
                                             );
                                         }
-                                        if is_move {
+                                        if is_move || any_move {
                                             if !self.register_owner_state(binding, concrete_pt, alloca, true)? {
                                                 self.register_drop_flag(&binding.name, concrete_pt, alloca)?;
                                             }
