@@ -860,7 +860,8 @@ class NativeLsp(unittest.TestCase):
 
     def test_moves_and_initialization_are_checked_at_each_control_flow_boundary(self):
         # Each function from `branch` to `subscript` misuses one boundary; `controls`
-        # moves and reinitializes on every path and must stay accepted.
+        # moves and reinitializes on every path, and moves once in a compound
+        # assignment's subscript, so it must stay accepted.
         text = ("trait Drop { void drop(*self); }\n"
                 "struct Tok { i64 id; }\n"
                 "impl Drop for Tok { void drop(*self) { } }\n"
@@ -894,6 +895,8 @@ class NativeLsp(unittest.TestCase):
                 "    Pair p; p.left = mk(3); p.right = mk(4);\n"
                 "    take(move p.left);\n"
                 "    p.left = mk(5);\n"
+                "    Tok s = mk(6); i64 ids[2]; ids[slot(s)] += 1;\n"
+                "    Tok r = mk(7); Tok rs[1]; rs[0] = mk(8); rs[slot(r)].id += 1;\n"
                 "    return peek(&t) + peek(&p.left);\n"
                 "}\n"
                 "i64 slot(Tok t) { return 0; }\n"

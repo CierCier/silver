@@ -1230,7 +1230,10 @@ impl MoveFlow {
             }
         } else if (stmt.kind == StmtKind.Assign) {
             self.walk_expr(state, stmt.inner1, FlowUse.Consume);
-            self.assign(state, stmt.inner0);
+            // A compound assignment's value already read its target, which
+            // codegen evaluates once; walking the target again would see a
+            // subscript's move twice.
+            if (stmt.aux == 0) { self.assign(state, stmt.inner0); }
         } else if (stmt.kind == StmtKind.Expr) {
             self.walk_expr(state, stmt.inner0, FlowUse.Read);
         } else if (stmt.kind == StmtKind.Return) {
