@@ -1891,6 +1891,10 @@ impl MoveChecker {
                     }
                 }
                 state.insert(name.to_string(), var);
+            } else {
+                // An untracked binding shadows any outer state of the same
+                // name, such as a moved-from scrutinee; the scope restores it.
+                state.remove(name);
             }
             var_types.insert(name.to_string(), ty.clone());
             scopes.last_mut().expect("scope stack is non-empty").push((
@@ -3058,10 +3062,11 @@ impl MoveChecker {
                     self.locked_bindings = saved;
                     if !expression_terminates(&arm.body) {
                         for (name, var) in merged.iter_mut() {
+                            // Join every fall-through arm, as an if/else does:
+                            // two arms at the same level can still move
+                            // different fields.
                             let arm_var = arm_state.get(name).cloned().unwrap_or_default();
-                            if arm_var.level > var.level {
-                                var.merge_with(&arm_var);
-                            }
+                            var.merge_with(&arm_var);
                         }
                     }
                 }
@@ -3704,6 +3709,34 @@ mod tests {
         assert!(
             errors.moves.iter().any(|error| error.contains("'b'")),
             "{misuse}: {errors:?}"
+        );
+        // The arm takes the scrutinee's payloads, so the scrutinee is
+        // moved-from afterwards, while a Copy payload that reuses its name
+        // stays readable inside the arm.
+        let reuse = "Twin w = Twin.Both(fresh(), fresh()); \
+                     match w { Both(move a, b): { eat(a); eat(b); }, Neither: {} }; \
+                     match w { Both(a, b): {}, Neither: {} };";
+        let errors = errors_with_items(items, reuse);
+        assert!(
+            errors.moves.iter().any(|error| error.contains("'w'")),
+            "{reuse}: {errors:?}"
+        );
+        // A later arm's field move still reaches the join when an earlier
+        // arm already moved another field of the same root.
+        let items = "enum Twin { Both(Text, Text); Neither; }\n\
+                     struct Holder { Twin twin; Text other; }\n";
+        let joined = "Holder h; h.twin = Twin.Both(fresh(), fresh()); h.other = fresh(); \
+                      match h.twin { Both(move a, b): { eat(a); eat(b); }, \
+                      Neither: { eat(h.other); } }; eat(h.other);";
+        let errors = errors_with_items(items, joined);
+        assert!(!errors.moves.is_empty(), "{joined}: {errors:?}");
+        let items = "enum Mixed { Both(i64, Text); Neither; }\n";
+        let shadow = "Mixed w = Mixed.Both(4, fresh()); \
+                      match w { Both(w, move leaf): { i64 n = w; eat(leaf); }, Neither: {} };";
+        let errors = errors_with_items(items, shadow);
+        assert!(
+            errors.types.is_empty() && errors.moves.is_empty(),
+            "{shadow}: {errors:?}"
         );
     }
 

@@ -4,6 +4,7 @@ import std.mem.vec;
 import std.string;
 import frontend.ast;
 import frontend.ast_expr;
+import frontend.callback_abi;
 import frontend.cfg;
 import frontend.items;
 import frontend.lexer;
@@ -3656,8 +3657,15 @@ impl ExprLowerer {
                         && init_start != (SyntaxNode*)0 && init_start.kind == NodeKind.Block
                         && init_start.next_sibling == end) {
                         str named_type = self.types.names.get(value_type.name_id);
+                        // Follow `type` aliases so an alias of an enum is
+                        // rejected like the enum itself.
+                        u32 underlying = self.unit_root == (SyntaxNode*)0 ? type_id
+                            : callback_abi_resolve_alias(self.unit_root, self.types, type_id, 0);
+                        TypeEntry* underlying_type = self.types.get(underlying);
                         if (self.unit_root != (SyntaxNode*)0
-                            && find_item_by_name(self.unit_root, NodeKind.Enum, named_type)
+                            && underlying_type.kind == TypeKind.Named
+                            && find_item_by_name(self.unit_root, NodeKind.Enum,
+                                                 self.types.names.get(underlying_type.name_id))
                                 != (SyntaxNode*)0) {
                             self.unsupported = true;
                             self.record_error(String.from_str(braced_initializer_unsupported_type()),
