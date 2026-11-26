@@ -8,6 +8,7 @@ import frontend.ast;
 import frontend.ast_expr;
 import frontend.items;
 import frontend.lexer;
+import frontend.place;
 import frontend.scoped_launch;
 import frontend.symbols;
 import frontend.typecheck_expr;
@@ -2790,8 +2791,9 @@ LLVMOpaqueValue* llvm_emit_struct_lit(LlvmContext* ctx, AstExpr* expr) {
         ctx.note_unresolved("struct-lit", struct_name);
         return (LLVMOpaqueValue*)0;
     }
-    LLVMOpaqueValue* slot = LLVMBuildAlloca(ctx.builder, def.llvm_type, "struct.lit");
+    LLVMOpaqueValue* slot = llvm_entry_alloca(ctx, def.llvm_type, "struct.lit");
     LLVMBuildStore(ctx.builder, LLVMConstNull(def.llvm_type), slot);
+    i64 tracking = llvm_begin_literal_tracking(ctx, slot, named_id, expr.span);
     i64 fi = 0;
     while (fi < (i64)expr.aux) {
         u32 field_name_id = ctx.pool.args.get((i64)expr.inner1 + fi * 2);
@@ -2819,8 +2821,13 @@ LLVMOpaqueValue* llvm_emit_struct_lit(LlvmContext* ctx, AstExpr* expr) {
         // now, not after the last field, keeps a later field's
         // reinitialization of that source owned.
         llvm_clear_copy_source(ctx, val_id);
+        Projection stored;
+        stored.kind = ProjectionKind.Field;
+        stored.field_name_id = field_name_id;
+        llvm_track_literal_element(ctx, tracking, move stored);
         fi += 1;
     }
+    llvm_end_literal_tracking(ctx, tracking);
     return LLVMBuildLoad2(ctx.builder, def.llvm_type, slot, "struct.lit.val");
 }
 
@@ -3001,7 +3008,7 @@ LLVMOpaqueValue* llvm_emit_slice_argument(LlvmContext* ctx, u32 expr_id,
             source_ptr = llvm_emit_lvalue(ctx, source_expr_id);
         }
         if (source_ptr == (LLVMOpaqueValue*)0) {
-            LLVMOpaqueValue* source_value = llvm_emit_expr(ctx, source_expr_id);
+            LLVMOpaqueValue* source_value = llvm_emit_literal_value(ctx, source_expr_id);
             if (source_value == (LLVMOpaqueValue*)0) { return (LLVMOpaqueValue*)0; }
             LLVMOpaqueType* source_llvm_type = llvm_lower_type(ctx.ctx, ctx.types, actual_type);
             source_ptr = LLVMBuildAlloca(ctx.builder, source_llvm_type, "slice.array.tmp");
@@ -6040,8 +6047,9 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         u32 element_count = expr.aux;
         if (expected_entry.kind == TypeKind.Tuple && expected_entry.count == (i64)element_count) {
             LLVMOpaqueType* tuple_ty = llvm_lower_type(ctx.ctx, ctx.types, expected_type);
-            LLVMOpaqueValue* tuple_slot = LLVMBuildAlloca(ctx.builder, tuple_ty, "tuple_lit");
+            LLVMOpaqueValue* tuple_slot = llvm_entry_alloca(ctx, tuple_ty, "tuple_lit");
             LLVMBuildStore(ctx.builder, LLVMConstNull(tuple_ty), tuple_slot);
+            i64 tracking = llvm_begin_literal_tracking(ctx, tuple_slot, expected_type, expr.span);
             u32 elems_start = expr.inner1;
             i64 i = 0;
             while (i < (i64)element_count) {
@@ -6061,8 +6069,13 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 // The tuple owns the element from here, before a later
                 // element can reinitialize its source.
                 llvm_clear_copy_source(ctx, elem_id);
+                Projection stored;
+                stored.kind = ProjectionKind.Index;
+                stored.field_name_id = (u32)i;
+                llvm_track_literal_element(ctx, tracking, move stored);
                 i += 1;
             }
+            llvm_end_literal_tracking(ctx, tracking);
             return LLVMBuildLoad2(ctx.builder, tuple_ty, tuple_slot, "tuple_value");
         }
         u32 arr_type = expected_entry.kind == TypeKind.Array
@@ -6076,8 +6089,11 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         }
         LLVMOpaqueType* arr_ty = llvm_lower_type(ctx.ctx, ctx.types, arr_type);
         LLVMOpaqueType* elem_ty = llvm_lower_type(ctx.ctx, ctx.types, elem_type);
-        LLVMOpaqueValue* slot = LLVMBuildAlloca(ctx.builder, arr_ty, "arr_lit");
+        LLVMOpaqueValue* slot = llvm_entry_alloca(ctx, arr_ty, "arr_lit");
         LLVMBuildStore(ctx.builder, LLVMConstNull(arr_ty), slot);
+        // Only a one-dimensional array's elements are tracked one by one.
+        i64 tracking = ctx.types.get(elem_type).kind == TypeKind.Array
+            ? (i64)-1 : llvm_begin_literal_tracking(ctx, slot, arr_type, expr.span);
         LLVMOpaqueValue* base = LLVMBuildBitCast(ctx.builder, slot, LLVMPointerTypeInContext(ctx.ctx, (u32)0), "arr_lit_ptr");
         u32 scalar_type = arr_type;
         i64 scalar_capacity = 1;
@@ -6145,10 +6161,15 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                     scalar_base, &idx, 1, "arr_lit_gep");
                 LLVMBuildStore(ctx.builder, elem_val, elem_ptr);
                 llvm_clear_copy_source(ctx, elem_id);
+                Projection stored;
+                stored.kind = ProjectionKind.Index;
+                stored.field_name_id = (u32)flat_index;
+                llvm_track_literal_element(ctx, tracking, move stored);
                 flat_index += 1;
             }
             i += 1;
         }
+        llvm_end_literal_tracking(ctx, tracking);
         return base;
     }
 

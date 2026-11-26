@@ -418,7 +418,7 @@ void llvm_emit_value_drop_at_ptr(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 typ
     TypeEntry* entry = ctx.types.get(resolved);
     if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) { return; }
     if (entry.kind == TypeKind.Array) {
-        if (entry.count > 0 && llvm_type_needs_tracking(ctx, entry.inner)) {
+        if (entry.count > 0 && llvm_value_transfers_ownership(ctx, entry.inner)) {
             LLVMOpaqueValue* count = LLVMConstInt(
                 LLVMInt64TypeInContext(ctx.ctx), (u64)entry.count, 0);
             llvm_emit_drop_in_place(ctx, entry.inner, ptr, count);
@@ -431,7 +431,7 @@ void llvm_emit_value_drop_at_ptr(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 typ
         while (i < entry.count) {
             u32 element_ty = ctx.types.resolve_subst(ctx.types.type_args.get(entry.inner + (u32)i));
             if (element_ty != TYPE_UNKNOWN && element_ty != 0
-                && llvm_type_needs_tracking(ctx, element_ty)) {
+                && llvm_value_transfers_ownership(ctx, element_ty)) {
                 LLVMOpaqueValue* element_ptr = LLVMBuildStructGEP2(ctx.builder, tuple_ty, ptr,
                                                                    (u32)i, "drop_tuple_field");
                 llvm_emit_value_drop_at_ptr(ctx, element_ptr, element_ty);
@@ -470,7 +470,7 @@ void llvm_emit_value_drop_at_ptr(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 typ
         LlvmFieldInfo* field = def.fields.get_ptr(i);
         u32 field_ty = mono_resolve_struct_field_type(ctx, resolved, field.type_id);
         if (field_ty != TYPE_UNKNOWN && field_ty != 0
-            && llvm_type_needs_tracking(ctx, field_ty)) {
+            && llvm_value_transfers_ownership(ctx, field_ty)) {
             LLVMOpaqueValue* field_ptr = LLVMBuildStructGEP2(ctx.builder, struct_ty, ptr,
                                                               (u32)i, "drop_field");
             llvm_emit_value_drop_at_ptr(ctx, field_ptr, field_ty);
@@ -490,7 +490,7 @@ LLVMOpaqueValue* llvm_emit_drop_in_place(LlvmContext* ctx, u32 elem_type,
 /// initialization `node` says they are not live.
 LLVMOpaqueValue* llvm_emit_tracked_drop_in_place(LlvmContext* ctx, u32 elem_type,
     LLVMOpaqueValue* ptr, LLVMOpaqueValue* count, LLVMOpaqueValue* node, Span span) {
-    if (!llvm_type_needs_tracking(ctx, elem_type)) {
+    if (!llvm_value_transfers_ownership(ctx, elem_type)) {
         return LLVMConstInt(LLVMInt64TypeInContext(ctx.ctx), 0, 0);
     }
     if (ctx.current_fn == (LLVMOpaqueValue*)0 || ptr == (LLVMOpaqueValue*)0
@@ -862,14 +862,9 @@ void llvm_init_tree_build(LlvmContext* ctx, LlvmLocal* local, InitOwnerPlan* pla
     ctx.builder = saved_builder;
 }
 
-/// Keeps the initialized temporary at `ptr`, which holds rvalue `expr_id`, as
-/// an unnamed local, so it drops once when the enclosing block exits. Returns
-/// that local.
-///
-/// A temporary can live in one arm of `?:` or `&&` while its block's cleanup
-/// runs on every path, so its state starts `UNINIT` at the end of the entry
-/// block and becomes live here. `ptr` must be an entry-block slot.
-LlvmLocal* llvm_add_temporary_local(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 type_id,
+/// Adds the slot `ptr` for rvalue `expr_id` as an unnamed local whose state
+/// starts `UNINIT` at the end of the entry block, and returns its name.
+u32 llvm_add_unlive_temporary_local(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 type_id,
                                     u32 expr_id, Span span) {
     String name = String.from_str("__temporary_");
     append_u32(&name, (u32)ctx.locals.len());
@@ -880,8 +875,8 @@ LlvmLocal* llvm_add_temporary_local(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 
     LLVMOpaqueValue* entry_end = LLVMGetBasicBlockTerminator(
         LLVMGetEntryBasicBlock(ctx.current_fn));
     if (entry_end == (LLVMOpaqueValue*)0) {
-        llvm_register_local_drops(ctx, name_id, ptr, type_id, true, span);
-        return ctx.find_local(name_id);
+        llvm_register_local_drops(ctx, name_id, ptr, type_id, false, span);
+        return name_id;
     }
     LLVMOpaqueBuilder* saved_builder = ctx.builder;
     ctx.builder = LLVMCreateBuilderInContext(ctx.ctx);
@@ -889,8 +884,50 @@ LlvmLocal* llvm_add_temporary_local(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 
     llvm_register_local_drops(ctx, name_id, ptr, type_id, false, span);
     LLVMDisposeBuilder(ctx.builder);
     ctx.builder = saved_builder;
+    return name_id;
+}
+
+/// Keeps the initialized temporary at `ptr`, which holds rvalue `expr_id`, as
+/// an unnamed local, so it drops once when the enclosing block exits. Returns
+/// that local.
+///
+/// A temporary can live in one arm of `?:` or `&&` while its block's cleanup
+/// runs on every path, so its state starts `UNINIT` at the end of the entry
+/// block and becomes live here. `ptr` must be an entry-block slot.
+LlvmLocal* llvm_add_temporary_local(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 type_id,
+                                    u32 expr_id, Span span) {
+    u32 name_id = llvm_add_unlive_temporary_local(ctx, ptr, type_id, expr_id, span);
     llvm_set_local_drop_live(ctx, name_id, true);
     return ctx.find_local(name_id);
+}
+
+/// Tracks the storage `slot` of a literal of `type_id` while its elements are
+/// built, so a later element that exits the function drops the ones already
+/// stored. Returns the tracking local's index, or -1 when nothing in the
+/// literal needs a drop. `slot` must be an entry-block slot.
+i64 llvm_begin_literal_tracking(LlvmContext* ctx, LLVMOpaqueValue* slot, u32 type_id,
+                                Span span) {
+    if (!llvm_value_transfers_ownership(ctx, type_id)) { return -1; }
+    // Not a temporary of the literal expression: the literal's value leaves
+    // this storage when it is complete.
+    llvm_add_unlive_temporary_local(ctx, slot, type_id, 0, span);
+    return ctx.locals.len() - 1;
+}
+
+/// Marks element `projection` of the literal tracked at `local_index` stored.
+void llvm_track_literal_element(LlvmContext* ctx, i64 local_index, Projection projection) {
+    if (local_index < 0 || ctx.is_terminated()) { return; }
+    Vec<Projection> path = Vec<Projection>.new();
+    path.push(move projection);
+    llvm_set_path_drop_live(ctx, ctx.locals.get_ptr(local_index), &path, true);
+    path.drop();
+}
+
+/// The literal tracked at `local_index` is complete and its value leaves.
+void llvm_end_literal_tracking(LlvmContext* ctx, i64 local_index) {
+    if (local_index < 0 || ctx.is_terminated()) { return; }
+    llvm_store_init_tree(ctx, ctx.locals.get_ptr(local_index),
+        LLVMConstInt(LLVMInt8TypeInContext(ctx.ctx), LLVM_INIT_UNINIT, 0));
 }
 
 /// Every inline child has a state node, including Copy and scalar fields. The
