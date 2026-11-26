@@ -2578,8 +2578,13 @@ impl MoveChecker {
                     }
                 }
                 // A borrowed receiver place must outlive the arguments too.
-                if !is_consuming && place_from_expr(receiver).is_some() {
-                    self.check_expr(receiver, state, scopes, var_types);
+                // Only its plain owner is read again: a computed index such as
+                // `slot(t)` in `items[slot(t)]` already ran once.
+                if !is_consuming
+                    && place_from_expr(receiver).is_some()
+                    && let Some(owner) = plain_prefix(receiver)
+                {
+                    self.check_expr(owner, state, scopes, var_types);
                 }
                 self.recheck_borrowed_arguments(arguments, state, scopes, var_types);
             }

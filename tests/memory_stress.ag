@@ -596,6 +596,18 @@ void stress_conditional_and_borrowed_transfers() {
     assert_eq_i32(leaf_drop_count, 3, "an enum field moved out drops its payload once");
     assert_eq_i64(leaf_bytes_freed, 12, "an enum field moved out frees its payload once");
 
+    // A borrowed receiver's computed index runs once, so the leaf it moved
+    // is not read again.
+    reset_owner_counters();
+    {
+        OwnedLeaf leaves[2];
+        leaves[0] = OwnedLeaf.new(41, 1);
+        leaves[1] = OwnedLeaf.new(42, 1);
+        OwnedLeaf probe = OwnedLeaf.new(40, 1);
+        assert_eq_i32(leaves[first_of(probe) - 39].first(), 42, "a receiver's index moves its argument once");
+    }
+    assert_eq_i32(leaf_drop_count, 3, "a receiver's moved index argument drops once");
+
     // An arm block drops its own locals and runs its defers at the arm's end.
     reset_owner_counters();
     deferred_leaf_id = 0;

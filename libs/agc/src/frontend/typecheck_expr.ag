@@ -1856,7 +1856,8 @@ u32 typecheck_arm_moved_binding(AstPool* pool, TypeTable* types, SyntaxNode* roo
 
 /// Whether an argument of `actual` type passed for a parameter of `expected`
 /// type is coerced to a view of it, which leaves the argument with its owner:
-/// a `Vec` or array passed as a `Slice`.
+/// a `Vec`, an array, or a value with its own `cast Slice<T>` passed as a
+/// `Slice`. The cast borrows its source; codegen does not drop it.
 bool typecheck_coerces_to_view(TypeTable* types, u32 expected, u32 actual) {
     if (expected == TYPE_UNKNOWN || actual == TYPE_UNKNOWN) { return false; }
     TypeEntry* view = types.get(types.resolve_subst(expected));
