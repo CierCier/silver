@@ -583,9 +583,18 @@ void stress_conditional_and_borrowed_transfers() {
         holder.event = LeafEvent.Held(OwnedLeaf.new(37, 3));
         holder.serial = 1;
         LeafEvent taken = move holder.event;
+        EventHolder copied;
+        copied.event = LeafEvent.Held(OwnedLeaf.new(38, 4));
+        copied.serial = 2;
+        LeafEvent implicit = copied.event;
+        EventHolder matched;
+        matched.event = LeafEvent.Held(OwnedLeaf.new(39, 5));
+        matched.serial = 3;
+        i32 matched_id = match matched.event { Held(move leaf): leaf.id, Idle: 0 };
+        assert_eq_i32(matched_id, 39, "a move binding reads its payload out of an enum field");
     }
-    assert_eq_i32(leaf_drop_count, 1, "an enum field moved out drops its payload once");
-    assert_eq_i64(leaf_bytes_freed, 3, "an enum field moved out frees its payload once");
+    assert_eq_i32(leaf_drop_count, 3, "an enum field moved out drops its payload once");
+    assert_eq_i64(leaf_bytes_freed, 12, "an enum field moved out frees its payload once");
 
     // An arm block drops its own locals and runs its defers at the arm's end.
     reset_owner_counters();

@@ -1309,14 +1309,26 @@ void llvm_drop_active_unmoved_payloads(LlvmContext* ctx) {
 
 /// Whether the value `src_id` reads is drop-tracked. A local registered for
 /// drop counts even when the type predicate cannot judge its type, as for a
-/// generic enum instance like `Maybe<Buf>`.
+/// generic enum instance like `Maybe<Buf>`. So does an enum field whose
+/// payload its owner drops: the owner must release it to the new value.
 bool llvm_source_needs_tracking(LlvmContext* ctx, u32 src_id) {
     AstExpr* source = ctx.pool.get_expr(src_id);
     if (source.kind == ExprKind.Var) {
         LlvmLocal* local = ctx.find_local(source.aux);
         if (local != (LlvmLocal*)0 && local.drop_flag != (LLVMOpaqueValue*)0) { return true; }
     }
-    return llvm_type_needs_tracking(ctx, llvm_expr_type(ctx, src_id));
+    u32 type_id = llvm_expr_type(ctx, src_id);
+    if (llvm_type_needs_tracking(ctx, type_id)) { return true; }
+    if (source.kind == ExprKind.Ternary) {
+        return llvm_source_needs_tracking(ctx, source.inner1)
+            || llvm_source_needs_tracking(ctx, source.aux);
+    }
+    if (source.kind != ExprKind.Field) { return false; }
+    u32 resolved = ctx.types.resolve_subst(type_id);
+    if (resolved == TYPE_UNKNOWN || resolved == 0) { return false; }
+    TypeEntry* entry = ctx.types.get(resolved);
+    return entry.kind == TypeKind.Named
+        && llvm_enum_needs_payload_drop(ctx, resolved, ctx.types.names.get(entry.name_id));
 }
 
 /// Moves drop ownership from place operand `src_id` to the value built from
