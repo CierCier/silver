@@ -447,6 +447,11 @@ void keep_leaf_id(OwnedLeaf leaf) {}
 /// A variant with two owned payloads.
 enum LeafTwin { Both(OwnedLeaf, OwnedLeaf); Neither; }
 
+struct TwinHolder {
+    i32 id;
+    LeafTwin twin;
+}
+
 /// Refills `place` with a fresh leaf and yields `id`, so a later element of
 /// an aggregate can reinitialize what an earlier element moved.
 macro refill_leaf(place, id) {
@@ -662,7 +667,7 @@ void stress_conditional_and_borrowed_transfers() {
     {
         LeafTwin named = LeafTwin.Both(OwnedLeaf.new(49, 1), OwnedLeaf.new(50, 2));
         match named {
-            Both(move left, right): { OwnedLeaf kept = move left; },
+            Both(move left, right): { OwnedLeaf kept = move left; OwnedLeaf other = right; },
             Neither: {},
         };
         assert_eq_i32(leaf_drop_count, 2, "a named sibling of a moved payload drops in its arm");
@@ -679,6 +684,20 @@ void stress_conditional_and_borrowed_transfers() {
     }
     assert_eq_i32(leaf_drop_count, 6, "each payload of a partly moved arm drops once");
     assert_eq_i64(leaf_bytes_freed, 63, "each payload of a partly moved arm frees once");
+
+    // The same holds when the matched enum is a field: the holder must not
+    // free the payloads its arm already owns.
+    reset_owner_counters();
+    {
+        TwinHolder holder;
+        holder.id = 1;
+        holder.twin = LeafTwin.Both(OwnedLeaf.new(55, 64), OwnedLeaf.new(56, 128));
+        match holder.twin {
+            Both(move left, _): { keep_leaf_id(move left); },
+            Neither: {},
+        };
+    }
+    assert_eq_i64(leaf_bytes_freed, 192, "a partly moved field enum frees each payload once");
 
     // An arm block drops its own locals and runs its defers at the arm's end.
     reset_owner_counters();

@@ -1522,7 +1522,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                                 alloca, self.initialized_reference_state(),
                                             );
                                         }
-                                        if is_move
+                                        // When any payload moves, the arm owns
+                                        // every payload, so each one leaves the
+                                        // original storage, not just the moved one.
+                                        if (is_move || any_move)
                                             && let Ok((orig_ptr, _)) =
                                                 self.resolve_lvalue_ptr(expression)
                                         {

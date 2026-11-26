@@ -3361,16 +3361,20 @@ impl TypeChecker {
                                                 }
                                             }
                                             ast::PatternKind::Tuple(bindings) => {
+                                                // One `move` element gives the arm
+                                                // every payload, so each named
+                                                // element binds owned and mutable,
+                                                // like a single `move` payload.
+                                                let any_move = bindings.iter().any(|sub| {
+                                                    matches!(sub.kind, ast::PatternKind::Move(_))
+                                                });
                                                 for (i, sub) in bindings.iter().enumerate() {
-                                                    // A `move` element binds like a
-                                                    // single `move` payload: owned and
-                                                    // mutable.
                                                     let (b, is_move) = match &sub.kind {
-                                                        ast::PatternKind::Identifier(b) => (b, false),
+                                                        ast::PatternKind::Identifier(b) => (b, any_move),
                                                         ast::PatternKind::Move(b) => (b, true),
                                                         _ => continue,
                                                     };
-                                                    if locked && is_move {
+                                                    if locked && matches!(sub.kind, ast::PatternKind::Move(_)) {
                                                         self.error(msg::move_out_of_lock(&b.name), sub.span);
                                                     }
                                                     let Some(pt) = payload_types.get(i) else {

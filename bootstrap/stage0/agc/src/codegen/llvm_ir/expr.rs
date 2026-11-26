@@ -23,7 +23,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// The bindings of an enum arm's payload pattern, one per payload as
     /// `(name, is_move)`, and whether any is `move`. A `move` element releases
     /// the whole scrutinee's drop state, so then the arm owns every other
-    /// payload too: an unnamed one gets a hidden binding that drops it.
+    /// payload too: an unnamed one gets a hidden binding that drops it. The
+    /// hidden name has a space, so no source identifier can refer to it.
     pub(crate) fn match_payload_bindings(
         data_pattern: &ast::Pattern,
         payload_count: usize,
@@ -47,7 +48,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 if slot.is_none() {
                     *slot = Some((
                         ast::Identifier {
-                            name: format!("__unmoved_payload_{i}"),
+                            name: format!("unmoved payload {i}"),
                             span: data_pattern.span,
                         },
                         false,
@@ -3498,7 +3499,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                         // copy). The scrut_ptr copy is
                                         // scratch; the variable itself keeps the
                                         // zeroed slot.
-                                        if is_move
+                                        // When any payload moves, the arm owns
+                                        // every payload, so each one leaves the
+                                        // original storage, not just the moved one.
+                                        if (is_move || any_move)
                                             && let Ok((orig_ptr, _)) =
                                                 self.resolve_lvalue_ptr(expression)
                                         {

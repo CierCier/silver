@@ -3201,10 +3201,14 @@ impl MoveChecker {
             return Vec::new();
         };
         let bindings: Vec<Option<&ast::Identifier>> = match &data.kind {
-            ast::PatternKind::Tuple(items) => items
+            // One `move` element gives the arm every payload, so a named
+            // sibling is owned too and its transfers must be tracked.
+            ast::PatternKind::Tuple(items) if items.iter().any(Self::pattern_has_move) => items
                 .iter()
                 .map(|item| match &item.kind {
-                    ast::PatternKind::Move(binding) => Some(binding),
+                    ast::PatternKind::Identifier(binding) | ast::PatternKind::Move(binding) => {
+                        Some(binding)
+                    }
                     _ => None,
                 })
                 .collect(),
