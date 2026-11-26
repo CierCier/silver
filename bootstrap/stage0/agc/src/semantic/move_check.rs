@@ -3020,6 +3020,10 @@ impl MoveChecker {
                 // arms that never fall through do not contribute. The
                 // pre-match state joins only when no arm may match.
                 let mut merged: Option<State> = None;
+                // A heap container keeps owning its elements, so an arm cannot
+                // move payloads out of one, as `move v[i]` cannot.
+                let container_move = arms.iter().any(|arm| Self::pattern_has_move(&arm.pattern))
+                    && self.reject_container_element_move(expression, var_types);
                 for arm in arms {
                     if arm.guard.is_some() && Self::pattern_has_move(&arm.pattern) {
                         self.error(
@@ -3048,6 +3052,7 @@ impl MoveChecker {
                     let indexed = place_from_expr(expression)
                         .filter(|place| place.projections.contains(&Projection::Index));
                     if Self::pattern_has_move(&arm.pattern)
+                        && !container_move
                         && let Some(place) = indexed
                     {
                         // An element place is index-insensitive, like `move v[i]`.
@@ -3059,6 +3064,7 @@ impl MoveChecker {
                             );
                         }
                     } else if Self::pattern_has_move(&arm.pattern)
+                        && !container_move
                         && let Some((root, path)) = expr_root_and_path(expression)
                         && let Some(var) = arm_state.get_mut(&root)
                     {
@@ -3080,7 +3086,9 @@ impl MoveChecker {
                         self.declare(binding, Some(ty), &mut arm_state, &mut arm_scopes, var_types);
                     }
                     // A borrowed payload binding owns nothing, but it still
-                    // hides an outer local of its name until the arm ends.
+                    // hides an outer local of its name until the arm ends,
+                    // and keeps its payload type for nested matches.
+                    let typed = self.payload_bindings(&arm.pattern, scrutinee.as_ref(), true);
                     for binding in Self::payload_binding_names(&arm.pattern) {
                         if owned.iter().any(|(o, _)| o.name == binding.name) {
                             continue;
@@ -3089,6 +3097,9 @@ impl MoveChecker {
                         let old_state = arm_state.remove(&name);
                         let old_type = var_types.remove(&name);
                         let old_owner = self.owner_bindings.remove(&name);
+                        if let Some((_, ty)) = typed.iter().find(|(t, _)| t.name == name) {
+                            var_types.insert(name.clone(), ty.clone());
+                        }
                         arm_scopes.last_mut().expect("arm scope is pushed").push((
                             name, old_state, old_type, old_owner, None,
                         ));
@@ -3259,6 +3270,17 @@ impl MoveChecker {
         pattern: &ast::Pattern,
         scrutinee: Option<&ast::Type>,
     ) -> Vec<(ast::Identifier, ast::Type)> {
+        self.payload_bindings(pattern, scrutinee, false)
+    }
+
+    /// The payload bindings of `pattern` with their payload types: the owned
+    /// ones, or with `all` every named one, borrowed bindings included.
+    fn payload_bindings(
+        &self,
+        pattern: &ast::Pattern,
+        scrutinee: Option<&ast::Type>,
+        all: bool,
+    ) -> Vec<(ast::Identifier, ast::Type)> {
         let ast::PatternKind::Enum {
             variant,
             data: Some(data),
@@ -3270,7 +3292,7 @@ impl MoveChecker {
         let bindings: Vec<Option<&ast::Identifier>> = match &data.kind {
             // One `move` element gives the arm every payload, so a named
             // sibling is owned too and its transfers must be tracked.
-            ast::PatternKind::Tuple(items) if items.iter().any(Self::pattern_has_move) => items
+            ast::PatternKind::Tuple(items) if all || items.iter().any(Self::pattern_has_move) => items
                 .iter()
                 .map(|item| match &item.kind {
                     ast::PatternKind::Identifier(binding) | ast::PatternKind::Move(binding) => {
@@ -3280,6 +3302,7 @@ impl MoveChecker {
                 })
                 .collect(),
             ast::PatternKind::Move(binding) => vec![Some(binding)],
+            ast::PatternKind::Identifier(binding) if all => vec![Some(binding)],
             _ => return Vec::new(),
         };
         let Some(scrutinee) = scrutinee else {
@@ -3900,6 +3923,27 @@ mod tests {
                        Neither: {} }; } else { Inner gone = h.inner; } i64 n = h.inner.id;";
         let errors = errors_with_items(items, partial);
         assert!(!errors.moves.is_empty(), "{partial}: {errors:?}");
+        // A borrowed payload keeps its type, so a nested payload move in it
+        // still tracks its owners.
+        let items = "enum Twin { Both(Text, Text); Neither; }\n\
+                     enum Crate { Held(Twin); Empty; }\n";
+        let nested = "Twin w = Twin.Neither; Crate c = Crate.Held(Twin.Both(fresh(), fresh())); \
+                      match c { Held(w): { match w { Both(move a, b): { Text kept = a; eat(a); }, \
+                      Neither: {} }; }, Empty: {} };";
+        let errors = errors_with_items(items, nested);
+        assert!(
+            errors.moves.iter().any(|error| error.contains("'a'")),
+            "{nested}: {errors:?}"
+        );
+        // A heap container keeps its elements.
+        let items = "enum Twin { Both(Text, Text); Neither; }\n";
+        let container = "Vec<Twin> v = Vec<Twin>.new(); \
+                         match v[0] { Both(move a, b): { eat(a); }, Neither: {} };";
+        let errors = errors_with_items(items, container);
+        assert!(
+            errors.moves.iter().any(|error| error.contains("index")),
+            "{container}: {errors:?}"
+        );
     }
 
     #[test]

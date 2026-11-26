@@ -42,9 +42,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             && let Ok(place) = self.resolve_lvalue_place(expression)
         {
             let llvm_ty = self.lower_basic_type(&place.ty)?;
-            let value = self.load_value(llvm_ty, place.ptr, "match.scrutinee").map_err(|e| {
-                CodegenError::with_span(format!("load match scrutinee: {e}"), expression.span)
-            })?;
+            let value = if self.lvalue_is_volatile(expression) {
+                self.emit_volatile_load(llvm_ty, place.ptr, "match.scrutinee")?
+            } else {
+                self.load_value(llvm_ty, place.ptr, "match.scrutinee").map_err(|e| {
+                    CodegenError::with_span(format!("load match scrutinee: {e}"), expression.span)
+                })?
+            };
             return Ok((value, Some((place.ptr, place.ty, place.state))));
         }
         Ok((self.emit_expression_value(expression)?, None))
