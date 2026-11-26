@@ -3969,6 +3969,18 @@ bool llvm_block_result_aliases_local(LlvmContext* ctx, LLVMOpaqueValue* value,
     return false;
 }
 
+/// Emits `expr_id` like `llvm_emit_expr`, but loads a fixed-array literal,
+/// which that emits as the address of its storage, so the result is a value.
+LLVMOpaqueValue* llvm_emit_literal_value(LlvmContext* ctx, u32 expr_id) {
+    LLVMOpaqueValue* value = llvm_emit_expr(ctx, expr_id);
+    if (value == (LLVMOpaqueValue*)0
+        || ctx.pool.get_expr(expr_id).kind != ExprKind.ArrayLit) { return value; }
+    u32 type_id = ctx.types.resolve_subst(llvm_expr_type(ctx, expr_id));
+    if (ctx.types.get(type_id).kind != TypeKind.Array) { return value; }
+    return LLVMBuildLoad2(ctx.builder, llvm_lower_type(ctx.ctx, ctx.types, type_id),
+                         value, "array_literal_value");
+}
+
 /// Emits expression `expr_id` and returns its value (null for void or on
 /// an unsupported construct, which is also counted).
 LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {

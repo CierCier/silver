@@ -237,11 +237,12 @@ LlvmPlace llvm_emit_reference_place(LlvmContext* ctx, u32 expr_id) {
         return place;
     }
     if (expression.kind == ExprKind.Call || expression.kind == ExprKind.MethodCall
-        || expression.kind == ExprKind.StructLit || expression.kind == ExprKind.Block
+        || expression.kind == ExprKind.StructLit || expression.kind == ExprKind.ArrayLit
+        || expression.kind == ExprKind.Block
         || expression.kind == ExprKind.Ternary || expression.kind == ExprKind.Slice
         || expression.kind == ExprKind.Match || expression.kind == ExprKind.UnwrapOr
         || expression.kind == ExprKind.Wait) {
-        LLVMOpaqueValue* value = llvm_emit_expr(ctx, expr_id);
+        LLVMOpaqueValue* value = llvm_emit_literal_value(ctx, expr_id);
         if (value == (LLVMOpaqueValue*)0) { return place; }
         place.type_id = llvm_expr_type(ctx, expr_id);
         place.data = llvm_entry_alloca(ctx, LLVMTypeOf(value), "reference_temporary");
