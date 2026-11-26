@@ -1413,17 +1413,6 @@ void llvm_clear_ternary_sources(LlvmContext* ctx, u32 ternary_id, u32 then_id, u
     LLVMPositionBuilderAtEnd(ctx.builder, done_bb);
 }
 
-/// After building an aggregate value, release any droppable place operand
-/// it was copied from: the aggregate temp owns those bits now (when it is
-/// stored into a flagged local). Skips non-places and untracked types.
-void llvm_clear_aggregate_sources(LlvmContext* ctx, u32 args_start, u32 args_count) {
-    i64 i = 0;
-    while (i < (i64)args_count) {
-        llvm_clear_copy_source(ctx, ctx.pool.args.get((i64)args_start + i));
-        i += 1;
-    }
-}
-
 /// Collects the field path of place `expr_id` into `path`; returns its root
 /// local name id, or 0. A field of an rvalue is rooted in the temporary that
 /// holds it, so moving the field out releases only that field.
