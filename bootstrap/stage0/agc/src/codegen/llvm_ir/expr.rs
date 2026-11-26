@@ -3412,6 +3412,48 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                     .map(|pt| Self::substitute_generic_type(pt, &substitutions))
                                     .collect();
                                 let offsets = self.enum_payload_field_offsets(&concrete_payload)?;
+                                // Resolve the scrutinee's storage and release its drop state
+                                // before any arm binding can shadow its name.
+                                let orig_ptr = if any_move {
+                                    self.resolve_lvalue_ptr(expression).ok().map(|(ptr, _)| ptr)
+                                } else {
+                                    None
+                                };
+                                if orig_ptr.is_some() {
+                                    // The extracted payload is no
+                                    // longer owned by the enum: clear
+                                    // its drop flag so the scope-exit
+                                    // cascade skips it.
+                                    if let ast::ExpressionKind::Identifier(ident) =
+                                        expression.kind.as_ref()
+                                        && let Some(var) = self.lookup_variable(&ident.name)
+                                        && let Some(flag) = var.drop_flag
+                                    {
+                                        self.builder
+                                            .build_store(
+                                                flag,
+                                                self.context
+                                                    .bool_type()
+                                                    .const_int(0, false),
+                                            )
+                                            .map_err(|e| {
+                                                CodegenError::new(format!(
+                                                    "clear moved-out flag: {e}"
+                                                ))
+                                            })?;
+                                    }
+                                    if let ast::ExpressionKind::Identifier(ident) =
+                                        expression.kind.as_ref()
+                                    {
+                                        self.clear_field_flags(&ident.name)?;
+                                    } else if let Some((root_name, path)) =
+                                        self.lvalue_root_and_path(expression)
+                                    {
+                                        // A field enum's owner must not
+                                        // drop the payloads the arm now owns.
+                                        self.clear_field_flags_for_path(&root_name, &path)?;
+                                    }
+                                }
                                 for (i, concrete_pt) in concrete_payload.iter().enumerate() {
                                     let llvm_ty = self.lower_basic_type(concrete_pt)?;
                                     let byte_offset = offsets[i];
@@ -3502,43 +3544,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                         // When any payload moves, the arm owns
                                         // every payload, so each one leaves the
                                         // original storage, not just the moved one.
-                                        if (is_move || any_move)
-                                            && let Ok((orig_ptr, _)) =
-                                                self.resolve_lvalue_ptr(expression)
-                                        {
-                                            // The extracted payload is no
-                                            // longer owned by the enum: clear
-                                            // its drop flag so the scope-exit
-                                            // cascade skips it.
-                                            if let ast::ExpressionKind::Identifier(ident) =
-                                                expression.kind.as_ref()
-                                                && let Some(var) = self.lookup_variable(&ident.name)
-                                                && let Some(flag) = var.drop_flag
-                                            {
-                                                self.builder
-                                                    .build_store(
-                                                        flag,
-                                                        self.context
-                                                            .bool_type()
-                                                            .const_int(0, false),
-                                                    )
-                                                    .map_err(|e| {
-                                                        CodegenError::new(format!(
-                                                            "clear moved-out flag: {e}"
-                                                        ))
-                                                    })?;
-                                            }
-                                            if let ast::ExpressionKind::Identifier(ident) =
-                                                expression.kind.as_ref()
-                                            {
-                                                self.clear_field_flags(&ident.name)?;
-                                            } else if let Some((root_name, path)) =
-                                                self.lvalue_root_and_path(expression)
-                                            {
-                                                // A field enum's owner must not
-                                                // drop the payloads the arm now owns.
-                                                self.clear_field_flags_for_path(&root_name, &path)?;
-                                            }
+                                        if let Some(orig_ptr) = orig_ptr {
                                             let orig_data = self
                                                 .builder
                                                 .build_struct_gep(

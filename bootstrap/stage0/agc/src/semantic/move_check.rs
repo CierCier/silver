@@ -3025,6 +3025,24 @@ impl MoveChecker {
                     if let Some(missed) = &missed {
                         join_changed(state, missed);
                     }
+                    // An arm that moves a payload takes the scrutinee's
+                    // payloads, so the scrutinee is moved-from after it until
+                    // reinitialized. Codegen releases it, so no transfer is
+                    // recorded.
+                    if Self::pattern_has_move(&arm.pattern)
+                        && let Some((root, path)) = expr_root_and_path(expression)
+                        && let Some(var) = arm_state.get_mut(&root)
+                    {
+                        if path.is_empty() {
+                            var.mark_moved(expression.span, msg::note_value_moved_here());
+                        } else {
+                            var.mark_place_moved(
+                                &place_from_root_and_path(&root, &path),
+                                expression.span,
+                                msg::note_value_moved_here(),
+                            );
+                        }
+                    }
                     // A `move` binding owns its payload within the arm.
                     arm_scopes.push(Vec::new());
                     for (binding, ty) in self.move_payload_bindings(&arm.pattern, scrutinee.as_ref()) {

@@ -3584,6 +3584,10 @@ impl ExprLowerer {
                 u32 temp_name = self.names.intern(temp_text.to_str());
                 temp_text.drop();
                 u32 init = self.lower_sequence(assign_node.next_sibling, end);
+                if (init == 0 && assign_node.next_sibling != end) {
+                    self.unsupported = true;
+                    return;
+                }
                 stmt_ids.push(self.pool.add_stmt_let(temp_name, TYPE_UNKNOWN, init, start.span));
                 u32 tuple_index = 0;
                 SyntaxNode* binding = pattern.first_child;
@@ -3651,7 +3655,16 @@ impl ExprLowerer {
                     if (value_type.kind == TypeKind.Named
                         && init_start != (SyntaxNode*)0 && init_start.kind == NodeKind.Block
                         && init_start.next_sibling == end) {
-                        u32 aggregate_id = self.lower_struct_lit(self.types.names.get(value_type.name_id), init_start);
+                        str named_type = self.types.names.get(value_type.name_id);
+                        if (self.unit_root != (SyntaxNode*)0
+                            && find_item_by_name(self.unit_root, NodeKind.Enum, named_type)
+                                != (SyntaxNode*)0) {
+                            self.unsupported = true;
+                            self.record_error(String.from_str(braced_initializer_unsupported_type()),
+                                              init_start.span);
+                            return;
+                        }
+                        u32 aggregate_id = self.lower_struct_lit(named_type, init_start);
                         if (aggregate_id == 0) { return; }
                         if (static_storage) {
                             stmt_ids.push(self.pool.add_stmt_static_let(var_name, type_id,
