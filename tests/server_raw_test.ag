@@ -259,6 +259,38 @@ void test_eventfd_dup_and_fork() {
     efd.close();
 }
 
+/// Closes `fd`; a task body for the concurrent-close check.
+void close_descriptor(i64 fd) {
+    sys_close(fd);
+}
+
+/// Threads closing duplicates of one eventfd at the same time release its
+/// shared state exactly once.
+void test_eventfd_concurrent_dup_close() {
+    // Enough rounds that two closers regularly race for the last reference.
+    for (i64 round = 0; round < 20000; round = round + 1) {
+        EventFd efd = EventFd.new(0, true).unwrap();
+        i64 dups[16];
+        for (i64 i = 0; i < 16; i = i + 1) {
+            dups[i] = sys_dup((i64)efd.fd);
+            @assert(dups[i] >= 0);
+        }
+        efd.close();
+        Task<void> closers[16];
+        for (i64 i = 0; i < 16; i = i + 1) {
+            closers[i] = launch close_descriptor(dups[i]);
+        }
+        for (i64 i = 0; i < 16; i = i + 1) {
+            wait closers[i];
+        }
+    }
+    // Every descriptor came back: a new eventfd still works.
+    EventFd after = EventFd.new(0, true).unwrap();
+    @assert(after.notify(1));
+    @assert(after.read_val().unwrap() == 1);
+    after.close();
+}
+
 /// A write that would pass the counter's maximum fails with EAGAIN on a
 /// non-blocking eventfd instead of wrapping.
 void test_eventfd_counter_limit() {
@@ -299,6 +331,7 @@ i32 main() {
     test_epoll_oneshot_both_directions();
     test_eventfd_dup_and_fork();
     test_eventfd_counter_limit();
+    test_eventfd_concurrent_dup_close();
     test_eventfd_on_descriptor_zero();
     return 0;
 }

@@ -2341,6 +2341,21 @@ struct MacEventFd {
 MacEventFd g_mac_eventfds[64];
 /// Number of live eventfd descriptors; read/write skip the lookup while 0.
 i64 g_mac_eventfd_live;
+/// Serializes adding and removing eventfd descriptors, so exactly one
+/// close of a shared state sees itself as the last and frees it.
+i64 g_mac_eventfd_lock;
+
+/// Takes the eventfd table lock (a short spin; table changes are brief).
+void mac_eventfd_lock() {
+    while (!__atomic_cmpxchg_i64(&g_mac_eventfd_lock, 0, 1, ATOMIC_ACQUIRE, ATOMIC_RELAXED)) {
+        mac_sched_yield();
+    }
+}
+
+/// Releases the eventfd table lock.
+void mac_eventfd_unlock() {
+    __atomic_store_i64(&g_mac_eventfd_lock, 0, ATOMIC_RELEASE);
+}
 
 /// The table entry for `fd`, or null when `fd` is not an eventfd.
 MacEventFd* mac_eventfd_find(i64 fd) {
@@ -2360,18 +2375,21 @@ MacEventFd* mac_eventfd_find(i64 fd) {
 /// Records `fd` as a descriptor of the eventfd with `state`. Returns false
 /// when the table is full.
 bool mac_eventfd_add(i64 fd, MacEventState* state) {
+    mac_eventfd_lock();
     i64 i = 0;
     while (i < MAC_EVENTFD_MAX) {
-        if (__atomic_cmpxchg_i64(&g_mac_eventfds[i].key, 0, -1, ATOMIC_SEQ_CST, ATOMIC_ACQUIRE)) {
+        if (__atomic_load_i64(&g_mac_eventfds[i].key, ATOMIC_ACQUIRE) == 0) {
             MacEventFd* e = &g_mac_eventfds[i];
             e.fd = fd;
             e.state = state;
             __atomic_fetch_add_i64(&g_mac_eventfd_live, 1, ATOMIC_ACQ_REL);
             __atomic_store_i64(&e.key, fd + 1, ATOMIC_RELEASE);
+            mac_eventfd_unlock();
             return true;
         }
         i += 1;
     }
+    mac_eventfd_unlock();
     return false;
 }
 
@@ -2493,19 +2511,28 @@ i64 mac_eventfd_write(MacEventFd* e, i64 buf, i64 len) {
 /// eventfd, also closes the write end and unmaps the shared state. The
 /// descriptor itself stays open.
 void mac_eventfd_forget(MacEventFd* e) {
+    // Removing the entry and checking for other users is one step under the
+    // lock: two threads closing duplicates cannot both decide they are last
+    // and free the state twice.
+    mac_eventfd_lock();
     MacEventState* state = e.state;
     __atomic_store_i64(&e.key, 0, ATOMIC_RELEASE);
     __atomic_fetch_sub_i64(&g_mac_eventfd_live, 1, ATOMIC_ACQ_REL);
+    bool last = true;
     i64 i = 0;
     while (i < MAC_EVENTFD_MAX) {
         if (__atomic_load_i64(&g_mac_eventfds[i].key, ATOMIC_ACQUIRE) > 0
             && g_mac_eventfds[i].state == state) {
-            return; // another descriptor still uses the state
+            last = false; // another descriptor still uses the state
+            break;
         }
         i += 1;
     }
-    mac_close((i32)state.write_fd);
-    sys_munmap((i64)state, @size(MacEventState));
+    mac_eventfd_unlock();
+    if (last) {
+        mac_close((i32)state.write_fd);
+        sys_munmap((i64)state, @size(MacEventState));
+    }
 }
 
 /// Closes an eventfd descriptor.
