@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+    <img src="assets/logo-light.svg" alt="Silver" width="360">
+  </picture>
+</p>
+
 # Silver
 
 A small, C-shaped systems language. It has scope-based cleanup, compile-time
