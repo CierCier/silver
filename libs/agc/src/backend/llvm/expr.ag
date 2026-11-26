@@ -5266,16 +5266,8 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 // return from the function here). No value is produced.
                 AstStmt body_stmt = *ctx.pool.get_stmt(arm.body_stmt_id);
                 if (body_stmt.kind == StmtKind.Block) {
-                    u32 start = body_stmt.inner0;
-                    u32 count = body_stmt.aux;
-                    ctx.push_scope();
-                    i64 bi = 0;
-                    while (bi < (i64)count) {
-                        llvm_emit_stmt(ctx, ctx.pool.block_stmts.get((i64)start + bi));
-                        if (ctx.is_terminated()) { break; }
-                        bi += 1;
-                    }
-                    ctx.pop_scope();
+                    // As a block statement, so its defers and drops run.
+                    llvm_emit_stmt(ctx, arm.body_stmt_id);
                     if (!ctx.is_terminated()) {
                         // Unterminated bodies with no value fail closed,
                         // unless the body ends in a known-diverging call
