@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/svg/lockup-dark.svg">
-    <img src="assets/svg/lockup-light.svg" alt="Silver" width="360">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+    <img src="assets/logo-light.svg" alt="Silver" width="360">
   </picture>
 </p>
 
@@ -344,7 +344,6 @@ features; separate compiler unit, parity, and self-host test suites are retired.
 - `examples/`: Sample programs
 - `tests/`: Stdlib behavior tests and their runner
 - `docs/`: Language specifications and standard protocol designs
-- `assets/`: The logo, wordmark, and icons as SVG and PNG; see the [logo guide](assets/README.md)
 - `silver.toml`: Silver workspace manifest for the self-host root
 
 ## Documentation
