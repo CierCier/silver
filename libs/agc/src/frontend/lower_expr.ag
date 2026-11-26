@@ -3681,12 +3681,26 @@ impl ExprLowerer {
                                                             init_start, start.span, stmt_ids)) {
                         return;
                     }
+                    // Only struct and array declarations take a braced
+                    // initializer; anything else would otherwise lower to a
+                    // declaration that silently drops it.
+                    if (!array_initializer && init_start != (SyntaxNode*)0
+                        && init_start.kind == NodeKind.Block && init_start.next_sibling == end) {
+                        self.unsupported = true;
+                        self.record_error(String.from_str(braced_initializer_unsupported_type()),
+                                          init_start.span);
+                        return;
+                    }
                     u32 init_id = 0;
                     u32 saved_expected_type = self.expected_type_id;
                     self.expected_type_id = type_id;
                     init_id = array_initializer ? self.lower_array_initializer(init_start)
                         : self.lower_sequence(init_start, end);
                     self.expected_type_id = saved_expected_type;
+                    if (init_id == 0 && init_start != end) {
+                        self.unsupported = true;
+                        return;
+                    }
                     u32 id = static_storage
                         ? self.pool.add_stmt_static_let(var_name, type_id, init_id, start.span)
                         : self.pool.add_stmt_let(var_name, type_id, init_id, start.span);
