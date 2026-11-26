@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Silver">
+<defs><linearGradient id="s" gradientUnits="userSpaceOnUse" x1="0" y1="2" x2="0" y2="62"><stop offset="0" stop-color="#F4F6F9"/><stop offset="0.55" stop-color="#CBD0D8"/><stop offset="1" stop-color="#A3AAB7"/></linearGradient></defs><rect x="2" y="2" width="60" height="60" rx="13" fill="url(#s)"/><rect x="2.75" y="2.75" width="58.5" height="58.5" rx="12.25" fill="none" stroke="#FFFFFF" stroke-opacity="0.7" stroke-width="1.5"/>
+<g transform="translate(0 0.6)" opacity="0.85">
+<g transform="translate(0 2)" fill="none" stroke="#FFFFFF" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round">
+<path d="M18 33 L8 28 M18 33 L9.5 38.5"/>
+<path d="M17 33 C24 33 31 30 36 25 C40 21 44 20 48 22 L55 23.5 L49 27 C47 34 40 40 30 40 C24 40 20 37 17 33"/>
+<path d="M27 32 C29 23 34 15 43 11 C41 19 37 26 32 32"/>
+</g>
+<circle cx="45.2" cy="26.8" r="1.4" fill="#FFFFFF"/>
+</g>
+<g transform="translate(0 2)" fill="none" stroke="#5A6272" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round">
+<path d="M18 33 L8 28 M18 33 L9.5 38.5"/>
+<path d="M17 33 C24 33 31 30 36 25 C40 21 44 20 48 22 L55 23.5 L49 27 C47 34 40 40 30 40 C24 40 20 37 17 33"/>
+<path d="M27 32 C29 23 34 15 43 11 C41 19 37 26 32 32"/>
+</g>
+<circle cx="45.2" cy="26.8" r="1.4" fill="#5A6272"/>
+<g fill="none" stroke="#5A6272" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M45 46 L42.5 51.5 H48 M46.5 47.5 V55"/><path d="M50.5 46.5 H55 L52 55"/></g>
+</svg>
