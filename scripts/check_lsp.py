@@ -860,8 +860,9 @@ class NativeLsp(unittest.TestCase):
 
     def test_moves_and_initialization_are_checked_at_each_control_flow_boundary(self):
         # Each function from `branch` to `rvalue_field` misuses one boundary; `controls`
-        # moves and reinitializes on every path, and moves once in a compound
-        # assignment's subscript, so it must stay accepted.
+        # moves and reinitializes on every path, moves once in a compound
+        # assignment's subscript, and a compound store reinitializes its
+        # target, so it must stay accepted.
         text = ("trait Drop { void drop(*self); }\n"
                 "struct Tok { i64 id; }\n"
                 "impl Drop for Tok { void drop(*self) { } }\n"
@@ -893,6 +894,8 @@ class NativeLsp(unittest.TestCase):
                 "impl Drop for Guard { void drop(*self) { } }\n"
                 "Guard guard() { Guard g; g.leaf = mk(1); return g; }\n"
                 "i64 rvalue_field() { take(guard().leaf); return 0; }\n"
+                "struct Rec { i64 n; Tok token; }\n"
+                "i64 eat(Rec r) { return 1; }\n"
                 "i64 controls(bool f) {\n"
                 "    Tok t = mk(1);\n"
                 "    if (f) { take(t); t = mk(2); }\n"
@@ -901,6 +904,7 @@ class NativeLsp(unittest.TestCase):
                 "    p.left = mk(5);\n"
                 "    Tok s = mk(6); i64 ids[2]; ids[slot(s)] += 1;\n"
                 "    Tok r = mk(7); Tok rs[1]; rs[0] = mk(8); rs[slot(r)].id += 1;\n"
+                "    Rec q; q.n = 0; q.token = mk(9); q.n += eat(move q); i64 qn = q.n;\n"
                 "    return peek(&t) + peek(&p.left);\n"
                 "}\n"
                 "i64 slot(Tok t) { return 0; }\n"

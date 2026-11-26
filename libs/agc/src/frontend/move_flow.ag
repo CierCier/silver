@@ -1230,10 +1230,7 @@ impl MoveFlow {
             }
         } else if (stmt.kind == StmtKind.Assign) {
             self.walk_expr(state, stmt.inner1, FlowUse.Consume);
-            // A compound assignment's value already read its target, which
-            // codegen evaluates once; walking the target again would see a
-            // subscript's move twice.
-            if (stmt.aux == 0) { self.assign(state, stmt.inner0); }
+            self.assign(state, stmt.inner0, stmt.aux != 0);
         } else if (stmt.kind == StmtKind.Expr) {
             self.walk_expr(state, stmt.inner0, FlowUse.Read);
         } else if (stmt.kind == StmtKind.Return) {
@@ -1272,15 +1269,20 @@ impl MoveFlow {
     }
 
     /// Records a store into `target`: a tracked place becomes initialized;
-    /// any other target is an expression the store reads through.
-    void assign(MoveFlow* self, FlowState* state, u32 target) {
+    /// any other target is an expression the store reads through. A
+    /// `compound` assignment's value already read the target, which codegen
+    /// evaluates once, so its subscripts are not walked again.
+    void assign(MoveFlow* self, FlowState* state, u32 target, bool compound) {
         bool unknown_element = false;
         i64 place = self.resolve(target, true, &unknown_element);
         AstExpr expr = *self.pool.get_expr(target);
-        if (place >= 0) {
-            self.walk_subscripts(state, target);
-        } else if (expr.kind == ExprKind.Index) {
-            self.walk_expr(state, expr.inner1, FlowUse.Read);
+        if (compound && place < 0) { return; }
+        if (!compound) {
+            if (place >= 0) {
+                self.walk_subscripts(state, target);
+            } else if (expr.kind == ExprKind.Index) {
+                self.walk_expr(state, expr.inner1, FlowUse.Read);
+            }
         }
         if (place < 0) {
             if (expr.kind == ExprKind.Field || expr.kind == ExprKind.Index) {
