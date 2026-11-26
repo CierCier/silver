@@ -1454,6 +1454,26 @@ impl MoveChecker {
         }
     }
 
+    /// Reports a use of indexed `place` when its local, or the part of it
+    /// that `place` names, has moved. Index operands are not evaluated.
+    fn report_moved_index_place(&mut self, place: &Place, span: Span, state: &State) {
+        let Some(var) = state.get(&place.local) else {
+            return;
+        };
+        if var.is_fully_moved() {
+            let reason = var.move_reason.unwrap_or(msg::note_value_explicitly_moved());
+            let move_span = var.move_span;
+            self.error_with_note(msg::use_of_moved_value(&place.local), span, move_span, reason);
+        } else if let Some((move_span, reason)) = var.is_place_moved(place) {
+            self.error_with_note(
+                format!("use of moved field '{}[index]'", place.local),
+                span,
+                Some(move_span),
+                reason,
+            );
+        }
+    }
+
     /// Check expressions evaluated to compute indexed/dereferenced places.
     fn check_place_operands(
         &mut self,
@@ -2593,8 +2613,14 @@ impl MoveChecker {
                     }
                 }
                 // A borrowed receiver place must outlive the arguments too.
-                if !is_consuming && place_from_expr(receiver).is_some() {
-                    self.check_expr(receiver, state, scopes, var_types);
+                // A computed index such as `slot(t)` in `items[slot(t)]`
+                // already ran once, so only that place's state is read again.
+                if !is_consuming && let Some(place) = place_from_expr(receiver) {
+                    if is_plain_place(receiver) {
+                        self.check_expr(receiver, state, scopes, var_types);
+                    } else {
+                        self.report_moved_index_place(&place, receiver.span, state);
+                    }
                 }
                 self.recheck_borrowed_arguments(arguments, state, scopes, var_types);
             }
@@ -2777,26 +2803,7 @@ impl MoveChecker {
                 // Phase 11 — dynamic Index place: `v[i]` overlaps `v` and `v[j]` conservatively.
                 // Use Place::new(local).index() / push_projection(Index) via place_from_expr.
                 if let Some(place) = place_from_expr(expr) {
-                    if let Some(var) = state.get(&place.local.clone()) {
-                        if var.is_fully_moved() {
-                            let reason = var
-                                .move_reason
-                                .unwrap_or(msg::note_value_explicitly_moved());
-                            self.error_with_note(
-                                msg::use_of_moved_value(&place.local),
-                                expr.span,
-                                var.move_span,
-                                reason,
-                            );
-                        } else if let Some((move_span, reason)) = var.is_place_moved(&place) {
-                            self.error_with_note(
-                                format!("use of moved field '{}[index]'", place.local),
-                                expr.span,
-                                Some(move_span),
-                                reason,
-                            );
-                        }
-                    }
+                    self.report_moved_index_place(&place, expr.span, state);
                     // Also check index expression itself for moves
                     self.check_expr(index, state, scopes, var_types);
                 } else {
