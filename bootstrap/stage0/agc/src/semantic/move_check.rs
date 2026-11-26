@@ -3028,6 +3028,7 @@ impl MoveChecker {
                     // A `move` binding owns its payload within the arm.
                     arm_scopes.push(Vec::new());
                     for (binding, ty) in self.move_payload_bindings(&arm.pattern, scrutinee.as_ref()) {
+                        self.record_owner(&binding, &ty, true);
                         self.declare(&binding, Some(&ty), &mut arm_state, &mut arm_scopes, var_types);
                     }
                     // The arm's result is consumed even when the match is a

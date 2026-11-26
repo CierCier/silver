@@ -1732,6 +1732,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .is_some();
             if !arm_terminated {
                 all_arms_terminated = false;
+                // The arm scope holds its `move` bindings; release them here.
+                self.emit_defers(1)?;
                 self.builder
                     .build_unconditional_branch(end_bb)
                     .map_err(|e| CodegenError::new(format!("failed match arm end branch: {e}")))?;

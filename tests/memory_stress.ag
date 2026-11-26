@@ -545,6 +545,48 @@ void stress_conditional_and_borrowed_transfers() {
     assert_eq_i32(leaf_drop_count, 1, "moved payload binding drops once");
     assert_eq_i64(leaf_bytes_freed, 6, "moved payload binding frees once");
 
+    // A `move` binding owns its payload: it drops once whether a local
+    // takes it, the arm only reads it, or the arm yields a Copy field.
+    reset_owner_counters();
+    {
+        Optional<OwnedLeaf> maybe = Optional<OwnedLeaf>.Some(OwnedLeaf.new(32, 2));
+        match maybe {
+            Some(move leaf): { OwnedLeaf kept = leaf; },
+            None: {},
+        };
+        Optional<OwnedLeaf> other = Optional<OwnedLeaf>.Some(OwnedLeaf.new(33, 3));
+        match other {
+            Some(move leaf): { i32 id = leaf.first(); },
+            None: {},
+        };
+        Optional<OwnedLeaf> third = Optional<OwnedLeaf>.Some(OwnedLeaf.new(34, 4));
+        i64 len = match third {
+            Some(move leaf): leaf.len,
+            None: 0,
+        };
+        assert_eq_i64(len, 4, "an arm yielded a Copy field of its binding");
+    }
+    assert_eq_i32(leaf_drop_count, 3, "each move binding drops its payload once");
+    assert_eq_i64(leaf_bytes_freed, 9, "each move binding frees its payload once");
+
+    // An arm block drops its own locals and runs its defers at the arm's end.
+    reset_owner_counters();
+    deferred_leaf_id = 0;
+    {
+        Optional<OwnedLeaf> maybe = Optional<OwnedLeaf>.Some(OwnedLeaf.new(35, 1));
+        match maybe {
+            Some(leaf): {
+                OwnedLeaf extra = OwnedLeaf.new(36, 5);
+                defer deferred_leaf_id = leaf.id;
+            },
+            None: {},
+        };
+        assert_eq_i32(leaf_drop_count, 1, "an arm block dropped its local");
+        assert_eq_i32(deferred_leaf_id, 35, "an arm block ran its defer");
+    }
+    assert_eq_i32(leaf_drop_count, 2, "an arm local and the payload drop once");
+    assert_eq_i64(leaf_bytes_freed, 6, "an arm local and the payload free once");
+
     reset_owner_counters();
     {
         OwnedLeaf a = OwnedLeaf.new(26, 7);
