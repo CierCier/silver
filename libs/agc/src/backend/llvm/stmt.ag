@@ -241,7 +241,7 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
         // the root live.
         if (stmt.inner0 != 0) {
             u32 ret_val_ty = llvm_expr_type(ctx, stmt.inner0);
-        if (llvm_type_needs_tracking(ctx, ret_val_ty)) {
+        if (llvm_value_transfers_ownership(ctx, ret_val_ty)) {
             llvm_clear_place_drops(ctx, stmt.inner0);
         }
         }

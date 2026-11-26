@@ -430,6 +430,24 @@ struct EventHolder {
     i64 serial;
 }
 
+/// Takes an event and drops it at its end.
+void consume_event(LeafEvent event) {}
+
+/// Returns the holder's event, which moves it out of the holder.
+LeafEvent event_of(i32 id) {
+    EventHolder holder;
+    holder.event = LeafEvent.Held(OwnedLeaf.new(id, 2));
+    holder.serial = 1;
+    return holder.event;
+}
+
+/// Refills `place` with a fresh leaf and yields `id`, so a later element of
+/// an aggregate can reinitialize what an earlier element moved.
+macro refill_leaf(place, id) {
+    place = OwnedLeaf.new(id, 1);
+    return id;
+}
+
 /// Two leaves and no destructor of its own, so a field can move out.
 struct LeafPair {
     OwnedLeaf left;
@@ -586,6 +604,51 @@ void stress_conditional_and_borrowed_transfers() {
     }
     assert_eq_i32(leaf_drop_count, 1, "an enum field moved out drops its payload once");
     assert_eq_i64(leaf_bytes_freed, 3, "an enum field moved out frees its payload once");
+
+    // A by-value use of such a field moves it the same way.
+    reset_owner_counters();
+    {
+        EventHolder holder;
+        holder.event = LeafEvent.Held(OwnedLeaf.new(38, 1));
+        holder.serial = 1;
+        LeafEvent taken = holder.event;
+        EventHolder other;
+        other.event = LeafEvent.Held(OwnedLeaf.new(39, 2));
+        other.serial = 2;
+        consume_event(other.event);
+        LeafEvent returned = event_of(40);
+        EventHolder third;
+        third.event = LeafEvent.Held(OwnedLeaf.new(41, 4));
+        third.serial = 3;
+        bool pick = third.serial == 3;
+        LeafEvent picked = pick ? third.event : LeafEvent.Idle;
+        EventHolder fourth;
+        fourth.event = LeafEvent.Held(OwnedLeaf.new(42, 8));
+        fourth.serial = 4;
+        EventHolder rebuilt = { .event = fourth.event, .serial = 5 };
+        EventHolder fifth;
+        fifth.event = LeafEvent.Held(OwnedLeaf.new(43, 16));
+        fifth.serial = 6;
+        [LeafEvent, i64] paired = [fifth.event, 7];
+        assert_eq_i32(leaf_drop_count, 1, "only the consumed event dropped early");
+    }
+    assert_eq_i32(leaf_drop_count, 6, "an enum field used by value drops its payload once");
+    assert_eq_i64(leaf_bytes_freed, 33, "an enum field used by value frees its payload once");
+
+    // An aggregate owns each element as it builds it, so a later element
+    // that refills the moved source leaves the new leaf with its source.
+    reset_owner_counters();
+    {
+        LeafPair pair = leaf_pair(44);
+        [OwnedLeaf, i32] first = [pair.left, @refill_leaf(pair.left, 46)];
+        OwnedLeaf solo = OwnedLeaf.new(47, 4);
+        [OwnedLeaf, i32] second = [solo, @refill_leaf(solo, 48)];
+        assert_eq_i32(first[0].first(), 44, "the tuple kept the moved leaf");
+        assert_eq_i32(pair.left.first(), 46, "the refilled field holds the new leaf");
+        assert_eq_i32(solo.first(), 48, "the refilled local holds the new leaf");
+    }
+    assert_eq_i32(leaf_drop_count, 5, "a refilled aggregate source drops each leaf once");
+    assert_eq_i64(leaf_bytes_freed, 11, "a refilled aggregate source frees each leaf once");
 
     // An arm block drops its own locals and runs its defers at the arm's end.
     reset_owner_counters();

@@ -1307,16 +1307,39 @@ void llvm_drop_active_unmoved_payloads(LlvmContext* ctx) {
     llvm_drop_active_unmoved_payloads_above(ctx, 0);
 }
 
+/// Is `type_id` a non-generic enum whose payloads need a drop? Cleanup
+/// drops such a value through its payloads, which the tracking predicate
+/// does not look into for enums. A generic instance such as `Optional<Buf>`
+/// is tracked by its local's drop flag instead.
+bool llvm_enum_type_owns_payloads(LlvmContext* ctx, u32 type_id) {
+    u32 resolved = ctx.types.resolve_subst(type_id);
+    if (resolved == TYPE_UNKNOWN || resolved == 0) { return false; }
+    TypeEntry* entry = ctx.types.get(resolved);
+    if (entry.kind != TypeKind.Named || entry.count > 0) { return false; }
+    str enum_name = ctx.types.names.get(entry.name_id);
+    SyntaxNode* enum_item = find_enum_item(ctx.root, enum_name);
+    return enum_item != (SyntaxNode*)0 && !llvm_item_is_generic_enum(enum_item)
+        && llvm_enum_needs_payload_drop(ctx, resolved, enum_name);
+}
+
+/// Does moving a value of `type_id` move a drop with it? Either drop
+/// tracking covers the type or it is an enum whose payloads cleanup drops.
+bool llvm_value_transfers_ownership(LlvmContext* ctx, u32 type_id) {
+    return llvm_type_needs_tracking(ctx, type_id)
+        || llvm_enum_type_owns_payloads(ctx, type_id);
+}
+
 /// Whether the value `src_id` reads is drop-tracked. A local registered for
 /// drop counts even when the type predicate cannot judge its type, as for a
-/// generic enum instance like `Maybe<Buf>`.
+/// generic enum instance like `Maybe<Buf>`. So does an enum whose payloads
+/// cleanup drops, as for a field `h.ev` of a non-generic `Ev`.
 bool llvm_source_needs_tracking(LlvmContext* ctx, u32 src_id) {
     AstExpr* source = ctx.pool.get_expr(src_id);
     if (source.kind == ExprKind.Var) {
         LlvmLocal* local = ctx.find_local(source.aux);
         if (local != (LlvmLocal*)0 && local.drop_flag != (LLVMOpaqueValue*)0) { return true; }
     }
-    return llvm_type_needs_tracking(ctx, llvm_expr_type(ctx, src_id));
+    return llvm_value_transfers_ownership(ctx, llvm_expr_type(ctx, src_id));
 }
 
 /// Moves drop ownership from place operand `src_id` to the value built from
@@ -1526,20 +1549,11 @@ u32 llvm_assignment_source(LlvmContext* ctx, u32 expr_id) {
 void llvm_clear_place_drops(LlvmContext* ctx, u32 expr_id) {
     expr_id = llvm_assignment_source(ctx, expr_id);
     if (expr_id == 0) { return; }
-    AstExpr value = *ctx.pool.get_expr(expr_id);
-    if (value.kind == ExprKind.ArrayLit || value.kind == ExprKind.StructLit) {
-        i64 count = value.aux;
-        i64 i = 0;
-        while (i < count) {
-            i64 offset = value.kind == ExprKind.ArrayLit ? 1 + i : i * 2 + 1;
-            u32 member = ctx.pool.args.get((i64)value.inner1 + offset);
-            if (llvm_type_needs_tracking(ctx, llvm_expr_type(ctx, member))) {
-                llvm_clear_place_drops(ctx, member);
-            }
-            i += 1;
-        }
-        return;
-    }
+    AstExpr* value = ctx.pool.get_expr(expr_id);
+    // A literal released each element's source as it captured it. Releasing
+    // them again here would drop the ownership of a source a later element
+    // reinitialized.
+    if (value.kind == ExprKind.ArrayLit || value.kind == ExprKind.StructLit) { return; }
     llvm_clear_place_drops_at_local(ctx, expr_id, -1);
 }
 

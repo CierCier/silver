@@ -436,18 +436,13 @@ LLVMOpaqueValue* llvm_emit_enum_build(LlvmContext* ctx, str enum_name, str varia
         LLVMOpaqueValue* field_ptr = LLVMBuildBitCast(ctx.builder, field_byte_ptr, ptr_ty, "enum_field");
         LLVMOpaqueValue* store = LLVMBuildStore(ctx.builder, arg_val, field_ptr);
         LLVMSetAlignment(store, 1);
+        // The enum owns the payload from here, before a later payload runs.
+        llvm_clear_copy_source(ctx, arg_id);
         arg_index += 1;
     }
     payload_types.drop();
     base.drop();
     instance_name.drop();
-    // Payloads copied out of tracked locals transfer ownership to the
-    // aggregate temp (which a flagged destination then owns exactly once).
-    i64 cleared_index = 0;
-    while (cleared_index < (i64)args_count) {
-        llvm_clear_copy_source(ctx, ctx.pool.args.get((i64)args_start + cleared_index));
-        cleared_index += 1;
-    }
     // Materialize the value so construction composes with loads and returns.
     return LLVMBuildLoad2(ctx.builder, enum_ty, slot, "enum_val");
 }
@@ -2820,15 +2815,11 @@ LLVMOpaqueValue* llvm_emit_struct_lit(LlvmContext* ctx, AstExpr* expr) {
         LLVMOpaqueValue* field_ptr = LLVMBuildStructGEP2(ctx.builder, def.llvm_type, slot, (u32)field_idx, "struct.lit.field");
         LLVMOpaqueValue* store = LLVMBuildStore(ctx.builder, val, field_ptr);
         if (def.packed) { LLVMSetAlignment(store, 1); }
+        // The literal owns the field's value from here. Releasing its source
+        // now, not after the last field, keeps a later field's
+        // reinitialization of that source owned.
+        llvm_clear_copy_source(ctx, val_id);
         fi += 1;
-    }
-    // Field values copied out of tracked locals transfer ownership to the
-    // aggregate temp (which a flagged destination then owns exactly once).
-    i64 cleared_index = 0;
-    while (cleared_index < (i64)expr.aux) {
-        u32 cleared_val_id = ctx.pool.args.get((i64)expr.inner1 + cleared_index * 2 + 1);
-        llvm_clear_copy_source(ctx, cleared_val_id);
-        cleared_index += 1;
     }
     return LLVMBuildLoad2(ctx.builder, def.llvm_type, slot, "struct.lit.val");
 }
@@ -4012,7 +4003,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 ctx.note_unresolved("block-result-borrow",
                     "result aliases block-local storage");
             } else {
-                if (llvm_type_needs_tracking(ctx, result_type)) {
+                if (llvm_value_transfers_ownership(ctx, result_type)) {
                     llvm_clear_place_drops(ctx, result_expr);
                 }
                 llvm_emit_defers_above(ctx, defer_mark);
@@ -5284,6 +5275,12 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                         if (match_body_diverges(ctx, &body_stmt)) {
                             LLVMBuildUnreachable(ctx.builder);
                         } else if (void_match) {
+                            // As for a value arm: moving one payload cleared
+                            // the scrutinee, so the bindings it left drop here.
+                            if (arm.pattern == MatchPatternKind.Variant) {
+                                llvm_drop_unmoved_payloads(ctx, expr.inner0,
+                                                           (i64)arm.bindings_count);
+                            }
                             LLVMBuildBr(ctx.builder, merge_bb);
                         } else {
                             ctx.note_unresolved("match-value", "expression");
@@ -5318,7 +5315,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                     arm_val = llvm_compat_value(ctx, arm_val, arm_val_ty, result_ty_id);
                     LLVMBuildStore(ctx.builder, arm_val, result_slot);
                 }
-                if (llvm_type_needs_tracking(ctx, result_ty_id)) {
+                if (llvm_value_transfers_ownership(ctx, result_ty_id)) {
                     llvm_clear_place_drops(ctx, arm.value_id);
                 }
                 if (arm.pattern == MatchPatternKind.Variant) {
@@ -6049,6 +6046,9 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 elem_val = llvm_compat_value(ctx, elem_val, llvm_expr_type(ctx, elem_id), elem_type);
                 LLVMOpaqueValue* field = LLVMBuildStructGEP2(ctx.builder, tuple_ty, tuple_slot, (u32)i, "tuple_field");
                 LLVMBuildStore(ctx.builder, elem_val, field);
+                // The tuple owns the element from here, before a later
+                // element can reinitialize its source.
+                llvm_clear_copy_source(ctx, elem_id);
                 i += 1;
             }
             return LLVMBuildLoad2(ctx.builder, tuple_ty, tuple_slot, "tuple_value");
@@ -6132,6 +6132,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 LLVMOpaqueValue* elem_ptr = LLVMBuildGEP2(ctx.builder, scalar_ty,
                     scalar_base, &idx, 1, "arr_lit_gep");
                 LLVMBuildStore(ctx.builder, elem_val, elem_ptr);
+                llvm_clear_copy_source(ctx, elem_id);
                 flat_index += 1;
             }
             i += 1;
