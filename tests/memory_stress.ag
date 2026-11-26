@@ -601,9 +601,30 @@ void stress_conditional_and_borrowed_transfers() {
         holder.event = LeafEvent.Held(OwnedLeaf.new(37, 3));
         holder.serial = 1;
         LeafEvent taken = move holder.event;
+        EventHolder copied;
+        copied.event = LeafEvent.Held(OwnedLeaf.new(38, 4));
+        copied.serial = 2;
+        LeafEvent implicit = copied.event;
+        EventHolder matched;
+        matched.event = LeafEvent.Held(OwnedLeaf.new(39, 5));
+        matched.serial = 3;
+        i32 matched_id = match matched.event { Held(move leaf): leaf.id, Idle: 0 };
+        assert_eq_i32(matched_id, 39, "a move binding reads its payload out of an enum field");
     }
-    assert_eq_i32(leaf_drop_count, 1, "an enum field moved out drops its payload once");
-    assert_eq_i64(leaf_bytes_freed, 3, "an enum field moved out frees its payload once");
+    assert_eq_i32(leaf_drop_count, 3, "an enum field moved out drops its payload once");
+    assert_eq_i64(leaf_bytes_freed, 12, "an enum field moved out frees its payload once");
+
+    // A borrowed receiver's computed index runs once, so the leaf it moved
+    // is not read again.
+    reset_owner_counters();
+    {
+        OwnedLeaf leaves[2];
+        leaves[0] = OwnedLeaf.new(41, 1);
+        leaves[1] = OwnedLeaf.new(42, 1);
+        OwnedLeaf probe = OwnedLeaf.new(40, 1);
+        assert_eq_i32(leaves[first_of(probe) - 39].first(), 42, "a receiver's index moves its argument once");
+    }
+    assert_eq_i32(leaf_drop_count, 3, "a receiver's moved index argument drops once");
 
     // A by-value use of such a field moves it the same way.
     reset_owner_counters();

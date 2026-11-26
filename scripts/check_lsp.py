@@ -893,7 +893,7 @@ class NativeLsp(unittest.TestCase):
                 "struct Guard { Tok leaf; }\n"
                 "impl Drop for Guard { void drop(*self) { } }\n"
                 "Guard guard() { Guard g; g.leaf = mk(1); return g; }\n"
-                "i64 rvalue_field() { take(guard().leaf); return 0; }\n"
+                "i64 rvalue_field(bool f) { take(guard().leaf); Tok u = f ? mk(2) : guard().leaf; return 0; }\n"
                 "struct Rec { i64 n; Tok token; }\n"
                 "i64 eat(Rec r) { return 1; }\n"
                 "i64 controls(bool f) {\n"
@@ -929,6 +929,7 @@ class NativeLsp(unittest.TestCase):
                           (25, "cannot move an element out of 'Crate<Tok>' by indexing: the container still owns it; "
                                "use take, pop, swap_remove, or a reference"),
                           (26, "use of moved value 't'"),
+                          (30, "cannot move 'leaf' out of 'Guard' because it implements Drop"),
                           (30, "cannot move 'leaf' out of 'Guard' because it implements Drop")])
 
     def test_a_local_callable_is_checked_against_its_own_signature(self):
