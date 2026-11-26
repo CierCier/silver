@@ -444,6 +444,10 @@ LeafEvent event_of(i32 id) {
 /// Takes a leaf and drops it at its end.
 void keep_leaf_id(OwnedLeaf leaf) {}
 
+i32 leaf_id_of(OwnedLeaf leaf) {
+    return leaf.id;
+}
+
 /// A variant with two owned payloads.
 enum LeafTwin { Both(OwnedLeaf, OwnedLeaf); Neither; }
 
@@ -699,6 +703,25 @@ void stress_conditional_and_borrowed_transfers() {
     }
     assert_eq_i32(leaf_drop_count, 2, "a partly moved field enum drops each payload once");
     assert_eq_i64(leaf_bytes_freed, 192, "a partly moved field enum frees each payload once");
+
+    // A payload binding that reuses the scrutinee's name must not hide the
+    // enum's own storage from the move-out, in a statement or a value match.
+    reset_owner_counters();
+    {
+        LeafTwin shadowed = LeafTwin.Both(OwnedLeaf.new(57, 256), OwnedLeaf.new(58, 512));
+        match shadowed {
+            Both(move left, shadowed): { keep_leaf_id(move left); },
+            Neither: {},
+        };
+        LeafTwin valued = LeafTwin.Both(OwnedLeaf.new(59, 1024), OwnedLeaf.new(60, 2048));
+        i32 taken = match valued {
+            Both(move valued, right): leaf_id_of(move valued),
+            Neither: 0,
+        };
+        assert_eq_i32(taken, 59, "a value match yields the moved payload's id");
+    }
+    assert_eq_i32(leaf_drop_count, 4, "a payload named like its scrutinee drops each payload once");
+    assert_eq_i64(leaf_bytes_freed, 3840, "a payload named like its scrutinee frees each payload once");
 
     // An arm block drops its own locals and runs its defers at the arm's end.
     reset_owner_counters();
