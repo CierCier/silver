@@ -195,6 +195,11 @@ pub fn is_initialized(tree: &MovePathTree, place: &Place) -> bool {
     }
 }
 
+/// True iff `place` or a prefix of it is wholly moved out.
+pub fn is_moved_out(tree: &MovePathTree, place: &Place) -> bool {
+    has_uninit_prefix(tree, place)
+}
+
 /// Alias for `is_initialized`.
 pub fn read(tree: &MovePathTree, place: &Place) -> bool {
     is_initialized(tree, place)

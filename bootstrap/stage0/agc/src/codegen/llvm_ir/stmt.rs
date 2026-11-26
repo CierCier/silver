@@ -1238,7 +1238,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let function = self
             .current_fn
             .ok_or_else(|| CodegenError::new("no active function for match expression"))?;
-        let scrutinee = self.emit_expression_value(expression)?;
+        let (scrutinee, scrutinee_addr) = self.emit_match_scrutinee(expression, arms)?;
         let end_bb = self.context.append_basic_block(function, "match.end");
         let mut cond_bb = self
             .builder
@@ -1446,7 +1446,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 // Resolve the scrutinee's storage and release its drop state
                                 // before any arm binding can shadow its name.
                                 let orig_ptr = if any_move {
-                                    self.resolve_lvalue_ptr(expression).ok().map(|(ptr, _)| ptr)
+                                    scrutinee_addr.as_ref().map(|(ptr, _, _)| *ptr)
                                 } else {
                                     None
                                 };
@@ -1479,6 +1479,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                         // A field enum's owner must not
                                         // drop the payloads the arm now owns.
                                         self.clear_field_flags_for_path(&root_name, &path)?;
+                                    } else {
+                                        // An element at a computed index releases its owner node,
+                                        // as `move items[i]` does.
+                                        if let Some((ptr, ty, Some(state))) = &scrutinee_addr {
+                                            self.move_borrowed_place(*ptr, ty, *state, expression.span)?;
+                                        }
                                     }
                                 }
                                 for (i, concrete_pt) in concrete_payload.iter().enumerate() {

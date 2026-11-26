@@ -342,7 +342,8 @@ impl VarState {
         }
         // Merge MovePathTree field granularity via structural Place prefixes.
         for (place, (span, reason)) in &other.place_spans {
-            if !init::is_initialized(&other.tree, place) && init::is_initialized(&self.tree, place)
+            // A partial place still takes a whole-place move from `other`.
+            if !init::is_initialized(&other.tree, place) && !init::is_moved_out(&self.tree, place)
             {
                 // Use move_out to propagate Partial to ancestors via is_prefix_of.
                 let _ = init::move_out(&mut self.tree, place);
@@ -483,6 +484,8 @@ struct Facts {
     struct_fields: FxHashMap<String, StructInfo>,
     /// Payload types of each tuple variant, by (enum, variant).
     variant_payloads: FxHashMap<(String, String), Vec<ast::Type>>,
+    /// Variant names of each enum, for match exhaustiveness.
+    enum_variants: FxHashMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Debug)]
@@ -535,6 +538,10 @@ impl Facts {
             }
             ast::ItemKind::Enum(enumeration) => {
                 self.opaque_owners.insert(enumeration.name.name.clone());
+                self.enum_variants.insert(
+                    enumeration.name.name.clone(),
+                    enumeration.variants.iter().map(|v| v.name.name.clone()).collect(),
+                );
                 for variant in &enumeration.variants {
                     if let ast::EnumVariantData::Tuple(types) = &variant.data {
                         self.variant_payloads.insert(
@@ -652,6 +659,10 @@ impl Facts {
                 }
                 ExportKind::Enum => {
                     self.opaque_owners.insert(export.name.clone());
+                    self.enum_variants.insert(
+                        export.name.clone(),
+                        export.enum_variants.iter().map(|v| v.name.clone()).collect(),
+                    );
                     for variant in &export.enum_variants {
                         let payloads: Option<Vec<ast::Type>> = variant
                             .payload_types
@@ -3006,8 +3017,9 @@ impl MoveChecker {
                 let locked = self.locked_place(expression, var_types).map(|(_, ty)| ty);
                 let scrutinee = self.receiver_type(expression, var_types);
                 // Each arm is an independent path from the pre-match state;
-                // arms that never fall through do not contribute.
-                let mut merged = state.clone();
+                // arms that never fall through do not contribute. The
+                // pre-match state joins only when no arm may match.
+                let mut merged: Option<State> = None;
                 for arm in arms {
                     if arm.guard.is_some() && Self::pattern_has_move(&arm.pattern) {
                         self.error(
@@ -3033,7 +3045,20 @@ impl MoveChecker {
                     // payloads, so the scrutinee is moved-from after it until
                     // reinitialized. Codegen releases it, so no transfer is
                     // recorded.
+                    let indexed = place_from_expr(expression)
+                        .filter(|place| place.projections.contains(&Projection::Index));
                     if Self::pattern_has_move(&arm.pattern)
+                        && let Some(place) = indexed
+                    {
+                        // An element place is index-insensitive, like `move v[i]`.
+                        if let Some(var) = arm_state.get_mut(&place.local) {
+                            var.mark_place_moved(
+                                &place,
+                                expression.span,
+                                msg::note_value_moved_here(),
+                            );
+                        }
+                    } else if Self::pattern_has_move(&arm.pattern)
                         && let Some((root, path)) = expr_root_and_path(expression)
                         && let Some(var) = arm_state.get_mut(&root)
                     {
@@ -3049,9 +3074,24 @@ impl MoveChecker {
                     }
                     // A `move` binding owns its payload within the arm.
                     arm_scopes.push(Vec::new());
-                    for (binding, ty) in self.move_payload_bindings(&arm.pattern, scrutinee.as_ref()) {
-                        self.record_owner(&binding, &ty, true);
-                        self.declare(&binding, Some(&ty), &mut arm_state, &mut arm_scopes, var_types);
+                    let owned = self.move_payload_bindings(&arm.pattern, scrutinee.as_ref());
+                    for (binding, ty) in &owned {
+                        self.record_owner(binding, ty, true);
+                        self.declare(binding, Some(ty), &mut arm_state, &mut arm_scopes, var_types);
+                    }
+                    // A borrowed payload binding owns nothing, but it still
+                    // hides an outer local of its name until the arm ends.
+                    for binding in Self::payload_binding_names(&arm.pattern) {
+                        if owned.iter().any(|(o, _)| o.name == binding.name) {
+                            continue;
+                        }
+                        let name = binding.name.clone();
+                        let old_state = arm_state.remove(&name);
+                        let old_type = var_types.remove(&name);
+                        let old_owner = self.owner_bindings.remove(&name);
+                        arm_scopes.last_mut().expect("arm scope is pushed").push((
+                            name, old_state, old_type, old_owner, None,
+                        ));
                     }
                     // The arm's result is consumed even when the match is a
                     // statement: codegen moves it out, as it does a block's
@@ -3061,16 +3101,20 @@ impl MoveChecker {
                     self.reject_locked_move(&arm.body, var_types);
                     self.locked_bindings = saved;
                     if !expression_terminates(&arm.body) {
-                        for (name, var) in merged.iter_mut() {
-                            // Join every fall-through arm, as an if/else does:
-                            // two arms at the same level can still move
-                            // different fields.
-                            let arm_var = arm_state.get(name).cloned().unwrap_or_default();
-                            var.merge_with(&arm_var);
-                        }
+                        // Join every fall-through arm, as an if/else does:
+                        // two arms at the same level can still move
+                        // different fields.
+                        Self::join_exit(&mut merged, state, &arm_state);
                     }
                 }
-                *state = merged;
+                if !self.match_is_exhaustive(arms, scrutinee.as_ref()) {
+                    let fallthrough = state.clone();
+                    Self::join_exit(&mut merged, state, &fallthrough);
+                }
+                // With no reachable exit the code after the match is dead.
+                if let Some(merged) = merged {
+                    *state = merged;
+                }
             }
             ast::ExpressionKind::Block(block) => {
                 self.check_block_yielding(block, true, state, scopes, var_types);
@@ -3262,6 +3306,80 @@ impl MoveChecker {
                 Some((binding?.clone(), Self::substitute_type(payload, &substitutions)))
             })
             .collect()
+    }
+
+    /// The identifiers an enum arm binds to its payloads.
+    fn payload_binding_names(pattern: &ast::Pattern) -> Vec<&ast::Identifier> {
+        let ast::PatternKind::Enum {
+            data: Some(data), ..
+        } = &pattern.kind
+        else {
+            return Vec::new();
+        };
+        let items: Vec<&ast::Pattern> = match &data.kind {
+            ast::PatternKind::Tuple(items) => items.iter().collect(),
+            _ => vec![data.as_ref()],
+        };
+        items
+            .into_iter()
+            .filter_map(|item| match &item.kind {
+                ast::PatternKind::Identifier(binding) | ast::PatternKind::Move(binding) => {
+                    Some(binding)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether some arm always matches: an unguarded catch-all, or unguarded
+    /// arms that take every variant of an enum scrutinee whatever its payloads.
+    fn match_is_exhaustive(&self, arms: &[ast::MatchArm], scrutinee: Option<&ast::Type>) -> bool {
+        let unguarded = || arms.iter().filter(|arm| arm.guard.is_none());
+        if unguarded().any(|arm| !Self::pattern_is_refutable(&arm.pattern)) {
+            return true;
+        }
+        let Some(variants) = scrutinee.and_then(|ty| self.facts.enum_variants.get(&Facts::owner_key(ty)))
+        else {
+            return false;
+        };
+        let binds_any = |p: &ast::Pattern| {
+            matches!(
+                p.kind,
+                ast::PatternKind::Identifier(_) | ast::PatternKind::Move(_) | ast::PatternKind::Wildcard
+            )
+        };
+        variants.iter().all(|name| {
+            unguarded().any(|arm| match &arm.pattern.kind {
+                ast::PatternKind::Enum { variant, data, .. } if &variant.name == name => {
+                    match data.as_deref().map(|d| &d.kind) {
+                        None => true,
+                        Some(ast::PatternKind::Tuple(items)) => items.iter().all(binds_any),
+                        Some(_) => binds_any(data.as_deref().expect("data is present")),
+                    }
+                }
+                _ => false,
+            })
+        })
+    }
+
+    /// Joins one reachable exit of a match into `merged`, the first exit
+    /// seeding it, over the names of the pre-match `state`.
+    fn join_exit(merged: &mut Option<State>, state: &State, exit: &State) {
+        match merged {
+            None => {
+                let mut seeded = state.clone();
+                for (name, var) in seeded.iter_mut() {
+                    *var = exit.get(name).cloned().unwrap_or_default();
+                }
+                *merged = Some(seeded);
+            }
+            Some(merged) => {
+                for (name, var) in merged.iter_mut() {
+                    let exit_var = exit.get(name).cloned().unwrap_or_default();
+                    var.merge_with(&exit_var);
+                }
+            }
+        }
     }
 
     fn pattern_has_move(pattern: &ast::Pattern) -> bool {
@@ -3738,6 +3856,50 @@ mod tests {
             errors.types.is_empty() && errors.moves.is_empty(),
             "{shadow}: {errors:?}"
         );
+        // A borrowed payload binding hides a moved-from local of its name,
+        // and an exhaustive match that reinitializes it in every arm leaves
+        // it live.
+        for control in [
+            "Mixed w = Mixed.Both(4, fresh()); \
+             match w { Both(n, move leaf): { eat(leaf); }, Neither: {} }; \
+             Mixed m = Mixed.Both(5, fresh()); \
+             match m { Both(w, leaf): { i64 n = w; }, Neither: {} };",
+            "Mixed w = Mixed.Both(4, fresh()); \
+             match w { Both(n, move leaf): { eat(leaf); }, Neither: {} }; \
+             Mixed m = Mixed.Neither; \
+             match m { Both(n, leaf): { w = Mixed.Neither; }, Neither: { w = Mixed.Neither; } }; \
+             match w { Both(n, leaf): {}, Neither: {} };",
+        ] {
+            let errors = errors_with_items(items, control);
+            assert!(
+                errors.types.is_empty() && errors.moves.is_empty(),
+                "{control}: {errors:?}"
+            );
+        }
+        for misuse in [
+            // A match without a catch-all may match no arm.
+            "Mixed w = Mixed.Both(4, fresh()); \
+             match w { Both(n, move leaf): { eat(leaf); }, Neither: {} }; \
+             Mixed m = Mixed.Neither; \
+             match m { Both(n, leaf): { w = Mixed.Neither; } }; \
+             match w { Both(n, leaf): {}, Neither: {} };",
+            // A payload move from an array element moves the element.
+            "Mixed items[2]; items[0] = Mixed.Both(4, fresh()); \
+             match items[0] { Both(n, move leaf): { eat(leaf); }, Neither: {} }; \
+             match items[0] { Both(n, leaf): {}, Neither: {} };",
+        ] {
+            let errors = errors_with_items(items, misuse);
+            assert!(!errors.moves.is_empty(), "{misuse}: {errors:?}");
+        }
+        // One arm moving a whole field outweighs another moving part of it.
+        let items = "enum Twin { Both(Text, Text); Neither; }\n\
+                     struct Inner { i64 id; Twin twin; }\n\
+                     struct Holder { Inner inner; }\n";
+        let partial = "Holder h; h.inner.twin = Twin.Both(fresh(), fresh()); bool f = true; \
+                       if (f) { match h.inner.twin { Both(move a, b): { eat(a); eat(b); }, \
+                       Neither: {} }; } else { Inner gone = h.inner; } i64 n = h.inner.id;";
+        let errors = errors_with_items(items, partial);
+        assert!(!errors.moves.is_empty(), "{partial}: {errors:?}");
     }
 
     #[test]

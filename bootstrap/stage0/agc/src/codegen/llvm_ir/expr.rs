@@ -20,6 +20,51 @@ use crate::parser::ast;
 use crate::symbol_table::{CompilerPhase, SymbolKind};
 
 impl<'ctx> LlvmIrGenerator<'ctx> {
+    /// Evaluates a match scrutinee once. When an arm moves payloads out of a
+    /// place, the value is loaded from that place, which is also returned
+    /// (address, type and owner state) so the arm releases the slots it read
+    /// instead of evaluating the place, and any index call in it, again.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn emit_match_scrutinee(
+        &mut self,
+        expression: &ast::Expression,
+        arms: &[ast::MatchArm],
+    ) -> CodegenResult<(
+        BasicValueEnum<'ctx>,
+        Option<(PointerValue<'ctx>, ast::Type, Option<PointerValue<'ctx>>)>,
+    )> {
+        let moves = arms.iter().any(|arm| {
+            matches!(&arm.pattern.kind, ast::PatternKind::Enum { data: Some(data), .. }
+                if Self::match_payload_bindings(data, 0).1)
+        });
+        if moves
+            && Self::is_named_place(expression)
+            && let Ok(place) = self.resolve_lvalue_place(expression)
+        {
+            let llvm_ty = self.lower_basic_type(&place.ty)?;
+            let value = self.load_value(llvm_ty, place.ptr, "match.scrutinee").map_err(|e| {
+                CodegenError::with_span(format!("load match scrutinee: {e}"), expression.span)
+            })?;
+            return Ok((value, Some((place.ptr, place.ty, place.state))));
+        }
+        Ok((self.emit_expression_value(expression)?, None))
+    }
+
+    /// A place rooted at a named variable, so resolving its address
+    /// evaluates nothing but its index operands.
+    fn is_named_place(expression: &ast::Expression) -> bool {
+        match expression.kind.as_ref() {
+            ast::ExpressionKind::Identifier(_) => true,
+            ast::ExpressionKind::FieldAccess { object, .. }
+            | ast::ExpressionKind::Index { object, .. } => Self::is_named_place(object),
+            ast::ExpressionKind::Unary {
+                operator: ast::UnaryOperator::Dereference,
+                operand,
+            } => Self::is_named_place(operand),
+            _ => false,
+        }
+    }
+
     /// The bindings of an enum arm's payload pattern, one per payload as
     /// `(name, is_move)`, and whether any is `move`. A `move` element releases
     /// the whole scrutinee's drop state, so then the arm owns every other
@@ -3190,7 +3235,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let function = self
             .current_fn
             .ok_or_else(|| CodegenError::new("no active function for match expression"))?;
-        let scrutinee = self.emit_expression_value(expression)?;
+        let (scrutinee, scrutinee_addr) = self.emit_match_scrutinee(expression, arms)?;
         let end_bb = self.context.append_basic_block(function, "match.expr.end");
         let mut cond_bb = self
             .builder
@@ -3415,7 +3460,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 // Resolve the scrutinee's storage and release its drop state
                                 // before any arm binding can shadow its name.
                                 let orig_ptr = if any_move {
-                                    self.resolve_lvalue_ptr(expression).ok().map(|(ptr, _)| ptr)
+                                    scrutinee_addr.as_ref().map(|(ptr, _, _)| *ptr)
                                 } else {
                                     None
                                 };
@@ -3452,6 +3497,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                         // A field enum's owner must not
                                         // drop the payloads the arm now owns.
                                         self.clear_field_flags_for_path(&root_name, &path)?;
+                                    } else {
+                                        // An element at a computed index releases its owner node,
+                                        // as `move items[i]` does.
+                                        if let Some((ptr, ty, Some(state))) = &scrutinee_addr {
+                                            self.move_borrowed_place(*ptr, ty, *state, expression.span)?;
+                                        }
                                     }
                                 }
                                 for (i, concrete_pt) in concrete_payload.iter().enumerate() {
