@@ -422,6 +422,14 @@ struct LeafSlot {
     [OwnedLeaf, i64] pair;
 }
 
+/// A non-generic enum whose payload owns a leaf, held by a plain struct.
+enum LeafEvent { Held(OwnedLeaf); Idle; }
+
+struct EventHolder {
+    LeafEvent event;
+    i64 serial;
+}
+
 /// Two leaves and no destructor of its own, so a field can move out.
 struct LeafPair {
     OwnedLeaf left;
@@ -568,6 +576,16 @@ void stress_conditional_and_borrowed_transfers() {
     }
     assert_eq_i32(leaf_drop_count, 3, "each move binding drops its payload once");
     assert_eq_i64(leaf_bytes_freed, 9, "each move binding frees its payload once");
+
+    reset_owner_counters();
+    {
+        EventHolder holder;
+        holder.event = LeafEvent.Held(OwnedLeaf.new(37, 3));
+        holder.serial = 1;
+        LeafEvent taken = move holder.event;
+    }
+    assert_eq_i32(leaf_drop_count, 1, "an enum field moved out drops its payload once");
+    assert_eq_i64(leaf_bytes_freed, 3, "an enum field moved out frees its payload once");
 
     // An arm block drops its own locals and runs its defers at the arm's end.
     reset_owner_counters();

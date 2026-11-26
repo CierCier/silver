@@ -4207,13 +4207,13 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             llvm_reference_update(ctx, source, expr.span, BorrowedTransition.Move);
             return value;
         }
-        // Moving a field no drop tracks copies it and leaves its root,
-        // such as a match binding whose `i64` field an arm yields, owned.
+        // Moving a Copy field copies it and leaves its root, such as a
+        // match binding whose `i64` field an arm yields, owned.
         if (expr.inner0 != 0) {
             u32 moved_type = llvm_expr_type(ctx, expr.inner0);
             bool copied = ctx.pool.get_expr(expr.inner0).kind == ExprKind.Field
                 && moved_type != TYPE_UNKNOWN && moved_type != 0
-                && !llvm_type_needs_tracking(ctx, moved_type);
+                && typecheck_type_is_copy(ctx.root, ctx.types, moved_type);
             if (!copied) {
                 llvm_clear_place_drops(ctx, expr.inner0);
                 llvm_clear_scrutinee_source(ctx, expr.inner0);
