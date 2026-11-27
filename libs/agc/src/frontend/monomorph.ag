@@ -711,6 +711,8 @@ i64 mono_match_method_call(AstPool* pool, SyntaxNode* root, TypeTable* types,
     params.drop();
     inferred.drop();
     method_params.drop();
+    // A failed match must not outrank one that succeeded.
+    if (!matched || failure.len() != 0) { template.argument_score = -1; }
     return matched && failure.len() == 0 ? specificity : -1;
 }
 

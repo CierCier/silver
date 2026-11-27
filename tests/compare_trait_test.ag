@@ -20,6 +20,7 @@ impl Compare for Pair {
 // A value impl and a pointer impl that both declare `read` with one argument.
 // A call through `&cell` runs the overload whose parameter fits the argument.
 trait Peek { i64 read(self, i64 i); }
+trait Label { i64 name(self, i64 i); }
 
 struct Cell<T> {
     T value;
@@ -28,10 +29,15 @@ struct Cell<T> {
 
 impl<T> Cell<T> {
     i64 read(&self, bool more) { return more ? self.tag + 1 : self.tag; }
+    str name(&self, bool upper) { return upper ? "CELL" : "cell"; }
 }
 
 impl<T> Peek for Cell<T>* {
     i64 read(self, i64 i) { return i + 100; }
+}
+
+impl<T> Label for Cell<T>* {
+    i64 name(self, i64 i) { return i; }
 }
 
 i32 main() {
@@ -105,6 +111,9 @@ i32 main() {
         i64 n = 5;
         assert_eq_i64(7, (&c).read(true), "bool argument runs the value impl's read");
         assert_eq_i64(105, (&c).read(n), "i64 argument runs the pointer impl's read");
+        str label = (&c).name(true);
+        assert_true(label == "CELL", "bool argument runs the value impl's name and keeps its str type");
+        assert_eq_i64(5, (&c).name(n), "i64 argument runs the pointer impl's name");
     }
 
     return done();

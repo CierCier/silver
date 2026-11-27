@@ -2810,6 +2810,36 @@ u32 typecheck_method_return_type_for_call(AstPool* pool, SyntaxNode* root,
     }
     if (receiver.kind != TypeKind.Named) { return TYPE_UNKNOWN; }
     str owner_name = types.names.get(receiver.name_id);
+    i64 best_score = -1;
+    u32 best_return_type = typecheck_method_return_type_at_depth(pool, root, types,
+        receiver_type, resolved_receiver, owner_name, receiver_depth, method_name,
+        param_count, args_start, static_method, &best_score);
+    if (best_return_type == TYPE_UNKNOWN && receiver_depth > 0) {
+        return typecheck_method_return_type_for_call(pool, root, types, resolved_receiver,
+            method_name, param_count, args_start, static_method);
+    }
+    if (receiver_depth > 0) {
+        // Through a pointer receiver, a value impl's overload that fits the
+        // arguments better is the one monomorphization calls.
+        i64 value_score = -1;
+        u32 value_return_type = typecheck_method_return_type_at_depth(pool, root, types,
+            resolved_receiver, resolved_receiver, owner_name, 0, method_name,
+            param_count, args_start, static_method, &value_score);
+        if (value_return_type != TYPE_UNKNOWN && value_score > best_score) {
+            return value_return_type;
+        }
+    }
+    return best_return_type;
+}
+
+/// Returns the return type of the best-fitting `method_name` among impls of
+/// `owner_name` at `receiver_depth`, and its argument score in `*out_score`.
+u32 typecheck_method_return_type_at_depth(AstPool* pool, SyntaxNode* root,
+                                          TypeTable* types, u32 receiver_type,
+                                          u32 resolved_receiver, str owner_name,
+                                          u32 receiver_depth, str method_name,
+                                          i64 param_count, u32 args_start,
+                                          bool static_method, i64* out_score) {
     u32 best_return_type = TYPE_UNKNOWN;
     i64 best_score = -1;
     SyntaxNode* item = root.first_child;
@@ -2927,10 +2957,7 @@ u32 typecheck_method_return_type_for_call(AstPool* pool, SyntaxNode* root,
         }
         item = item.next_sibling;
     }
-    if (best_return_type == TYPE_UNKNOWN && receiver_depth > 0) {
-        return typecheck_method_return_type_for_call(pool, root, types, resolved_receiver,
-            method_name, param_count, args_start, static_method);
-    }
+    *out_score = best_score;
     return best_return_type;
 }
 
