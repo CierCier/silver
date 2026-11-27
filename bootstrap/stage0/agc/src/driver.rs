@@ -2035,6 +2035,7 @@ pub fn run(cli: Cli) {
                     &imported_modules,
                     checker.consuming_method_calls(),
                     checker.indexed_elements(),
+                checker.field_rvalue_types(),
                 );
                 if !move_report.errors.is_empty() {
                     for error in &move_report.errors {
