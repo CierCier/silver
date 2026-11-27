@@ -5119,6 +5119,16 @@ u32 const_eval_common_type(u32 a, u32 b) {
 /// division by zero, or an out-of-range shift.
 bool const_eval_binary(u32 op, ConstOperand lhs, ConstOperand rhs, u32 context,
                        ConstOperand* out) {
+    // A wide literal adopts a typed operand's width beside it; with none,
+    // its value does not fit the folder.
+    if (lhs.type_id == TYPE_I128) {
+        if (const_eval_bits(rhs.type_id) == 0) { return false; }
+        lhs.type_id = TYPE_UNKNOWN;
+    }
+    if (rhs.type_id == TYPE_I128) {
+        if (const_eval_bits(lhs.type_id) == 0) { return false; }
+        rhs.type_id = TYPE_UNKNOWN;
+    }
     u32 typed = const_eval_common_type(lhs.type_id, rhs.type_id);
     bool compares = const_eval_compares(op);
     u32 type_id = typed != TYPE_UNKNOWN ? typed : (compares ? TYPE_UNKNOWN : context);
@@ -5342,12 +5352,12 @@ impl ConstEval {
                 out.type_id = TYPE_BOOL;
                 return true;
             }
-            out.type_id = TYPE_UNKNOWN;
             // A literal too wide for i64 folds only where a 64-bit or
-            // narrower type takes it; on its own it would lose its value.
-            bool wide = aux == TYPE_I128 || aux == TYPE_U128;
-            return type_is_integer(aux) && (!wide || const_eval_bits(context) > 0)
-                && const_eval_parse_int(text, &out.value);
+            // narrower type takes it (the context, or a typed operand beside
+            // it); until then it is marked TYPE_I128.
+            bool wide = (aux == TYPE_I128 || aux == TYPE_U128) && const_eval_bits(context) == 0;
+            out.type_id = wide ? TYPE_I128 : TYPE_UNKNOWN;
+            return type_is_integer(aux) && const_eval_parse_int(text, &out.value);
         }
         if (kind == ExprKind.Var) {
             return self.fold_name(self.names.get(aux), out);

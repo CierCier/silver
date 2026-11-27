@@ -18,6 +18,7 @@ const u8 HALF_OF_WIDE = (u8)(WIDE_BASE / 2);
 const i32 WIDE_BASE = 256;
 const u64 ALL_ONES = 18446744073709551615;
 const u64 ALL_ONES_SQUARED = ALL_ONES * ALL_ONES;
+const bool ALL_ONES_MATCH = ALL_ONES == 18446744073709551615;
 const i8 NARROW_TERM = 100;
 const i32 WIDENED_SUM = NARROW_TERM + WIDE_BASE;
 const bool LITERALS_EQUAL = (1 + 1) == 2;
@@ -47,6 +48,7 @@ i32 main() {
         assert_true(HIGH_BIT_POSITIVE, "u64 comparison is unsigned");
         assert_eq_i64(128, (i64)HALF_OF_WIDE, "i32 division happens before the u8 cast");
         assert_eq_u64(1, ALL_ONES_SQUARED, "u64 multiplication wraps");
+        assert_true(ALL_ONES_MATCH, "wide literal compares at the u64 width beside it");
         assert_eq_i32(356, WIDENED_SUM, "i8 + i32 widens to i32");
         assert_true(LITERALS_EQUAL, "literal arithmetic inside a comparison");
         i32 minus_one = MINUS_ONE;
