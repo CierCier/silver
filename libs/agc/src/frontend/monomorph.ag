@@ -530,6 +530,12 @@ bool mono_resolve_method_call(AstPool* pool, SyntaxNode* root, TypeTable* types,
         receiver = types.get(receiver_type);
     }
     if (receiver.kind != TypeKind.Named && !type_is_primitive(receiver_type)) { return false; }
+    // While a generic body is checked, its own type parameter names no impl,
+    // even when a struct or enum of the same name exists.
+    if (receiver.kind == TypeKind.Named && receiver.count == 0
+        && mono_contains_type_param(&types.scope_type_params, receiver.name_id)) {
+        return false;
+    }
     str base = types.names.get(receiver.name_id);
     i64 count = receiver.count;
     u32 start = receiver.inner;
