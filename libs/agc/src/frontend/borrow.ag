@@ -3194,6 +3194,40 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
             }
         }
         if (node.token_kind == TokenKind.Identifier) {
+            // A reference local stored by a container hands its loans to
+            // the container, which must not outlive their referents.
+            str keeper_name = borrow_stored_argument_holder(tree, symbols, &bindings,
+                &binding_types, &leaves, i, i + 1);
+            Binding* keeper = strlen(keeper_name) > 0
+                ? visible_binding(&bindings, keeper_name, node) : (Binding*)0;
+            if (keeper != (Binding*)0) {
+                SyntaxNode* keeper_scope = binding_visibility_scope(keeper);
+                u32 keeper_id = analyzer.names.intern(keeper_name);
+                i64 keeper_release = last_binding_use(&bindings, &leaves, i + 1, keeper);
+                i64 count = analyzer.loans.len();
+                i64 index = 0;
+                while (index < count) {
+                    Loan* held = analyzer.loans.get_ptr(index);
+                    if (held.active && held.persistent && borrow_is_holder_use(&bindings, held, node)) {
+                        bool escapes = held.owner_scope != (SyntaxNode*)0
+                            && keeper_scope != (SyntaxNode*)0
+                            && held.owner_scope != keeper_scope
+                            && borrow_node_within(held.owner_scope, keeper_scope);
+                        if (escapes) {
+                            String message = String.from_str(ref_escapes_scope());
+                            analyzer.diagnostics.error(node.span, move message);
+                            analyzer.failed = true;
+                        }
+                        Loan copied = *held;
+                        copied.holder_id = keeper_id;
+                        copied.holder_binding_start = keeper.span.start;
+                        copied.release_index = keeper_release >= 0 ? keeper_release : i;
+                        if (escapes) { copied.owner_scope = (SyntaxNode*)0; }
+                        analyzer.loans.push(copied);
+                    }
+                    index += 1;
+                }
+            }
             i64 argument_index = 0;
             SyntaxNode* call = borrow_call_for_argument(node, &argument_index);
             call = borrow_lift_forwarded_call(return_origins,

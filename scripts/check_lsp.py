@@ -1017,6 +1017,7 @@ class NativeLsp(unittest.TestCase):
                 "&Tok kept(&Tok p) {\n Tok t;\n return left(p, &t);\n}\n"
                 "View field() {\n Tok t;\n View w;\n w.r = &t;\n return w;\n}\n"
                 "i64 stored() {\n Bag<&Tok> refs;\n {\n Tok t;\n refs.put(&t);\n }\n return refs.item.id;\n}\n"
+                "i64 aliased() {\n Bag<&Tok> refs;\n {\n Tok t;\n let r = &t;\n refs.put(r);\n }\n return refs.item.id;\n}\n"
                 "i64 local() {\n Tok t;\n Bag<&Tok> refs;\n refs.put(&t);\n let r = same(&t);\n return refs.item.id + r.id + same(5);\n}\n")
         uri = self.open(text)
         diagnostics = self.session.published(uri, 1)["diagnostics"]
@@ -1025,7 +1026,8 @@ class NativeLsp(unittest.TestCase):
                               "value; return a reference to a global or a reference parameter instead)"),
                           (18, "returned reference does not outlive the function (it borrows a local "
                                "value; return a reference to a global or a reference parameter instead)"),
-                          (24, "reference to a block-local value escapes its scope")])
+                          (24, "reference to a block-local value escapes its scope"),
+                          (33, "reference to a block-local value escapes its scope")])
 
     def test_shared_values_and_lock_blocks_resolve_to_user_declarations(self):
         repo = Path(__file__).resolve().parent.parent

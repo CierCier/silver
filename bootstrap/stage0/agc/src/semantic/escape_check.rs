@@ -157,6 +157,16 @@ struct Checker<'a> {
     /// argument that carries no reference adds no origin through them.
     value_param_indices: FxHashMap<CallKey, FxHashSet<usize>>,
     resolved_value_param_indices: FxHashMap<CallableIdentity, FxHashSet<usize>>,
+    /// Per local of the current function: its source before any store into
+    /// one of its places, and the frame-local references stored at each
+    /// place path (`None` for a store that a later one cannot replace).
+    place_stores: FxHashMap<String, PlaceStores>,
+}
+
+#[derive(Default)]
+struct PlaceStores {
+    base: Option<Source>,
+    stores: Vec<(Option<String>, Source)>,
 }
 
 pub fn check_program(program: &ast::Program) -> Vec<EscapeError> {
@@ -222,6 +232,7 @@ pub fn analyze_program_with_callables(
         current_value_params: FxHashSet::default(),
         value_param_indices: FxHashMap::default(),
         resolved_value_param_indices: FxHashMap::default(),
+        place_stores: FxHashMap::default(),
     };
     checker.seed_extern_return_summaries(program);
 
@@ -459,6 +470,7 @@ impl Checker<'_> {
         let mut ptr_locals: FxHashSet<String> = FxHashSet::default();
         let mut ref_params: FxHashSet<String> = FxHashSet::default();
         self.current_value_params.clear();
+        self.place_stores.clear();
         let mut value_indices = FxHashSet::default();
         for (index, param) in parameters.iter().enumerate() {
             if self.is_type_param(&param.param_type) {
@@ -1043,6 +1055,9 @@ impl Checker<'_> {
                 {
                     self.error(msg::reference_escapes_scope(), init.span);
                 }
+                if let ast::PatternKind::Identifier(ident) = &let_stmt.pattern.kind {
+                    self.place_stores.remove(&ident.name);
+                }
                 Self::record_pattern_refs(&let_stmt.pattern, declared_source, scopes, ref_sources);
                 Self::record_pointer_binding(let_stmt, ptr_locals);
             }
@@ -1181,6 +1196,7 @@ impl Checker<'_> {
     fn store_into_place(
         &mut self,
         root: &ast::Identifier,
+        path: Option<String>,
         source: Source,
         span: Span,
         report_scope: bool,
@@ -1210,12 +1226,53 @@ impl Checker<'_> {
             self.error(msg::reference_escapes_scope(), span);
         }
         // Only a frame-local referent matters for a later `return root`;
-        // caller origins stay with the owner's declared source.
+        // caller origins stay with the owner's declared source. A store to
+        // a field path replaces what that path held before.
+        let entry = self
+            .place_stores
+            .entry(root.name.clone())
+            .or_insert_with(|| PlaceStores {
+                base: ref_sources.get(&root.name).cloned(),
+                stores: Vec::new(),
+            });
+        if let Some(path) = &path {
+            entry.stores.retain(|(stored, _)| {
+                stored.as_ref().is_none_or(|stored| {
+                    !(stored == path
+                        || stored.starts_with(&format!("{path}."))
+                        || stored.starts_with(&format!("{path}[")))
+                })
+            });
+        }
         if matches!(source, Source::Local { .. }) {
-            let merged = merge_sources(ref_sources.get(&root.name).cloned(), Some(source));
-            if let Some(merged) = merged {
+            entry.stores.push((path, source));
+        }
+        let merged = entry
+            .stores
+            .iter()
+            .fold(entry.base.clone(), |merged, (_, stored)| {
+                merge_sources(merged, Some(stored.clone()))
+            });
+        match merged {
+            Some(merged) => {
                 ref_sources.insert(root.name.clone(), merged);
             }
+            None => {
+                ref_sources.remove(&root.name);
+            }
+        }
+    }
+
+    /// The field path of a place below its root local, such as `.r` for
+    /// `w.r`. An indexed step makes the path unreplaceable (`None`): a store
+    /// to one element does not overwrite another.
+    fn place_path(expr: &ast::Expression) -> Option<String> {
+        match expr.kind.as_ref() {
+            ast::ExpressionKind::Identifier(_) => Some(String::new()),
+            ast::ExpressionKind::FieldAccess { object, field } => {
+                Some(format!("{}.{}", Self::place_path(object)?, field.name))
+            }
+            _ => None,
         }
     }
 
@@ -1318,6 +1375,7 @@ impl Checker<'_> {
                         // later uses; this only remembers what the owner holds.
                         self.store_into_place(
                             root,
+                            Self::place_path(left),
                             source,
                             right.span,
                             false,
@@ -1371,6 +1429,7 @@ impl Checker<'_> {
                         {
                             self.store_into_place(
                                 root,
+                                None,
                                 source,
                                 arg.span,
                                 true,

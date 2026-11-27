@@ -2758,7 +2758,8 @@ mod tests {
             "struct Tok { i64 id; }\n\
              struct View { &Tok r; }\n\
              View bad() { Tok t; View w; w.r = &t; return w; }\n\
-             View good(&Tok p) { View w; w.r = p; return w; }",
+             View good(&Tok p) { View w; w.r = p; return w; }\n\
+             View replaced(&Tok p) { Tok t; View w; w.r = &t; w.r = p; return w; }",
             43,
         );
         assert_eq!(escape.len(), 1, "only `bad` returns a local reference: {escape:?}");
