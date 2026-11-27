@@ -450,26 +450,69 @@ i64 typecheck_definition_index(TypeTable* types, u32 name_id) {
     return -1;
 }
 
-/// Pushes the field or payload types that `definition`, instantiated with the
-/// arguments of named type `id`, stores inline.
+/// Returns `id` with each type parameter in `params` replaced by the type at
+/// the same index of `arguments`, or by `TYPE_UNKNOWN` past its end. Applies
+/// once, so an argument that names a parameter is not rebound. Only the
+/// inline shapes (arrays, tuples, named arguments) are rebuilt; pointers and
+/// other indirections keep their pointee, which the inline search skips.
+u32 typecheck_substitute(TypeTable* types, u32 id, Vec<u32>* params, Vec<u32>* arguments) {
+    TypeEntry entry = *types.get(id);
+    if (entry.kind == TypeKind.TypeParam || (entry.kind == TypeKind.Named && entry.count == 0)) {
+        i64 i = 0;
+        while (i < params.len()) {
+            if (params.get(i) == entry.name_id) {
+                return i < arguments.len() ? arguments.get(i) : TYPE_UNKNOWN;
+            }
+            i += 1;
+        }
+        return id;
+    }
+    if (entry.kind == TypeKind.Array) {
+        return types.get_array(typecheck_substitute(types, entry.inner, params, arguments), entry.count);
+    }
+    if (entry.kind != TypeKind.Tuple && entry.kind != TypeKind.Named) { return id; }
+    Vec<u32> parts = Vec<u32>.new();
+    i64 i = 0;
+    while (i < entry.count) {
+        parts.push(typecheck_substitute(types, types.type_args.get(entry.inner + (u32)i), params, arguments));
+        i += 1;
+    }
+    u32 result = entry.kind == TypeKind.Tuple
+        ? types.get_tuple(&parts)
+        : types.get_named_args(types.names.get(entry.name_id), &parts);
+    parts.drop();
+    return result;
+}
+
+/// Pushes the field or payload types that `definition` stores inline when
+/// instantiated with the arguments of named type `id`. Parameters without an
+/// argument become `TYPE_UNKNOWN`, so they never name an unrelated type.
 void typecheck_push_inline_fields(TypeTable* types, i64 definition, u32 id,
                                   Vec<u32>* pending) {
     TypeStructProperties facts = types.struct_properties.get(definition);
     TypeEntry entry = *types.get(id);
-    i64 bound = 0;
-    if ((i64)facts.type_param_count == entry.count) {
-        while (bound < entry.count) {
-            types.push_subst(types.struct_type_params.get(facts.type_param_start + (u32)bound),
-                             types.type_args.get(entry.inner + (u32)bound));
-            bound += 1;
+    Vec<u32> params = Vec<u32>.new();
+    Vec<u32> arguments = Vec<u32>.new();
+    u32 p = 0;
+    while (p < facts.type_param_count) {
+        params.push(types.struct_type_params.get(facts.type_param_start + p));
+        p += 1;
+    }
+    if (entry.kind == TypeKind.Named && (i64)facts.type_param_count == entry.count) {
+        i64 a = 0;
+        while (a < entry.count) {
+            arguments.push(types.type_args.get(entry.inner + (u32)a));
+            a += 1;
         }
     }
     u32 field = 0;
     while (field < facts.field_count) {
-        pending.push(types.resolve_subst(types.struct_fields.get(facts.field_start + field)));
+        u32 field_type = types.struct_fields.get(facts.field_start + field);
+        pending.push(typecheck_substitute(types, field_type, &params, &arguments));
         field += 1;
     }
-    types.pop_subst(bound);
+    params.drop();
+    arguments.drop();
 }
 
 /// Returns true when struct or enum `name` stores itself inline, directly or

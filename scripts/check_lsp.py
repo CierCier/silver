@@ -1446,6 +1446,12 @@ class NativeLsp(unittest.TestCase):
                  # A struct stored inside itself has no finite size.
                  ('struct Loop { i64 n; Loop inner; }\n' + valid,
                   ["struct 'Loop' contains itself by value; use a pointer"]),
+                 # Pointers end the search, and a type parameter is not the
+                 # global type it shadows.
+                 ('struct Holder<T> { T* data; }\n'
+                  'struct Outer<T> { Holder<Holder<T>> value; }\n'
+                  'struct T { Wrap<i64> value; }\nstruct Wrap<T> { T value; }\n'
+                  'struct Ref<T> { Wrap<T*> field; }\n' + valid, []),
                  # Defaults come from the cfg-active trait of that name.
                  ('#[cfg(os.windows)]\ntrait Reset { void other(*self) { } }\n'
                   '#[cfg(os.linux)]\ntrait Reset { void reset(*self) { } }\n'

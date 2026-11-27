@@ -7790,23 +7790,12 @@ impl TypeChecker {
         // such as `G<G<T>>`; the type that grows is itself reported.
         const MAX_VISITED: usize = 4096;
         for item in &program.items {
-            let (kind, name, generics) = match &item.kind {
-                ast::ItemKind::Struct(item) => ("struct", &item.name, &item.generics),
-                ast::ItemKind::Enum(item) => ("enum", &item.name, &item.generics),
+            let (kind, name) = match &item.kind {
+                ast::ItemKind::Struct(item) => ("struct", &item.name),
+                ast::ItemKind::Enum(item) => ("enum", &item.name),
                 _ => continue,
             };
-            let params = generics
-                .iter()
-                .flat_map(|generics| &generics.params)
-                .filter_map(|param| match param {
-                    ast::GenericParam::Type(param) => Some(Type::Named {
-                        path: vec![param.name.name.clone()],
-                        generics: Vec::new(),
-                    }),
-                    ast::GenericParam::Lifetime(_) => None,
-                })
-                .collect::<Vec<_>>();
-            let mut pending = self.value_field_types(&name.name, &params);
+            let mut pending = self.value_field_types(&name.name, &[]);
             let mut visited = HashSet::default();
             while let Some(ty) = pending.pop() {
                 if visited.len() >= MAX_VISITED {
@@ -7840,6 +7829,8 @@ impl TypeChecker {
 
     /// Returns the field or payload types that struct or enum `name`
     /// instantiated with `arguments` stores inline. Unknown names have none.
+    /// Parameters without an argument become `Type::Unknown`, so a parameter
+    /// never names an unrelated type that it shadows.
     fn value_field_types(&self, name: &str, arguments: &[Type]) -> Vec<Type> {
         let (params, fields) = if let Some(def) = self.struct_defs.get(name) {
             (
@@ -7859,7 +7850,12 @@ impl TypeChecker {
         let mapping = params
             .iter()
             .cloned()
-            .zip(arguments.iter().cloned())
+            .zip(
+                arguments
+                    .iter()
+                    .cloned()
+                    .chain(std::iter::repeat(Type::Unknown)),
+            )
             .collect();
         fields
             .iter()
@@ -9359,7 +9355,12 @@ mod tests {
         let source = "struct Vec<T> { T* data; i64 len; }\n\
                       struct Pair<T> { T a; T b; }\n\
                       struct Node { Node* next; Vec<Node> children; Pair<Pair<i64>> span; }\n\
-                      enum List { Nil; Cons(i64, List*); }";
+                      enum List { Nil; Cons(i64, List*); }\n\
+                      struct Holder<T> { T* data; }\n\
+                      struct Outer<T> { Holder<Holder<T>> value; }\n\
+                      struct T { Wrap<i64> value; }\n\
+                      struct Wrap<T> { T value; }\n\
+                      struct Ref<T> { Wrap<T*> field; }";
         assert!(type_errors(source).is_empty(), "{:?}", type_errors(source));
     }
 }
