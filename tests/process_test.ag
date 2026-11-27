@@ -68,6 +68,12 @@ void array_boundary_child(i32 boundary) {
     exit(42);
 }
 
+/// Aborts when `fault`; otherwise returns the line of that abort, which the
+/// child's backtrace must name.
+u32 trace_fault_site(bool fault) {
+    if (fault) { abort(); } return @line();
+}
+
 i32* compound_fail_target() {
     exit(23);
     return (i32*)0;
@@ -87,6 +93,9 @@ i32 main() {
     Vec<String> argv = args();
     if (argv.len() >= 2 && argv.get_ptr(1).equals("--child-args")) {
         return child_check_args(&argv);
+    }
+    if (argv.len() >= 2 && argv.get_ptr(1).equals("--child-backtrace")) {
+        trace_fault_site(true);
     }
     if (argv.len() >= 3 && argv.get_ptr(1).equals("--child-exit")) {
         exit((i32)argv.get_ptr(2).parse_i64().unwrap());
@@ -180,6 +189,22 @@ i32 linux_process_checks() {
     Result<ExitStatus, i64> r4 = cmd_none.status();
     assert_true(r4.is_ok(), "exec of nonexistent binary spawns and exits 127");
     assert_eq_i32(127, r4.unwrap().exit_code(), "nonexistent binary exits 127");
+
+    test_start("abort backtrace names the faulting line");
+    Vec<String> self_argv = args();
+    String script = String.from_str("'");
+    script.push_str(self_argv.get_ptr(0).to_str());
+    script.push_str("' --child-backtrace 2>&1 | grep -qF 'trace_fault_site at process_test.ag:");
+    u32 fault_line = trace_fault_site(false);
+    script.push_display(&fault_line);
+    script.push_str(" ('");
+    Command cmd_trace = Command.new("/usr/bin/env");
+    cmd_trace.arg("sh");
+    cmd_trace.arg("-c");
+    cmd_trace.arg(script.to_str());
+    Result<ExitStatus, i64> trace_status = cmd_trace.status();
+    assert_true(trace_status.is_ok(), "spawn the backtrace child");
+    assert_eq_i32(0, trace_status.unwrap().exit_code(), "the frame names the abort line");
 
     test_start("compound target failure stops evaluation");
     for (i32 mode = 0; mode < 2; mode = mode + 1) {

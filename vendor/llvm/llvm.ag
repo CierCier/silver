@@ -28,6 +28,8 @@ struct LLVMOpaqueDIBuilder {}
 struct LLVMOpaqueDbgRecord {}
 /// Opaque `LLVMPassBuilderOptionsRef`.
 struct LLVMOpaquePassBuilderOptions {}
+/// Opaque `LLVMMemoryBufferRef`. Free with `LLVMDisposeMemoryBuffer`.
+struct LLVMOpaqueMemoryBuffer {}
 /// Opaque `LLVMErrorRef`. Must be consumed, for example with
 /// `LLVMGetErrorMessage`.
 struct LLVMOpaqueError {}
@@ -499,6 +501,35 @@ extern "C" {
     void LLVMDIBuilderFinalizeSubprogram(LLVMOpaqueDIBuilder* p0, LLVMOpaqueMetadata* p1);
     /// Attaches debug subprogram `p1` to function `p0`.
     void LLVMSetSubprogram(LLVMOpaqueValue* p0, LLVMOpaqueMetadata* p1);
+    /// Returns the debug subprogram attached to function `p0`, or null.
+    LLVMOpaqueMetadata* LLVMGetSubprogram(LLVMOpaqueValue* p0);
+    /// Returns the line of debug subprogram `p0`.
+    u32 LLVMDISubprogramGetLine(LLVMOpaqueMetadata* p0);
+    /// Returns the debug metadata version this LLVM writes.
+    u32 LLVMDebugMetadataVersion();
+    /// Returns an instruction's debug location, or null.
+    LLVMOpaqueMetadata* LLVMInstructionGetDebugLoc(LLVMOpaqueValue* p0);
+    /// Sets (null clears) an instruction's debug location.
+    void LLVMInstructionSetDebugLoc(LLVMOpaqueValue* p0, LLVMOpaqueMetadata* p1);
+    /// Returns the scope of debug location `p0`.
+    LLVMOpaqueMetadata* LLVMDILocationGetScope(LLVMOpaqueMetadata* p0);
+    /// Returns the module's first function, or null.
+    LLVMOpaqueValue* LLVMGetFirstFunction(LLVMOpaqueModule* p0);
+    /// Returns the next function in the module, or null.
+    LLVMOpaqueValue* LLVMGetNextFunction(LLVMOpaqueValue* p0);
+    /// Returns a function's first basic block, or null.
+    LLVMOpaqueBasicBlock* LLVMGetFirstBasicBlock(LLVMOpaqueValue* p0);
+    /// Returns the next basic block in the function, or null.
+    LLVMOpaqueBasicBlock* LLVMGetNextBasicBlock(LLVMOpaqueBasicBlock* p0);
+    /// Reads file `p0` into `*p1`. Returns nonzero on failure with `*p2` set to
+    /// a message to free with `LLVMDisposeMessage`.
+    i32 LLVMCreateMemoryBufferWithContentsOfFile(i8* p0, LLVMOpaqueMemoryBuffer** p1, i8** p2);
+    /// Returns the first byte of a memory buffer.
+    u8* LLVMGetBufferStart(LLVMOpaqueMemoryBuffer* p0);
+    /// Returns a memory buffer's size in bytes.
+    u64 LLVMGetBufferSize(LLVMOpaqueMemoryBuffer* p0);
+    /// Frees a memory buffer.
+    void LLVMDisposeMemoryBuffer(LLVMOpaqueMemoryBuffer* p0);
 
     /// Creates the module's compile unit (language, file, producer, flags,
     /// emission kind, and more).

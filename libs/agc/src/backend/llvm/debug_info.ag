@@ -1,0 +1,146 @@
+// libs/agc/src/backend/llvm/debug_info.ag — line-table debug info.
+//
+// Every function with a body gets a subprogram and every statement a debug
+// location, so LLVM writes a DWARF line program into the object. Debuggers
+// read it directly; `backend.llvm.bt_lines` folds it into the runtime's
+// `__silver_bt_lines` table so backtraces name the faulting line. Only line
+// tables are emitted: no types or variables.
+import vendor.llvm.llvm;
+import std.mem.vec;
+import std.path;
+import std.string;
+import frontend.diagnostics;
+import backend.llvm.context;
+
+/// DWARF version of the line program; `backend.llvm.bt_lines` reads it.
+const u64 LLVM_DEBUG_DWARF_VERSION = 4;
+
+/// Starts line-table debug info for `ctx.module`.
+void llvm_debug_init(LlvmContext* ctx) {
+    LLVMOpaqueType* i32_type = LLVMInt32TypeInContext(ctx.ctx);
+    str version_flag = "Debug Info Version";
+    LLVMAddModuleFlag(ctx.module, LLVMModuleFlagBehavior.LLVMModuleFlagBehaviorWarning,
+        version_flag, (u64)strlen(version_flag),
+        LLVMValueAsMetadata(LLVMConstInt(i32_type, (u64)LLVMDebugMetadataVersion(), 0)));
+    str dwarf_flag = "Dwarf Version";
+    LLVMAddModuleFlag(ctx.module, LLVMModuleFlagBehavior.LLVMModuleFlagBehaviorWarning,
+        dwarf_flag, (u64)strlen(dwarf_flag),
+        LLVMValueAsMetadata(LLVMConstInt(i32_type, LLVM_DEBUG_DWARF_VERSION, 0)));
+
+    ctx.di_builder = LLVMCreateDIBuilder(ctx.module);
+    ctx.di_files.clear();
+    i64 i = 0;
+    while (i < ctx.source_paths.len()) {
+        ctx.di_files.push((LLVMOpaqueMetadata*)0);
+        i += 1;
+    }
+    LLVMOpaqueMetadata* unit_file = llvm_debug_file(ctx, 1);
+    str producer = "agc";
+    LLVMDIBuilderCreateCompileUnit(ctx.di_builder,
+        LLVMDWARFSourceLanguage.LLVMDWARFSourceLanguageC, unit_file,
+        producer, (u64)strlen(producer), 0, "", 0, 0, "", 0,
+        LLVMDWARFEmissionKind.LLVMDWARFEmissionLineTablesOnly, 0, 0, 0, "", 0, "", 0);
+    ctx.di_signature = LLVMDIBuilderCreateSubroutineType(ctx.di_builder, unit_file,
+        (LLVMOpaqueMetadata**)0, 0, LLVMDIFlags.LLVMDIFlagZero);
+}
+
+/// The DIFile for source `file` (1-based `Span.file`).
+LLVMOpaqueMetadata* llvm_debug_file(LlvmContext* ctx, i64 file) {
+    bool known = file > 0 && file <= ctx.di_files.len();
+    if (known && ctx.di_files.get(file - 1) != (LLVMOpaqueMetadata*)0) {
+        return ctx.di_files.get(file - 1);
+    }
+    str path = known ? ctx.source_paths.get_ptr(file - 1).to_str() : "unknown.ag";
+    String name = path_basename(path);
+    String directory = path_dirname(path);
+    LLVMOpaqueMetadata* di_file = LLVMDIBuilderCreateFile(ctx.di_builder,
+        name.to_str(), (u64)name.len(), directory.to_str(), (u64)directory.len());
+    if (known) { ctx.di_files.set(file - 1, di_file); }
+    name.drop();
+    directory.drop();
+    return di_file;
+}
+
+/// Attaches a subprogram declared at `span` to `function`, whose body is
+/// about to be lowered, and points the builder at its first line.
+void llvm_debug_begin_function(LlvmContext* ctx, LLVMOpaqueValue* function, Span span) {
+    if (ctx.di_builder == (LLVMOpaqueDIBuilder*)0
+        || LLVMGetSubprogram(function) != (LLVMOpaqueMetadata*)0) {
+        return;
+    }
+    LLVMOpaqueMetadata* file = llvm_debug_file(ctx, span.file);
+    u32 line = span.start_line > 0 ? (u32)span.start_line : (u32)1;
+    str name = LLVMGetValueName(function);
+    u64 name_len = (u64)strlen(name);
+    LLVMOpaqueMetadata* subprogram = LLVMDIBuilderCreateFunction(ctx.di_builder,
+        file, name, name_len, name, name_len, file, line, ctx.di_signature,
+        0, 1, line, LLVMDIFlags.LLVMDIFlagZero, 0);
+    LLVMSetSubprogram(function, subprogram);
+    llvm_debug_set_location(ctx, span);
+}
+
+/// Points the builder at `span` within the current function. Functions
+/// without a subprogram (synthesized glue) get no location.
+void llvm_debug_set_location(LlvmContext* ctx, Span span) {
+    if (ctx.di_builder == (LLVMOpaqueDIBuilder*)0) { return; }
+    LLVMOpaqueMetadata* subprogram = ctx.current_fn != (LLVMOpaqueValue*)0
+        ? LLVMGetSubprogram(ctx.current_fn) : (LLVMOpaqueMetadata*)0;
+    if (subprogram == (LLVMOpaqueMetadata*)0 || span.start_line <= 0) {
+        if (subprogram == (LLVMOpaqueMetadata*)0) {
+            LLVMSetCurrentDebugLocation2(ctx.builder, (LLVMOpaqueMetadata*)0);
+        }
+        return;
+    }
+    u32 column = span.start_col > 0 ? (u32)span.start_col : (u32)0;
+    LLVMSetCurrentDebugLocation2(ctx.builder, LLVMDIBuilderCreateDebugLocation(ctx.ctx,
+        (u32)span.start_line, column, subprogram, (LLVMOpaqueMetadata*)0));
+}
+
+/// Makes every location agree with its function, then finalizes the debug
+/// info. Builders that were created for glue code, or that were not moved
+/// to a new location after a nested emission, leave instructions without a
+/// location or scoped to another function; the verifier rejects both for
+/// calls. Those take the previous instruction's location (the function's
+/// line at the start), and functions without a subprogram get none.
+void llvm_debug_finish(LlvmContext* ctx) {
+    if (ctx.di_builder == (LLVMOpaqueDIBuilder*)0) { return; }
+    LLVMSetCurrentDebugLocation2(ctx.builder, (LLVMOpaqueMetadata*)0);
+    LLVMOpaqueValue* function = LLVMGetFirstFunction(ctx.module);
+    while (function != (LLVMOpaqueValue*)0) {
+        LLVMOpaqueMetadata* subprogram = LLVMGetSubprogram(function);
+        LLVMOpaqueMetadata* previous = (LLVMOpaqueMetadata*)0;
+        LLVMOpaqueBasicBlock* block = LLVMGetFirstBasicBlock(function);
+        while (block != (LLVMOpaqueBasicBlock*)0) {
+            LLVMOpaqueValue* instruction = LLVMGetFirstInstruction(block);
+            while (instruction != (LLVMOpaqueValue*)0) {
+                LLVMOpaqueMetadata* location = LLVMInstructionGetDebugLoc(instruction);
+                if (subprogram == (LLVMOpaqueMetadata*)0) {
+                    if (location != (LLVMOpaqueMetadata*)0) {
+                        LLVMInstructionSetDebugLoc(instruction, (LLVMOpaqueMetadata*)0);
+                    }
+                } else {
+                    if (location != (LLVMOpaqueMetadata*)0
+                        && LLVMDILocationGetScope(location) != subprogram) {
+                        location = (LLVMOpaqueMetadata*)0;
+                    }
+                    if (location == (LLVMOpaqueMetadata*)0) {
+                        if (previous == (LLVMOpaqueMetadata*)0) {
+                            previous = LLVMDIBuilderCreateDebugLocation(ctx.ctx,
+                                LLVMDISubprogramGetLine(subprogram), 0, subprogram,
+                                (LLVMOpaqueMetadata*)0);
+                        }
+                        LLVMInstructionSetDebugLoc(instruction, previous);
+                    } else {
+                        previous = location;
+                    }
+                }
+                instruction = LLVMGetNextInstruction(instruction);
+            }
+            block = LLVMGetNextBasicBlock(block);
+        }
+        function = LLVMGetNextFunction(function);
+    }
+    LLVMDIBuilderFinalize(ctx.di_builder);
+    LLVMDisposeDIBuilder(ctx.di_builder);
+    ctx.di_builder = (LLVMOpaqueDIBuilder*)0;
+}

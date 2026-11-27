@@ -9,6 +9,7 @@ import frontend.lexer;
 import frontend.symbols;
 import frontend.types;
 import backend.llvm.context;
+import backend.llvm.debug_info;
 import backend.llvm.drop;
 import backend.llvm.expr;
 import backend.llvm.types;
@@ -158,6 +159,7 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
     if (stmt_id == 0 || ctx.is_terminated()) { return; }
     // Compound assignments can grow the pool while emitting child statements.
     AstStmt stmt = *ctx.pool.get_stmt(stmt_id);
+    llvm_debug_set_location(ctx, stmt.span);
 
     if (stmt.kind == StmtKind.Return) {
         if (ctx.defer_emission_depth > 0) {
