@@ -126,6 +126,7 @@ pub fn build_artifact(
 
     let mut exports = Vec::new();
     let mut stubs = Vec::new();
+    let mut stub_names = BTreeSet::new();
     let mut seen = BTreeSet::new();
     for entity in translation_unit.get_entity().get_children() {
         if !is_external_declaration(&entity) || !is_target_entity(&entity, config) {
@@ -135,13 +136,14 @@ pub fn build_artifact(
             continue;
         };
         let mut extra_exports = Vec::new();
+        let mut stub = None;
         let Some(export) = export_entity(
             &entity,
             &name,
             config.export_types,
             config.export_opaque_types || config.opaque_types.iter().any(|ty| ty == &name),
             &mut extra_exports,
-            &mut stubs,
+            &mut stub,
         )?
         else {
             continue;
@@ -155,6 +157,12 @@ pub fn build_artifact(
             }
         }
         if let Some(filtered) = apply_filtering_and_strip(export, config) {
+            // A prototype and its later definition are separate cursors; emit one stub per name.
+            if let Some(stub) = stub
+                && stub_names.insert(stub.stub_name.clone())
+            {
+                stubs.push(stub);
+            }
             let key = format!("{:?}:{}:{}", filtered.kind, filtered.name, filtered.signature);
             if seen.insert(key) {
                 exports.push(filtered);
@@ -187,13 +195,10 @@ pub fn build_artifact(
                 .map(|(_, name)| name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ");
-            let return_prefix = if stub.return_type_c == "void" {
-                ""
-            } else {
-                "return "
-            };
+            let return_prefix = if stub.returns_void { "" } else { "return " };
+            // `(name)(...)` calls the function even when a function-like macro shares its name.
             c_source.push_str(&format!(
-                "\n{} {}({}) {{\n    {}{}({});\n}}\n",
+                "\n{} {}({}) {{\n    {}({})({});\n}}\n",
                 stub.return_type_c,
                 stub.stub_name,
                 if param_list.is_empty() { "void" } else { &param_list },
@@ -272,10 +277,10 @@ fn export_entity(
     export_types: bool,
     export_opaque_types: bool,
     extra_exports: &mut Vec<ModuleExport>,
-    stubs: &mut Vec<CStub>,
+    stub: &mut Option<CStub>,
 ) -> Result<Option<ModuleExport>, ExtractError> {
     match entity.get_kind() {
-        EntityKind::FunctionDecl => export_function(entity, name, stubs).map(Some),
+        EntityKind::FunctionDecl => export_function(entity, name, stub),
         EntityKind::StructDecl => {
             let Some(record_type) = entity.get_type() else {
                 return Ok(None);
@@ -477,14 +482,15 @@ struct CStub {
     name: String,
     stub_name: String,
     return_type_c: String,
+    returns_void: bool,
     params: Vec<(String, String)>,
 }
 
 fn export_function(
     entity: &Entity<'_>,
     name: &str,
-    stubs: &mut Vec<CStub>,
-) -> Result<ModuleExport, ExtractError> {
+    stub: &mut Option<CStub>,
+) -> Result<Option<ModuleExport>, ExtractError> {
     let function_type = entity
         .get_type()
         .ok_or_else(|| ExtractError::Unsupported(format!("function `{name}` has no type")))?;
@@ -511,12 +517,19 @@ fn export_function(
             .is_some_and(|l| matches!(l, clang::Linkage::Internal | clang::Linkage::Automatic))
         || (entity.is_definition() && entity.get_linkage() != Some(clang::Linkage::External));
 
+    // A stub cannot forward `...`, so variadic inline functions are not callable from Silver.
+    if is_inline_or_static && entity.is_variadic() {
+        return Ok(None);
+    }
+
     let link_name = if is_inline_or_static {
         let stub_name = format!("__silver_stub_{name}");
-        let ret_c = function_type
-            .get_result_type()
+        let result_type = function_type.get_result_type();
+        let ret_c = result_type
             .map(|t| t.get_display_name())
             .unwrap_or_else(|| "void".to_string());
+        let returns_void = result_type
+            .is_none_or(|t| t.get_canonical_type().get_kind() == TypeKind::Void);
         let mut param_tuples = Vec::new();
         for (i, arg) in arguments.iter().enumerate() {
             let p_type = arg
@@ -526,10 +539,11 @@ fn export_function(
             let p_name = format!("__arg_{i}");
             param_tuples.push((p_type, p_name));
         }
-        stubs.push(CStub {
+        *stub = Some(CStub {
             name: name.to_string(),
             stub_name: stub_name.clone(),
             return_type_c: ret_c,
+            returns_void,
             params: param_tuples,
         });
         stub_name
@@ -537,7 +551,7 @@ fn export_function(
         name.to_string()
     };
 
-    Ok(ModuleExport {
+    Ok(Some(ModuleExport {
         kind: ExportKind::Function,
         name: name.to_string(),
         signature: format!("fn({}) -> {return_type}", parameters.join(",")),
@@ -555,7 +569,7 @@ fn export_function(
         is_mutable: false,
         thread_safe: false,
         impl_trait: None,
-    })
+    }))
 }
 
 // C records never carry Silver's `#[safe]`, so extracted exports are
@@ -1452,4 +1466,74 @@ fn query_compiler_include_paths() -> Vec<PathBuf> {
         }
     }
     paths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::SourcemapConfig;
+
+    fn build_header(name: &str, header: &str, extra_config: &str) -> ModuleArtifact {
+        let dir = std::env::temp_dir().join(format!("agsm-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{name}.h")), header).unwrap();
+        let source = format!(
+            "name = \"{name}\"\nincludes = [\"{name}.h\"]\ninclude_paths = [\".\"]\n{extra_config}"
+        );
+        let config = SourcemapConfig::parse(&source)
+            .unwrap()
+            .resolve_target(None)
+            .unwrap()
+            .config;
+        let artifact = build_artifact(&config, &dir, None);
+        let _ = std::fs::remove_dir_all(&dir);
+        artifact.unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    fn function_link_name<'a>(artifact: &'a ModuleArtifact, name: &str) -> Option<&'a str> {
+        let mut matches = artifact
+            .exports
+            .iter()
+            .filter(|export| export.kind == ExportKind::Function && export.name == name);
+        let found = matches.next()?;
+        assert!(matches.next().is_none(), "`{name}` exported more than once");
+        found.link_name.as_deref()
+    }
+
+    #[test]
+    fn inline_function_stubs_follow_real_header_shapes() {
+        // `repro_hidden` takes a function pointer, which the stub writer cannot spell;
+        // the build only succeeds if `deny` keeps its stub out.
+        let artifact = build_header(
+            "repro",
+            r#"
+static inline int repro_add(int a, int b);
+static inline int repro_add(int a, int b) { return a + b; }
+static inline int repro_log(const char* fmt, ...) { (void)fmt; return 0; }
+static inline int repro_hidden(int (*f)(int)) { return f(0); }
+static inline void repro_free(void* p) { (void)p; }
+#define repro_free(p) (repro_free)((p), 0)
+"#,
+            "deny = [\"repro_hidden\"]\n",
+        );
+        assert!(artifact.code_artifacts.has_static_library);
+        assert_eq!(function_link_name(&artifact, "repro_add"), Some("__silver_stub_repro_add"));
+        assert_eq!(function_link_name(&artifact, "repro_free"), Some("__silver_stub_repro_free"));
+        assert_eq!(function_link_name(&artifact, "repro_log"), None);
+        assert_eq!(function_link_name(&artifact, "repro_hidden"), None);
+    }
+
+    #[test]
+    fn allow_list_limits_inline_stubs() {
+        let artifact = build_header(
+            "repro_allow",
+            r#"
+static inline int keep_one(int a) { return a; }
+static inline int skip_one(int (*f)(int)) { return f(0); }
+"#,
+            "allow = [\"keep_*\"]\n",
+        );
+        assert_eq!(function_link_name(&artifact, "keep_one"), Some("__silver_stub_keep_one"));
+        assert_eq!(function_link_name(&artifact, "skip_one"), None);
+    }
 }
