@@ -63,6 +63,9 @@ struct SysvEightbytes {
     bool integer0;
     bool integer1;
     bool unsupported;
+    /// A leaf sits at an offset its alignment does not divide (a packed
+    /// struct), so the whole struct is class MEMORY.
+    bool memory;
 }
 
 CPass c_pass_new(CPassKind kind, LLVMOpaqueType* source, LLVMOpaqueType* carrier, u64 stack_align) {
@@ -89,9 +92,10 @@ u64 c_abi_align(LlvmContext* ctx, LLVMOpaqueType* ty) {
     return (u64)LLVMABIAlignmentOfType(ctx.target_data, ty);
 }
 
-/// Marks the eightbyte of every integer or pointer leaf of `ty`, placed at
-/// `offset` bytes. Floats leave their eightbyte SSE; any other leaf (vectors,
-/// `f80`) is not classified.
+/// Marks every eightbyte an integer or pointer leaf of `ty` covers, with `ty`
+/// placed at `offset` bytes. Floats leave their eightbyte SSE; a misaligned
+/// leaf makes the struct MEMORY; any other leaf (vectors, `f80`) is not
+/// classified.
 void c_abi_sysv_mark(LlvmContext* ctx, LLVMOpaqueType* ty, u64 offset, SysvEightbytes* classes) {
     u32 kind = LLVMGetTypeKind(ty);
     if (kind == C_ABI_STRUCT_KIND) {
@@ -116,9 +120,19 @@ void c_abi_sysv_mark(LlvmContext* ctx, LLVMOpaqueType* ty, u64 offset, SysvEight
         }
         return;
     }
+    if (kind == C_ABI_FLOAT_KIND || kind == C_ABI_DOUBLE_KIND
+        || kind == C_ABI_INTEGER_KIND || kind == C_ABI_POINTER_KIND) {
+        u64 align = c_abi_align(ctx, ty);
+        if (align > 1 && offset % align != 0) {
+            classes.memory = true;
+            return;
+        }
+    }
     if (kind == C_ABI_FLOAT_KIND || kind == C_ABI_DOUBLE_KIND) { return; }
     if (kind == C_ABI_INTEGER_KIND || kind == C_ABI_POINTER_KIND) {
-        if (offset < 8) { classes.integer0 = true; } else { classes.integer1 = true; }
+        u64 end = offset + c_abi_size(ctx, ty);
+        if (offset < 8) { classes.integer0 = true; }
+        if (end > 8) { classes.integer1 = true; }
         return;
     }
     classes.unsupported = true;
@@ -148,7 +162,11 @@ CPass c_abi_sysv_pass(LlvmContext* ctx, LLVMOpaqueType* ty, bool result,
     classes.integer0 = false;
     classes.integer1 = false;
     classes.unsupported = false;
+    classes.memory = false;
     c_abi_sysv_mark(ctx, ty, 0, &classes);
+    if (classes.memory) {
+        return c_pass_new(result ? CPassKind.Indirect : CPassKind.ByVal, ty, (LLVMOpaqueType*)0, 0);
+    }
     if (classes.unsupported) {
         i8* text = LLVMPrintTypeToString(ty);
         ctx.note_unresolved("c-struct-abi", text);
@@ -175,11 +193,18 @@ CPass c_abi_sysv_pass(LlvmContext* ctx, LLVMOpaqueType* ty, bool result,
     return c_pass_new(CPassKind.Direct, ty, carrier, 0);
 }
 
-/// Counts the registers a SysV scalar argument of type `ty` takes.
+/// Counts the registers a SysV scalar argument of type `ty` takes. A 128-bit
+/// integer needs two GPRs and goes to the stack whole, leaving the registers
+/// free, when fewer remain.
 void c_abi_sysv_consume_scalar(LLVMOpaqueType* ty, u32* integer_left, u32* sse_left) {
     u32 kind = LLVMGetTypeKind(ty);
-    u32* left = kind == C_ABI_FLOAT_KIND || kind == C_ABI_DOUBLE_KIND ? sse_left : integer_left;
-    if (*left > 0) { *left -= 1; }
+    if (kind == C_ABI_FLOAT_KIND || kind == C_ABI_DOUBLE_KIND) {
+        if (*sse_left > 0) { *sse_left -= 1; }
+        return;
+    }
+    u32 needed = 1;
+    if (kind == C_ABI_INTEGER_KIND && LLVMGetIntTypeWidth(ty) > 64) { needed = 2; }
+    if (*integer_left >= needed) { *integer_left -= needed; }
 }
 
 /// Visits the leaves of a candidate homogeneous floating-point aggregate,
