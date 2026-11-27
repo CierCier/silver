@@ -1554,6 +1554,7 @@ impl<'a> ParallelGraphExecutor<'a> {
             &import_lowering.module_artifacts,
             checker.consuming_method_calls(),
             checker.indexed_elements(),
+            checker.field_rvalue_types(),
         );
         if let Some(error) = ownership.errors.first() {
             return Err(error.message.clone());

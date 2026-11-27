@@ -225,6 +225,10 @@ pub struct TypeChecker {
     /// type argument; a monomorph shares its generic body's span, so the move
     /// checker maps the recorded container onto the one it sees.
     indexed_elements: HashMap<CallSiteKey, (ast::Type, ast::Type)>,
+    /// The type of each rvalue whose field is read (`make().leaf`), keyed by
+    /// the rvalue's span, so the move checker can reject moving a field out
+    /// of a temporary whose type implements Drop.
+    field_rvalue_types: HashMap<CallSiteKey, ast::Type>,
     /// Resolved iterator types for ForIn expressions, populated during typeck.
     /// Maps (expr start, expr end) → AST type of the IntoIter associated type.
     /// Used to populate the ForIn AST node after typeck for codegen.
@@ -551,6 +555,10 @@ impl TypeChecker {
 
     pub fn indexed_elements(&self) -> &HashMap<CallSiteKey, (ast::Type, ast::Type)> {
         &self.indexed_elements
+    }
+
+    pub fn field_rvalue_types(&self) -> &HashMap<CallSiteKey, ast::Type> {
+        &self.field_rvalue_types
     }
 
     fn ingest_module(&mut self, module: &ModuleArtifact) {
@@ -3240,6 +3248,19 @@ impl TypeChecker {
             }
             ast::ExpressionKind::FieldAccess { object, field } => {
                 let object_ty = self.check_expr(object, None);
+                if !matches!(
+                    object.kind.as_ref(),
+                    ast::ExpressionKind::Identifier(_)
+                        | ast::ExpressionKind::FieldAccess { .. }
+                        | ast::ExpressionKind::Index { .. }
+                        | ast::ExpressionKind::TypeName(_)
+                ) && !matches!(object_ty, Type::Unknown)
+                {
+                    let span = object.span;
+                    self.field_rvalue_types
+                        .entry((span.file, span.start, span.end, span.expansion))
+                        .or_insert_with(|| object_ty.to_ast());
+                }
                 if let Type::Named { path, .. } = &object_ty
                     && path.len() == 1
                     && self.enum_defs.contains_key(&path[0])

@@ -475,6 +475,9 @@ struct Facts {
     /// The container and element type of each `container[i]` that typeck
     /// resolved through `__index_get`, keyed by the index's span.
     indexed_elements: FxHashMap<CallSiteKey, (ast::Type, ast::Type)>,
+    /// The type typeck gave each rvalue whose field is read, keyed by the
+    /// rvalue's span: `make()` in `make().leaf`.
+    field_rvalue_types: FxHashMap<CallSiteKey, ast::Type>,
     /// (function/method name, param index) pairs with a value (non-view) param.
     value_args: FxHashSet<(String, usize)>,
     /// (owner, method, explicit argument index) pairs with value parameters.
@@ -875,15 +878,18 @@ pub struct MoveReport {
 /// `consuming_calls` is typeck's receiver mode per method call; a call typeck
 /// did not record falls back to the declared methods' arities.
 /// `indexed_elements` is typeck's element type for each user-defined index.
+/// `field_rvalue_types` is typeck's type for each rvalue whose field is read.
 pub fn analyze_program_with_imports(
     program: &ast::Program,
     imported_modules: &[ModuleArtifact],
     consuming_calls: &FxHashMap<MethodCallKey, bool>,
     indexed_elements: &FxHashMap<CallSiteKey, (ast::Type, ast::Type)>,
+    field_rvalue_types: &FxHashMap<CallSiteKey, ast::Type>,
 ) -> MoveReport {
     let mut facts = Facts::build(program, imported_modules);
     facts.consuming_calls = consuming_calls.clone();
     facts.indexed_elements = indexed_elements.clone();
+    facts.field_rvalue_types = field_rvalue_types.clone();
     let mut checker = MoveChecker {
         layouts: OwnerLayouts(facts.clone()),
         facts,
@@ -1294,7 +1300,9 @@ impl MoveChecker {
             return;
         }
         self.reject_locked_move(value, var_types);
-        if self.reject_container_element_move(value, var_types) {
+        if self.reject_container_element_move(value, var_types)
+            || self.reject_rvalue_drop_field_move(value)
+        {
             self.check_expr(value, state, scopes, var_types);
             return;
         }
@@ -1368,6 +1376,64 @@ impl MoveChecker {
         true
     }
 
+    /// Rejects moving a non-Copy field out of a temporary when the
+    /// temporary's type, or a field type on the way to the moved field,
+    /// implements Drop: `take(make_guard().leaf)`. That destructor still
+    /// needs the whole value. The temporary's type comes from typeck.
+    fn reject_rvalue_drop_field_move(&mut self, value: &ast::Expression) -> bool {
+        let mut fields = Vec::new();
+        let mut rvalue = value;
+        while let ast::ExpressionKind::FieldAccess { object, field } = rvalue.kind.as_ref() {
+            fields.push(field.name.as_str());
+            rvalue = object;
+        }
+        if fields.is_empty() {
+            return false;
+        }
+        let span = rvalue.span;
+        let Some(rvalue_ty) = self
+            .facts
+            .field_rvalue_types
+            .get(&(span.file, span.start, span.end, span.expansion))
+            .cloned()
+        else {
+            return false;
+        };
+        fields.reverse();
+        // The outermost owner on the way to the moved field that implements
+        // Drop is named, as codegen names it.
+        let mut owner_ty = rvalue_ty;
+        let mut drop_owner = None;
+        for segment in &fields {
+            let ast::TypeKind::Named(named) = owner_ty.kind.as_ref() else {
+                return false;
+            };
+            if drop_owner.is_none() && self.facts.drop_owners.contains(&Facts::owner_key(&owner_ty))
+            {
+                drop_owner = Some(
+                    named
+                        .path
+                        .iter()
+                        .map(|segment| segment.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("::"),
+                );
+            }
+            let Some(next) = self.field_type(owner_ty, segment) else {
+                return false;
+            };
+            owner_ty = next;
+        }
+        let Some(owner) = drop_owner else {
+            return false;
+        };
+        if !self.facts.is_tracked(&owner_ty) {
+            return false;
+        }
+        self.error(msg::cannot_move_field_out_of_drop_type(&fields.join("."), &owner), value.span);
+        true
+    }
+
     /// A borrow passed to a call lives until the call returns, so it must
     /// still be valid after every argument has been evaluated:
     /// `f(&t, move t)` and `f(&v[next()], move v)` are rejected. A computed
@@ -1408,7 +1474,9 @@ impl MoveChecker {
             return;
         }
         self.reject_locked_move(argument, var_types);
-        if self.reject_container_element_move(argument, var_types) {
+        if self.reject_container_element_move(argument, var_types)
+            || self.reject_rvalue_drop_field_move(argument)
+        {
             self.check_expr(argument, state, scopes, var_types);
             return;
         }
@@ -2242,6 +2310,10 @@ impl MoveChecker {
         if self.reject_container_element_move(expr, var_types) {
             return;
         }
+        if self.reject_rvalue_drop_field_move(expr) {
+            self.check_expr(expr, state, scopes, var_types);
+            return;
+        }
         match expr.kind.as_ref() {
             ast::ExpressionKind::Identifier(ident) => {
                 self.check_expr(expr, state, scopes, var_types);
@@ -2428,7 +2500,9 @@ impl MoveChecker {
             }
             ast::ExpressionKind::Move(inner) => {
                 self.reject_locked_move(inner, var_types);
-                if self.reject_container_element_move(inner, var_types) {
+                if self.reject_container_element_move(inner, var_types)
+                    || self.reject_rvalue_drop_field_move(inner)
+                {
                     self.check_expr(inner, state, scopes, var_types);
                     return;
                 }
@@ -3471,6 +3545,7 @@ mod tests {
                 &[],
                 checker.consuming_method_calls(),
                 checker.indexed_elements(),
+                checker.field_rvalue_types(),
             )
                 .errors;
         Errors {
@@ -3752,5 +3827,58 @@ mod tests {
         let errors = errors_in("Slot<Text> t; t.value = fresh(); Text v = t.get();");
         let rejected = crate::diagnostics::messages::bound_requires_copy(&"Text");
         assert!(errors.types.iter().any(|message| message.contains(&rejected)), "{errors:?}");
+    }
+
+    /// A field cannot leave a temporary whose type implements Drop, as it
+    /// cannot leave a named local of that type: the destructor still needs
+    /// the whole value. `agc check` runs no codegen, so the move checker
+    /// reports it (#80).
+    #[test]
+    fn an_owned_field_cannot_leave_a_drop_typed_temporary() {
+        let items = "struct Seal { Text leaf; Text other; i64 n; Plain plain; }\n\
+            impl Drop for Seal { void drop(*self) {} }\n\
+            struct Plain { Text leaf; i64 n; }\n\
+            struct Holder { Seal seal; }\n\
+            Seal seal() { Seal s; return s; }\n\
+            Plain plain() { Plain p; return p; }\n\
+            Holder holder() { Holder h; return h; }\n\
+            Text leaf_of_seal() { return seal().leaf; }\n";
+        for (place, owner, misuse) in [
+            ("leaf", "Seal", "eat(seal().leaf);"),
+            ("leaf", "Seal", "Text t = seal().leaf;"),
+            ("leaf", "Seal", "Text t = move seal().leaf;"),
+            ("leaf", "Seal", "Text t; t = seal().leaf;"),
+            ("leaf", "Seal", "seal().leaf.consume();"),
+            ("plain.leaf", "Seal", "eat(seal().plain.leaf);"),
+            ("seal.leaf", "Seal", "eat(holder().seal.leaf);"),
+            ("leaf", "Seal", "bool f = true; eat(f ? seal().leaf : fresh());"),
+            ("leaf", "Seal", "bool f = true; Seal a; Seal b; eat((f ? a : b).leaf);"),
+            ("leaf", "Seal", "Plain p = plain(); p.leaf = seal().leaf;"),
+        ] {
+            let rejected = super::msg::cannot_move_field_out_of_drop_type(place, owner);
+            let errors = errors_with_items(items, misuse);
+            assert!(errors.moves.contains(&rejected), "{misuse}: {errors:?}");
+        }
+        let errors = errors_with_items(items, "");
+        let rejected = super::msg::cannot_move_field_out_of_drop_type("leaf", "Seal");
+        assert!(errors.moves.contains(&rejected), "return: {errors:?}");
+        for control in [
+            "i64 n = seal().n;",
+            "i64 n = seal().leaf.inspect();",
+            "i64 n = seal().plain.n;",
+            "eat(plain().leaf);",
+            "Text t = plain().leaf;",
+            "eat(fresh());",
+        ] {
+            let errors = errors_with_items(
+                "struct Seal { Text leaf; i64 n; Plain plain; }\n\
+                 impl Drop for Seal { void drop(*self) {} }\n\
+                 struct Plain { Text leaf; i64 n; }\n\
+                 Seal seal() { Seal s; return s; }\n\
+                 Plain plain() { Plain p; return p; }\n",
+                control,
+            );
+            assert!(errors.types.is_empty() && errors.moves.is_empty(), "{control}: {errors:?}");
+        }
     }
 }
