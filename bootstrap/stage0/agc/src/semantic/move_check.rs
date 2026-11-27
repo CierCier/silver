@@ -451,13 +451,14 @@ fn join_changed(into: &mut State, other: &State) -> bool {
 const MAX_LOOP_PASSES: usize = 8;
 
 /// Scope entry: (name, previous state, previous type, previous owner,
-/// previous locked type) so shadowing restores.
+/// previous locked type, previously a borrowed payload) so shadowing restores.
 type ScopeEntry = (
     String,
     Option<VarState>,
     Option<ast::Type>,
     Option<super::init_plan::OwnerLocalId>,
     Option<ast::Type>,
+    bool,
 );
 /// Facts for move classification. TODO(Phase 5): centralize via `type_properties::{is_copy,needs_drop}`.
 #[derive(Clone, Debug, Default)]
@@ -1903,7 +1904,7 @@ impl MoveChecker {
         var_types: &mut FxHashMap<String, ast::Type>,
     ) {
         let name = &identifier.name;
-        self.borrowed_payloads.remove(name);
+        let old_borrowed = self.borrowed_payloads.remove(name);
         let old_locked = self.locked_bindings.remove(name);
         if let Some(ty) = ty {
             let old_owner = self.owner_bindings.remove(name);
@@ -1940,8 +1941,9 @@ impl MoveChecker {
                 old_type,
                 old_owner,
                 old_locked,
+                old_borrowed,
             ));
-        } else if old_locked.is_some() {
+        } else if old_locked.is_some() || old_borrowed {
             // An untyped local leaves the state alone but still shadows the
             // locked name until its scope ends.
             scopes.last_mut().expect("scope stack is non-empty").push((
@@ -1950,6 +1952,7 @@ impl MoveChecker {
                 var_types.get(name).cloned(),
                 self.owner_bindings.get(name).cloned(),
                 old_locked,
+                old_borrowed,
             ));
         }
     }
@@ -1990,9 +1993,13 @@ impl MoveChecker {
         var_types: &mut FxHashMap<String, ast::Type>,
     ) {
         if let Some(scope) = scopes.pop() {
-            for (name, old_state, old_type, old_owner, old_locked) in scope {
+            for (name, old_state, old_type, old_owner, old_locked, old_borrowed) in scope {
                 self.owner_bindings.remove(&name);
                 self.locked_bindings.remove(&name);
+                self.borrowed_payloads.remove(&name);
+                if old_borrowed {
+                    self.borrowed_payloads.insert(name.clone());
+                }
                 if let Some(locked) = old_locked {
                     self.locked_bindings.insert(name.clone(), locked);
                 }
@@ -2144,8 +2151,11 @@ impl MoveChecker {
         let mut shadowed = FxHashSet::default();
         let saved_owners = self.owner_bindings.clone();
         let saved_locked = self.locked_bindings.clone();
+        let saved_borrowed = self.borrowed_payloads.clone();
         for scope in scopes.iter().skip(owner).rev() {
-            for (name, old_state, old_type, old_owner, old_locked) in scope.iter().rev() {
+            for (name, old_state, old_type, old_owner, old_locked, old_borrowed) in
+                scope.iter().rev()
+            {
                 shadowed.insert(name.clone());
                 self.owner_bindings.remove(name);
                 if let Some(old) = old_owner {
@@ -2154,6 +2164,10 @@ impl MoveChecker {
                 self.locked_bindings.remove(name);
                 if let Some(old) = old_locked {
                     self.locked_bindings.insert(name.clone(), old.clone());
+                }
+                self.borrowed_payloads.remove(name);
+                if *old_borrowed {
+                    self.borrowed_payloads.insert(name.clone());
                 }
                 match old_state {
                     Some(old) => {
@@ -2176,6 +2190,7 @@ impl MoveChecker {
         self.check_statement(deferred, &mut view, scopes, &mut view_types);
         self.owner_bindings = saved_owners;
         self.locked_bindings = saved_locked;
+        self.borrowed_payloads = saved_borrowed;
         for (name, var) in view {
             if !shadowed.contains(&name) {
                 state.insert(name, var);
@@ -3035,7 +3050,14 @@ impl MoveChecker {
                 let mut merged: Option<State> = None;
                 // A heap container keeps owning its elements, so an arm cannot
                 // move payloads out of one, as `move v[i]` cannot.
-                let moves = arms.iter().any(|arm| Self::pattern_has_move(&arm.pattern));
+                // Arms after an unguarded catch-all never run.
+                let reachable = arms
+                    .iter()
+                    .position(|arm| arm.guard.is_none() && !Self::pattern_is_refutable(&arm.pattern))
+                    .map_or(arms.len(), |end| end + 1);
+                let moves = arms[..reachable]
+                    .iter()
+                    .any(|arm| Self::pattern_has_move(&arm.pattern));
                 let container_move = moves && self.reject_container_element_move(expression, var_types);
                 if moves && !container_move {
                     self.reject_borrowed_scrutinee_move(expression);
@@ -3078,8 +3100,14 @@ impl MoveChecker {
                     let mut arm_state = state.clone();
                     // An earlier guard may have consumed the scrutinee, and
                     // this arm reads its payloads again.
-                    if guarded && Self::pattern_has_move(&arm.pattern) {
-                        self.check_expr(expression, &mut arm_state, &mut scopes.clone(), var_types);
+                    // Only a place can be consumed by a guard. The scrutinee was
+                    // evaluated once, above, so its call or index operands are
+                    // not walked again.
+                    if guarded
+                        && Self::pattern_has_move(&arm.pattern)
+                        && let Some(owner) = plain_prefix(expression)
+                    {
+                        self.check_expr(owner, &mut arm_state, &mut scopes.clone(), var_types);
                     }
                     guarded |= arm.guard.is_some();
                     let mut arm_scopes = scopes.clone();
@@ -3142,9 +3170,14 @@ impl MoveChecker {
                         if let Some((_, ty)) = typed.iter().find(|(t, _)| t.name == name) {
                             var_types.insert(name.clone(), ty.clone());
                         }
-                        self.borrowed_payloads.insert(name.clone());
+                        let old_borrowed = !self.borrowed_payloads.insert(name.clone());
                         arm_scopes.last_mut().expect("arm scope is pushed").push((
-                            name, old_state, old_type, old_owner, None,
+                            name,
+                            old_state,
+                            old_type,
+                            old_owner,
+                            None,
+                            old_borrowed,
                         ));
                     }
                     // The arm's result is consumed even when the match is a
@@ -4041,6 +4074,49 @@ mod tests {
         assert!(
             errors.types.is_empty() && errors.moves.is_empty(),
             "{unreachable}: {errors:?}"
+        );
+        let unreachable = "Kept k; k.twin = Twin.Both(fresh(), fresh()); \
+                           match k.twin { _: {}, Both(move a, b): { eat(a); eat(b); } };";
+        let errors = errors_with_items(items, unreachable);
+        assert!(
+            errors.types.is_empty() && errors.moves.is_empty(),
+            "{unreachable}: {errors:?}"
+        );
+        // A value scrutinee runs once, so a later move arm after a guard
+        // does not consume its operands again.
+        let items = "enum Twin { Both(Text, Text); Neither; }\n\
+                     Twin pass(Twin t) { return t; }\n\
+                     bool ok() { return true; }\n";
+        let once = "Twin w = Twin.Both(fresh(), fresh()); \
+                    match pass(w) { Both(a, b), ok(): {}, Both(move a, b): { eat(a); eat(b); }, \
+                    Neither: {} };";
+        let errors = errors_with_items(items, once);
+        assert!(
+            errors.types.is_empty() && errors.moves.is_empty(),
+            "{once}: {errors:?}"
+        );
+        let items = "enum Twin { Both(Text, Text); Neither; }\n\
+                     i64 index(Text t) { return 0; }\n";
+        let once = "Twin items[2]; items[0] = Twin.Both(fresh(), fresh()); Text probe = fresh(); \
+                    match items[index(probe)] { Neither, false: {}, \
+                    Both(move a, b): { eat(a); eat(b); }, Neither: {} };";
+        let errors = errors_with_items(items, once);
+        assert!(
+            errors.types.is_empty() && errors.moves.is_empty(),
+            "{once}: {errors:?}"
+        );
+        // A nested block's shadow ends with the block, so the borrowed
+        // payload binding is borrowed again after it.
+        let items = "enum Twin { Both(Text, Text); Neither; }\n\
+                     enum Parcel { Held(Twin); Empty; }\n";
+        let shadowed = "Parcel c = Parcel.Held(Twin.Both(fresh(), fresh())); \
+                        match c { Held(w): { if (true) { Twin w = Twin.Neither; } \
+                        match w { Both(move a, b): { eat(a); eat(b); }, Neither: {} }; }, \
+                        Empty: {} };";
+        let errors = errors_with_items(items, shadowed);
+        assert!(
+            errors.moves.contains(&crate::diagnostics::messages::cannot_move_out_of_borrowed_payload("w")),
+            "{shadowed}: {errors:?}"
         );
     }
 
