@@ -164,8 +164,14 @@ fn fold_const_operand(
             operator,
             right,
         } => {
-            let lhs = fold_const_operand(env, left, context)?;
-            let rhs = fold_const_operand(env, right, context)?;
+            // Comparison operands are integers, not the bool result.
+            let operand_context = if is_comparison(operator) {
+                ConstIntShape::WIDE
+            } else {
+                context
+            };
+            let lhs = fold_const_operand(env, left, operand_context)?;
+            let rhs = fold_const_operand(env, right, operand_context)?;
             fold_const_binary(operator, lhs, rhs, context)?
         }
         _ => return None,
@@ -183,18 +189,21 @@ fn fold_const_binary(
     context: ConstIntShape,
 ) -> Option<ConstOperand> {
     use ast::BinaryOperator as Op;
-    let typed = lhs.shape.or(rhs.shape);
-    let compares = matches!(
-        operator,
-        Op::Equal
-            | Op::NotEqual
-            | Op::Less
-            | Op::Greater
-            | Op::LessEqual
-            | Op::GreaterEqual
-            | Op::LogicalAnd
-            | Op::LogicalOr
-    );
+    // Mixed widths widen to the wider operand; at equal width unsigned wins.
+    let typed = match (lhs.shape, rhs.shape) {
+        (Some(l), Some(r)) => Some(ConstIntShape {
+            bits: l.bits.max(r.bits),
+            unsigned: if l.bits == r.bits {
+                l.unsigned || r.unsigned
+            } else if l.bits > r.bits {
+                l.unsigned
+            } else {
+                r.unsigned
+            },
+        }),
+        (l, r) => l.or(r),
+    };
+    let compares = is_comparison(operator);
     let shape = typed.unwrap_or(if compares {
         ConstIntShape::WIDE
     } else {
@@ -302,4 +311,21 @@ impl ConstEnv for ProgramConsts<'_> {
         self.values.insert(name.to_string(), value);
         Some(ConstOperand::typed(value, shape))
     }
+}
+
+/// True for operators whose result is a bool: comparisons and logical
+/// operators.
+fn is_comparison(operator: &ast::BinaryOperator) -> bool {
+    use ast::BinaryOperator as Op;
+    matches!(
+        operator,
+        Op::Equal
+            | Op::NotEqual
+            | Op::Less
+            | Op::Greater
+            | Op::LessEqual
+            | Op::GreaterEqual
+            | Op::LogicalAnd
+            | Op::LogicalOr
+    )
 }

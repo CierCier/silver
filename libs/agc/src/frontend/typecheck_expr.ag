@@ -5093,17 +5093,35 @@ struct ConstOperand {
     u32 type_id;
 }
 
+/// True for operators whose result is a bool: comparisons and logical
+/// operators.
+bool const_eval_compares(u32 op) {
+    return op == (u32)TokenKind.Equal || op == (u32)TokenKind.NotEqual
+        || op == (u32)TokenKind.Less || op == (u32)TokenKind.Greater
+        || op == (u32)TokenKind.LessEqual || op == (u32)TokenKind.GreaterEqual
+        || op == (u32)TokenKind.And || op == (u32)TokenKind.Or;
+}
+
+/// Type a binary operation on operands of types `a` and `b` folds in: the
+/// wider one, unsigned at equal width, or the typed one beside a bare
+/// literal (TYPE_UNKNOWN).
+u32 const_eval_common_type(u32 a, u32 b) {
+    if (a == TYPE_UNKNOWN) { return b; }
+    if (b == TYPE_UNKNOWN) { return a; }
+    i64 a_bits = const_eval_bits(a);
+    i64 b_bits = const_eval_bits(b);
+    if (a_bits != b_bits) { return a_bits > b_bits ? a : b; }
+    return type_is_unsigned_integer(b) ? b : a;
+}
+
 /// Folds `lhs op rhs` in the operands' type (`context` when both are bare
 /// literals), wrapping like the runtime operation. Comparisons and logical
 /// operators produce a bool. False for an operator that does not fold,
 /// division by zero, or an out-of-range shift.
 bool const_eval_binary(u32 op, ConstOperand lhs, ConstOperand rhs, u32 context,
                        ConstOperand* out) {
-    u32 typed = lhs.type_id != TYPE_UNKNOWN ? lhs.type_id : rhs.type_id;
-    bool compares = op == (u32)TokenKind.Equal || op == (u32)TokenKind.NotEqual
-        || op == (u32)TokenKind.Less || op == (u32)TokenKind.Greater
-        || op == (u32)TokenKind.LessEqual || op == (u32)TokenKind.GreaterEqual
-        || op == (u32)TokenKind.And || op == (u32)TokenKind.Or;
+    u32 typed = const_eval_common_type(lhs.type_id, rhs.type_id);
+    bool compares = const_eval_compares(op);
     u32 type_id = typed != TYPE_UNKNOWN ? typed : (compares ? TYPE_UNKNOWN : context);
     i64 l = const_eval_wrap(lhs.value, type_id);
     i64 r = const_eval_wrap(rhs.value, type_id);
@@ -5348,8 +5366,10 @@ impl ConstEval {
         if (kind == ExprKind.Binary) {
             ConstOperand lhs;
             ConstOperand rhs;
-            return self.fold_operand(pool, inner0, context, &lhs)
-                && self.fold_operand(pool, inner1, context, &rhs)
+            // Comparison operands are integers, not the bool result.
+            u32 operand_context = const_eval_compares(aux) ? TYPE_UNKNOWN : context;
+            return self.fold_operand(pool, inner0, operand_context, &lhs)
+                && self.fold_operand(pool, inner1, operand_context, &rhs)
                 && const_eval_binary(aux, lhs, rhs, context, out);
         }
         return false;
