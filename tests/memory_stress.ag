@@ -447,6 +447,11 @@ OwnedLeaf left_of_new_pair(i32 id) {
     return leaf_pair(id).left;
 }
 
+/// An index the checkers cannot read as a constant.
+i64 picked_index(i64 index) {
+    return index;
+}
+
 i32 first_of(OwnedLeaf leaf) {
     return leaf.first();
 }
@@ -607,6 +612,21 @@ void stress_conditional_and_borrowed_transfers() {
         assert_eq_i32(leaves[first_of(probe) - 39].first(), 42, "a receiver's index moves its argument once");
     }
     assert_eq_i32(leaf_drop_count, 3, "a receiver's moved index argument drops once");
+
+    // A field moved out of one element leaves the sibling field of every
+    // element readable through a computed index.
+    reset_owner_counters();
+    {
+        LeafPair pairs[2];
+        pairs[0] = leaf_pair(52);
+        pairs[1] = leaf_pair(54);
+        OwnedLeaf taken = move pairs[0].left;
+        assert_eq_i64(pairs[picked_index(0)].right.size(), 3, "a computed index reads a sibling of a moved field");
+        assert_eq_i32(pairs[picked_index(1)].right.id, 55, "a computed index reads an untouched field");
+        assert_eq_i32(taken.id, 52, "the moved field kept its leaf");
+    }
+    assert_eq_i32(leaf_drop_count, 4, "a partly moved array drops each leaf once");
+    assert_eq_i64(leaf_bytes_freed, 10, "a partly moved array frees each leaf once");
 
     // An arm block drops its own locals and runs its defers at the arm's end.
     reset_owner_counters();

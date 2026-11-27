@@ -983,6 +983,27 @@ class NativeLsp(unittest.TestCase):
                           (62, "use of uninitialized value 's.inner'"),
                           (71, "use of 't' before 't.base' is initialized")])
 
+    def test_a_computed_index_reads_a_field_no_element_moved(self):
+        # A read through a computed index needs its field on every element,
+        # so moving `.left` out of one element leaves `.right` readable.
+        text = ("trait Drop { void drop(*self); }\nstruct Text { i64 n; }\n"
+                "impl Drop for Text { void drop(*self) { } }\n"
+                "impl Text { i64 inspect(&self) { return self.n; } }\n"
+                "struct Pair { Text left; Text right; }\n"
+                "Text mk(i64 i) { Text t; t.n = i; return move t; }\n"
+                "i64 pick() { return 0; }\n"
+                "i64 sibling() {\n Pair pairs[2];\n pairs[0].left = mk(1); pairs[0].right = mk(2);\n"
+                " pairs[1].left = mk(3); pairs[1].right = mk(4);\n Text taken = move pairs[0].left;\n"
+                " return pairs[pick()].right.inspect() + pairs[pick()].right.n;\n}\n"
+                "i64 moved() {\n Pair pairs[2];\n pairs[0].left = mk(1); pairs[0].right = mk(2);\n"
+                " pairs[1].left = mk(3); pairs[1].right = mk(4);\n Text taken = move pairs[0].left;\n"
+                " return pairs[pick()].left.inspect();\n}\n"
+                "i64 main() { return sibling() + moved(); }\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
+                         [(19, "use of partially moved value 'pairs': 'pairs[0].left' was moved")])
+
     def test_returned_pointee_places_and_unrelated_c_results_are_not_local_escapes(self):
         # A result of the parameter's pointee type (`i64*` from `i64**`) is a
         # loaded value; any other pointer result may view the argument.
