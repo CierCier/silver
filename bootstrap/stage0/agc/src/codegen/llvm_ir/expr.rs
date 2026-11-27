@@ -14,6 +14,7 @@ use crate::codegen::SilverGenerator;
 use crate::codegen::llvm_ir::LlvmIrGenerator;
 use crate::codegen::llvm_ir::VarInfo;
 use crate::codegen::{CodegenError, CodegenResult};
+use crate::const_fold::{ConstEnv, ConstIntShape, ConstOperand, fold_const_int};
 use crate::diagnostics::messages as msg;
 use crate::lexer::Span;
 use crate::parser::ast;
@@ -424,6 +425,23 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         target_type: &ast::Type,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
         let target = self.lower_basic_type(target_type)?;
+        // Integer unary operators and casts fold in their operand's own type
+        // (`~A` on a u8 `A` complements eight bits) before the conversion to
+        // the declared type; other operands keep the paths below.
+        if target.is_int_type()
+            && matches!(
+                expr.kind.as_ref(),
+                ast::ExpressionKind::Unary { .. } | ast::ExpressionKind::Cast { .. }
+            )
+            && let Some(shape) = self.const_int_shape(target_type)
+            && let Some(value) = fold_const_int(self, expr, shape)
+        {
+            return Ok(Self::const_int_with_shape(
+                target.into_int_type(),
+                value,
+                shape,
+            ));
+        }
         let value = match expr.kind.as_ref() {
             ast::ExpressionKind::Literal(ast::Literal::Integer(value)) => {
                 // Emit at the target width; const_int_from_string preserves the
@@ -503,6 +521,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ast::ExpressionKind::Initializer { items } => {
                 return self.emit_const_initializer_value(items, target_type, &expr.span);
             }
+            ast::ExpressionKind::Binary { .. } | ast::ExpressionKind::Identifier(_)
+                if target.is_int_type() =>
+            {
+                let value = self
+                    .const_int_shape(target_type)
+                    .and_then(|shape| Some((fold_const_int(self, expr, shape)?, shape)));
+                let (value, shape) = value.ok_or_else(|| {
+                    CodegenError::with_span(
+                        "global initializer must be a compile-time constant expression",
+                        expr.span,
+                    )
+                })?;
+                Self::const_int_with_shape(target.into_int_type(), value, shape)
+            }
             _ => {
                 return Err(CodegenError::with_span(
                     "global initializer must be a compile-time constant expression",
@@ -512,6 +544,31 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         };
 
         self.const_cast_value_to_basic_type(value, target, &expr.span)
+    }
+
+    /// Shape of integer or bool type `ty`, resolving aliases through the
+    /// lowered type (signed unless the type is an unsigned primitive).
+    fn const_int_shape(&mut self, ty: &ast::Type) -> Option<ConstIntShape> {
+        ConstIntShape::primitive(ty).or_else(|| match self.lower_basic_type(ty) {
+            Ok(BasicTypeEnum::IntType(int_ty)) => Some(ConstIntShape {
+                bits: int_ty.get_bit_width(),
+                unsigned: false,
+            }),
+            _ => None,
+        })
+    }
+
+    fn const_int_with_shape(
+        int_ty: inkwell::types::IntType<'ctx>,
+        value: i128,
+        shape: ConstIntShape,
+    ) -> BasicValueEnum<'ctx> {
+        // Emit the bit pattern so negative values need no sign handling.
+        let bits = (shape.wrap(value) as u128) & shape.mask();
+        int_ty
+            .const_int_from_string(&bits.to_string(), StringRadix::Decimal)
+            .unwrap_or_else(|| int_ty.const_zero())
+            .as_basic_value_enum()
     }
 
     pub(crate) fn generate_global_variable_item(
@@ -2797,6 +2854,23 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
+    /// Lowers `expr` where the surrounding construct supplies `target`, such
+    /// as a return type or a parameter type. A brace initializer has no type
+    /// of its own, so it takes `target`; every other expression lowers as
+    /// usual and is left for the caller to cast.
+    pub(crate) fn emit_value_with_target(
+        &mut self,
+        expr: &ast::Expression,
+        target: Option<&ast::Type>,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        match (expr.kind.as_ref(), target) {
+            (ast::ExpressionKind::Initializer { items }, Some(target)) => {
+                self.emit_typed_initializer_value(items, target, &expr.span)
+            }
+            _ => self.emit_expression_value(expr),
+        }
+    }
+
     pub(crate) fn emit_expression_value_for_expected(
         &mut self,
         expr: &ast::Expression,
@@ -4154,5 +4228,40 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 expr.span,
             )),
         }
+    }
+}
+
+impl ConstEnv for LlvmIrGenerator<'_> {
+    fn shape(&mut self, ty: &ast::Type) -> Option<ConstIntShape> {
+        self.const_int_shape(ty)
+    }
+
+    /// A constant of this program, folded once, or an imported constant
+    /// whose module recorded its value. A local of the same name shadows it.
+    fn reference(&mut self, name: &str) -> Option<ConstOperand> {
+        if self.variables.iter().any(|scope| scope.contains_key(name)) {
+            return None;
+        }
+        let Some((ty, init)) = self.const_global_initializers.get(name).cloned() else {
+            let value = *self.global_const_values.get(name)?;
+            let shape = self
+                .extern_globals
+                .get(name)
+                .and_then(ConstIntShape::primitive);
+            return Some(ConstOperand { value, shape });
+        };
+        let shape = self.const_int_shape(&ty)?;
+        if let Some(value) = self.const_int_cache.get(name) {
+            return Some(ConstOperand::typed(*value, shape));
+        }
+        if self.const_eval_stack.iter().any(|active| active == name) {
+            return None;
+        }
+        self.const_eval_stack.push(name.to_string());
+        let value = fold_const_int(self, &init, shape);
+        self.const_eval_stack.pop();
+        let value = value?;
+        self.const_int_cache.insert(name.to_string(), value);
+        Some(ConstOperand::typed(value, shape))
     }
 }
