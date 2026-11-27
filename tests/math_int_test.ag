@@ -2,8 +2,33 @@
 import std.test;
 import std.math_int;
 
+// Constants defined from other constants fold at compile time, in any
+// declaration order, wrapping to the declared type.
+const i64 DERIVED_SIZE = BASE_SIZE * 4 + 1;
+const i64 BASE_SIZE = 10;
+const u8 WRAPPED_SIZE = (u8)(BASE_SIZE * 30);
+const i32 LOW_MASK = (1 << 12) - 1;
+const i8 SMALL_STEP = 3;
+const i8 WRAPPED_STEP = -SMALL_STEP - 126;
+const bool SIZES_VALID = BASE_SIZE > 5 && LOW_MASK == 4095;
+const u64 HIGH_BIT = (u64)1 << 63;
+const u64 HALF_HIGH_BIT = HIGH_BIT / 2;
+
 i32 main() {
     STDOUT.write_str("=== Math Int Tests ===\n\n");
+
+    // --- constant initializers ---
+    STDOUT.write_str("--- constant initializers ---\n");
+    {
+        assert_eq_i64(41, DERIVED_SIZE, "constant defined from a later constant");
+        assert_eq_i64(44, (i64)WRAPPED_SIZE, "cast constant wraps to u8");
+        assert_eq_i32(4095, LOW_MASK, "shift and subtract fold");
+        assert_eq_i64(127, (i64)WRAPPED_STEP, "i8 constant wraps on overflow");
+        assert_true(SIZES_VALID, "comparisons fold to bool");
+        assert_eq_u64(9223372036854775808, HIGH_BIT, "u64 high bit");
+        assert_eq_u64(4611686018427387904, HALF_HIGH_BIT, "unsigned division of the high bit");
+    }
+
 
     // --- abs_i64 ---
     STDOUT.write_str("--- abs_i64 ---\n");

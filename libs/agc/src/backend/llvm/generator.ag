@@ -1879,7 +1879,15 @@ impl LlvmGenerator {
                     while (eq_node != (SyntaxNode*)0 && !(eq_node.kind == NodeKind.Token && (eq_node.token_kind == TokenKind.Assign || strcmp(eq_node.text, "=") == 0))) {
                         eq_node = eq_node.next_sibling;
                     }
-                    if (eq_node != (SyntaxNode*)0) {
+                    // Integer and bool initializers may combine literals and
+                    // other constants: `const i32 B = A + 1;`.
+                    i64 g_folded = 0;
+                    if (eq_node != (SyntaxNode*)0 && const_eval_bits(g_type_id) > 0
+                        && const_eval_global(pool, types, names, tree.root, item, 0, &g_folded)) {
+                        g_init = LLVMConstInt(g_llvm_type, (u64)g_folded,
+                            type_is_signed_integer(g_type_id) ? 1 : 0);
+                    }
+                    if (eq_node != (SyntaxNode*)0 && g_init == (LLVMOpaqueValue*)0) {
                         SyntaxNode* init_node = eq_node.next_sibling;
                         if (init_node != (SyntaxNode*)0 && init_node.kind == NodeKind.Token
                             && init_node.token_kind == TokenKind.At

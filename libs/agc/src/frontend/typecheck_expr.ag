@@ -5023,6 +5023,257 @@ bool typecheck_constant_initializer(AstPool* pool, u32 id) {
     return true;
 }
 
+/// Longest chain of constants one initializer may follow. A longer chain or
+/// a cycle is not a compile-time constant.
+const u32 CONST_EVAL_MAX_DEPTH = 64;
+
+/// Bit width a folded constant of type `type_id` wraps to: 1 for `bool`,
+/// the width for integers (at most 64), 0 for types that do not fold.
+i64 const_eval_bits(u32 type_id) {
+    if (type_id == TYPE_BOOL) { return 1; }
+    if (type_id == TYPE_I8 || type_id == TYPE_U8) { return 8; }
+    if (type_id == TYPE_I16 || type_id == TYPE_U16) { return 16; }
+    if (type_id == TYPE_I32 || type_id == TYPE_U32) { return 32; }
+    if (type_is_integer(type_id)) { return 64; }
+    return 0;
+}
+
+/// Truncates `value` to type `type_id` like the runtime operation would,
+/// sign-extending signed types.
+i64 const_eval_wrap(i64 value, u32 type_id) {
+    i64 bits = const_eval_bits(type_id);
+    if (bits == 0 || bits >= 64) { return value; }
+    i64 mask = ((i64)1 << bits) - 1;
+    i64 truncated = value & mask;
+    if (type_is_signed_integer(type_id) && ((truncated >> (bits - 1)) & 1) != 0) {
+        return truncated | ~mask;
+    }
+    return truncated;
+}
+
+/// Parses integer literal `text` (decimal, `0x`, `0o` or `0b`, with `_`
+/// separators and an optional type suffix). False when it has no digits.
+bool const_eval_parse_int(str text, i64* out) {
+    i64 len = strlen(text);
+    i64 i = 0;
+    i64 radix = 10;
+    if (len >= 2 && text[0] == (u8)'0') {
+        u8 prefix = text[1];
+        if (prefix == (u8)'x' || prefix == (u8)'X') { radix = 16; }
+        if (prefix == (u8)'o' || prefix == (u8)'O') { radix = 8; }
+        if (prefix == (u8)'b' || prefix == (u8)'B') { radix = 2; }
+        if (radix != 10) { i = 2; }
+    }
+    i64 value = 0;
+    bool digits = false;
+    while (i < len) {
+        u8 c = text[i];
+        if (c != (u8)'_') {
+            i64 digit = radix;
+            if (c >= (u8)'0' && c <= (u8)'9') {
+                digit = (i64)(c - (u8)'0');
+            } else if (radix == 16 && c >= (u8)'a' && c <= (u8)'f') {
+                digit = (i64)(c - (u8)'a') + 10;
+            } else if (radix == 16 && c >= (u8)'A' && c <= (u8)'F') {
+                digit = (i64)(c - (u8)'A') + 10;
+            }
+            // A type suffix ends the digits.
+            if (digit >= radix) { break; }
+            value = value * radix + digit;
+            digits = true;
+        }
+        i += 1;
+    }
+    *out = value;
+    return digits;
+}
+
+/// Folds the initializer of integer or bool global `item` into `*out`.
+/// False when the global has another type or the initializer is not a
+/// compile-time constant.
+bool const_eval_global(AstPool* pool, TypeTable* types, Interner* names, SyntaxNode* root,
+                       SyntaxNode* item, u32 depth, i64* out) {
+    if (depth > CONST_EVAL_MAX_DEPTH) { return false; }
+    SyntaxNode* start = item.first_child;
+    while (start != (SyntaxNode*)0 && start.kind == NodeKind.Token
+        && (start.token_kind == TokenKind.Private || strcmp(start.text, "#") == 0)) {
+        start = strcmp(start.text, "#") == 0 && start.next_sibling != (SyntaxNode*)0
+            ? start.next_sibling.next_sibling : start.next_sibling;
+    }
+    ExprLowerer lowerer = ExprLowerer.new(pool, types, names);
+    lowerer.unit_root = root;
+    Vec<u32> stmt_ids = Vec<u32>.new();
+    lowerer.lower_block_range(start, (SyntaxNode*)0, &stmt_ids);
+    bool folded = false;
+    if (!lowerer.unsupported && stmt_ids.len() == 1) {
+        // Copy the fields: folding lowers more statements into the pool.
+        AstStmt* declaration = pool.get_stmt(stmt_ids.get(0));
+        StmtKind kind = declaration.kind;
+        u32 type_id = declaration.inner0;
+        u32 value = declaration.inner1;
+        if (kind == StmtKind.Let && value != 0 && const_eval_bits(type_id) > 0) {
+            folded = const_eval_expr(pool, types, names, root, value, type_id, depth, out);
+        }
+    }
+    lowerer.error.drop();
+    stmt_ids.drop();
+    return folded;
+}
+
+/// Folds a reference to constant `name`: a top-level `const` integer or
+/// bool global with a foldable initializer.
+bool const_eval_named(AstPool* pool, TypeTable* types, Interner* names, SyntaxNode* root,
+                      str name, u32 depth, i64* out) {
+    SyntaxNode* item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Global) {
+            SyntaxNode* id_node = item_identifier(item);
+            if (id_node != (SyntaxNode*)0 && strcmp(id_node.text, name) == 0) {
+                bool is_const = false;
+                SyntaxNode* part = item.first_child;
+                while (part != (SyntaxNode*)0 && part != id_node) {
+                    if (part.kind == NodeKind.Token && part.token_kind == TokenKind.Const) {
+                        is_const = true;
+                    }
+                    part = part.next_sibling;
+                }
+                return is_const
+                    && const_eval_global(pool, types, names, root, item, depth + 1, out);
+            }
+        }
+        item = item.next_sibling;
+    }
+    return false;
+}
+
+/// Folds binary operator `op` on `lhs` and `rhs` for result type `type_id`.
+/// False for an operator that does not fold, division by zero, or an
+/// out-of-range shift.
+bool const_eval_binary(u32 op, i64 lhs, i64 rhs, u32 type_id, i64* out) {
+    bool unsigned64 = type_id == TYPE_U64 || type_id == TYPE_U128;
+    i64 value = 0;
+    if (op == (u32)TokenKind.Plus) {
+        value = lhs + rhs;
+    } else if (op == (u32)TokenKind.Minus) {
+        value = lhs - rhs;
+    } else if (op == (u32)TokenKind.Star) {
+        value = lhs * rhs;
+    } else if (op == (u32)TokenKind.Slash || op == (u32)TokenKind.Percent) {
+        if (rhs == 0) { return false; }
+        bool divide = op == (u32)TokenKind.Slash;
+        if (unsigned64) {
+            value = divide ? (i64)((u64)lhs / (u64)rhs) : (i64)((u64)lhs % (u64)rhs);
+        } else if (rhs == -1) {
+            // Avoid the i64 overflow trap; the result wraps like the runtime one.
+            value = divide ? 0 - lhs : 0;
+        } else {
+            value = divide ? lhs / rhs : lhs % rhs;
+        }
+    } else if (op == (u32)TokenKind.BitwiseAnd) {
+        value = lhs & rhs;
+    } else if (op == (u32)TokenKind.BitwiseOr) {
+        value = lhs | rhs;
+    } else if (op == (u32)TokenKind.BitwiseXor) {
+        value = lhs ^ rhs;
+    } else if (op == (u32)TokenKind.LeftShift || op == (u32)TokenKind.RightShift) {
+        if (rhs < 0 || rhs >= const_eval_bits(type_id)) { return false; }
+        if (op == (u32)TokenKind.LeftShift) {
+            value = lhs << rhs;
+        } else if (unsigned64) {
+            value = (i64)((u64)lhs >> (u64)rhs);
+        } else {
+            value = lhs >> rhs;
+        }
+    } else if (op == (u32)TokenKind.Equal) {
+        value = lhs == rhs ? 1 : 0;
+    } else if (op == (u32)TokenKind.NotEqual) {
+        value = lhs != rhs ? 1 : 0;
+    } else if (op == (u32)TokenKind.Less) {
+        value = lhs < rhs ? 1 : 0;
+    } else if (op == (u32)TokenKind.Greater) {
+        value = lhs > rhs ? 1 : 0;
+    } else if (op == (u32)TokenKind.LessEqual) {
+        value = lhs <= rhs ? 1 : 0;
+    } else if (op == (u32)TokenKind.GreaterEqual) {
+        value = lhs >= rhs ? 1 : 0;
+    } else if (op == (u32)TokenKind.And) {
+        value = lhs != 0 && rhs != 0 ? 1 : 0;
+    } else if (op == (u32)TokenKind.Or) {
+        value = lhs != 0 || rhs != 0 ? 1 : 0;
+    } else {
+        return false;
+    }
+    *out = value;
+    return true;
+}
+
+/// Folds lowered expression `id` to a value of integer or bool type
+/// `type_id`, wrapping like the runtime operation. Operands are literals,
+/// other constants, casts, and unary or binary operators. False when the
+/// expression is not a compile-time constant.
+bool const_eval_expr(AstPool* pool, TypeTable* types, Interner* names, SyntaxNode* root,
+                     u32 id, u32 type_id, u32 depth, i64* out) {
+    // Copy the fields: folding a referenced constant lowers into the pool.
+    AstExpr* expr = pool.get_expr(id);
+    ExprKind kind = expr.kind;
+    u32 inner0 = expr.inner0;
+    u32 inner1 = expr.inner1;
+    u32 aux = expr.aux;
+    i64 value = 0;
+    if (kind == ExprKind.Literal) {
+        str text = names.get(inner0);
+        if (aux == TYPE_BOOL) {
+            value = strcmp(text, "true") == 0 ? 1 : 0;
+        } else if (!type_is_integer(aux) || !const_eval_parse_int(text, &value)) {
+            return false;
+        }
+    } else if (kind == ExprKind.Var) {
+        if (!const_eval_named(pool, types, names, root, names.get(aux), depth, &value)) {
+            return false;
+        }
+    } else if (kind == ExprKind.Cast) {
+        if (const_eval_bits(aux) == 0
+            || !const_eval_expr(pool, types, names, root, inner0, TYPE_I64, depth, &value)) {
+            return false;
+        }
+        value = const_eval_wrap(value, aux);
+    } else if (kind == ExprKind.Unary) {
+        i64 operand = 0;
+        if (!const_eval_expr(pool, types, names, root, inner0, type_id, depth, &operand)) {
+            return false;
+        }
+        if (aux == (u32)TokenKind.Minus) {
+            value = 0 - operand;
+        } else if (aux == (u32)TokenKind.Plus) {
+            value = operand;
+        } else if (aux == (u32)TokenKind.Not && type_id == TYPE_BOOL) {
+            value = operand == 0 ? 1 : 0;
+        } else if (aux == (u32)TokenKind.Not || aux == (u32)TokenKind.BitwiseNot) {
+            value = ~operand;
+        } else {
+            return false;
+        }
+    } else if (kind == ExprKind.Binary) {
+        bool compares = aux == (u32)TokenKind.Equal || aux == (u32)TokenKind.NotEqual
+            || aux == (u32)TokenKind.Less || aux == (u32)TokenKind.Greater
+            || aux == (u32)TokenKind.LessEqual || aux == (u32)TokenKind.GreaterEqual
+            || aux == (u32)TokenKind.And || aux == (u32)TokenKind.Or;
+        // Comparison operands keep their own types; the result is a bool.
+        u32 operand_type = compares ? TYPE_I64 : type_id;
+        i64 lhs = 0;
+        i64 rhs = 0;
+        if (!const_eval_expr(pool, types, names, root, inner0, operand_type, depth, &lhs)
+            || !const_eval_expr(pool, types, names, root, inner1, operand_type, depth, &rhs)
+            || !const_eval_binary(aux, lhs, rhs, type_id, &value)) {
+            return false;
+        }
+    } else {
+        return false;
+    }
+    *out = const_eval_wrap(value, type_id);
+    return true;
+}
+
 /// Lowers global `item` like a local declaration and records its declared
 /// type on the symbol so bodies and other globals can read it. With
 /// `report`, checks every lowered statement and requires a constant
@@ -5068,7 +5319,12 @@ void typecheck_global(AstPool* pool, SymbolTable* symbols, SyntaxNode* root, Syn
             AstStmt* stmt = pool.get_stmt(stmt_ids.get(i));
             u32 value = stmt.kind == StmtKind.Let || stmt.kind == StmtKind.Assign
                 ? stmt.inner1 : (u32)0;
-            if (value != 0 && !typecheck_constant_initializer(pool, value)) {
+            u32 declared_type = stmt.kind == StmtKind.Let ? stmt.inner0 : TYPE_UNKNOWN;
+            i64 folded = 0;
+            if (value != 0 && !typecheck_constant_initializer(pool, value)
+                && !(const_eval_bits(declared_type) > 0
+                    && const_eval_expr(pool, &symbols.types, &symbols.names, root, value,
+                                       declared_type, 0, &folded))) {
                 diagnostics.error(pool.get_expr(value).span,
                                   String.from_str(global_initializer_not_constant()));
                 *ok = false;
