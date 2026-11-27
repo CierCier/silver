@@ -1,0 +1,70 @@
+// User items named like std type parameters (`A`, `B`) or callable
+// parameters (`f`) must not change how std resolves its own names.
+import std.test;
+import std.mem;
+import std.slice;
+import std.iter;
+
+// Same names as the type parameters of `ChainIter<A, B, T>` and `ZipIter`.
+// `next` here must not be picked up by the generic bodies in std/iter.ag.
+struct A {
+    i64 v;
+}
+
+impl A {
+    i64 next(*self) {
+        return self.v + 1000;
+    }
+}
+
+struct B {
+    i64 w;
+}
+
+// Same name and shape as the callable parameter of `iter_fold` and
+// `iter_reduce`; std must call its parameter, not this function.
+i64 f(i64 acc, i64 x) {
+    return -1;
+}
+
+i64 add_pairs(i64 acc, i64 x) {
+    return acc + x;
+}
+
+i32 main() {
+    Vec<i64> a = Vec<i64>.new();
+    a.push((i64)1);
+    a.push((i64)2);
+    Vec<i64> b = Vec<i64>.new();
+    b.push((i64)3);
+    b.push((i64)4);
+
+    SliceIter<i64> it_a = a.iter();
+    SliceIter<i64> it_b = b.iter();
+    ChainIter<SliceIter<i64>, SliceIter<i64>, i64> chained = iter_chain<SliceIter<i64>, SliceIter<i64>, i64>(&it_a, &it_b);
+    assert_eq_i64(10, iter_sum_i64<ChainIter<SliceIter<i64>, SliceIter<i64>, i64>>(&chained), "chain sum is 10");
+
+    SliceIter<i64> it_z1 = a.iter();
+    SliceIter<i64> it_z2 = b.iter();
+    ZipIter<SliceIter<i64>, SliceIter<i64>, i64, i64> zipped = iter_zip<SliceIter<i64>, SliceIter<i64>, i64, i64>(&it_z1, &it_z2);
+    Zipped<i64, i64> pair = zipped.next().unwrap();
+    assert_eq_i64(1, pair.a, "zipped first is 1");
+    assert_eq_i64(3, pair.b, "zipped second is 3");
+
+    SliceIter<i64> it_fold = b.iter();
+    assert_eq_i64(107, iter_fold<SliceIter<i64>, i64, i64>(&it_fold, (i64)100, add_pairs), "fold calls its parameter");
+    SliceIter<i64> it_red = b.iter();
+    assert_eq_i64(7, iter_reduce<SliceIter<i64>, i64>(&it_red, add_pairs), "reduce calls its parameter");
+
+    A user_a;
+    user_a.v = 5;
+    B user_b;
+    user_b.w = 6;
+    assert_eq_i64(1005, user_a.next(), "user A keeps its own next");
+    assert_eq_i64(6, user_b.w, "user B is usable");
+    assert_eq_i64(-1, f(1, 2), "user f is still callable");
+
+    a.drop();
+    b.drop();
+    return 0;
+}

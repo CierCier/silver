@@ -2508,8 +2508,11 @@ impl TypeChecker {
                     {
                         return result;
                     }
-                    // Check if this is a known function name first
-                    if self.functions.contains_key(&ident.name) {
+                    // A callable local or parameter shadows a top-level
+                    // function of the same name; otherwise functions win.
+                    if self.functions.contains_key(&ident.name)
+                        && !self.is_callable_local(&ident.name)
+                    {
                         self.resolve_overload(ident, arguments, expr.span)
                     } else {
                         // Type-check the function expression — may be a fn pointer variable
@@ -4336,15 +4339,23 @@ impl TypeChecker {
             .map(|arg| self.check_expr_with_literal_naturals(arg))
             .collect::<Vec<_>>();
 
-        match self.resolve_method_overload_types(
-            receiver_ty,
-            &method.name,
-            &arg_types,
-            Some(arguments),
-            style,
-            expected,
-            span,
-        ) {
+        // A type parameter can share its name with a concrete type in scope
+        // (`ChainIter<A, ..>` beside a user `struct A`); its methods are only
+        // known at instantiation, so never resolve against the concrete type.
+        let resolved = if self.is_current_type_param(receiver_ty) {
+            None
+        } else {
+            self.resolve_method_overload_types(
+                receiver_ty,
+                &method.name,
+                &arg_types,
+                Some(arguments),
+                style,
+                expected,
+                span,
+            )
+        };
+        match resolved {
             Some(ty) => ty,
             None => {
                 if self.is_bare_type_param(receiver_ty) {
@@ -7095,10 +7106,29 @@ impl TypeChecker {
     /// True for a bare type-parameter reference (`T`, not `Vec<T>` and not a
     /// known concrete type) — the operands whose operators become implicit
     /// guards on generic functions.
+    /// True when `ty` (through pointers and references) names a type
+    /// parameter of the item being checked.
+    fn is_current_type_param(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Named { path, generics } => {
+                path.len() == 1
+                    && generics.is_empty()
+                    && self.current_type_params.contains(&path[0])
+            }
+            Type::Pointer { inner, .. } | Type::Reference { inner, .. } => {
+                self.is_current_type_param(inner)
+            }
+            _ => false,
+        }
+    }
+
     fn is_bare_type_param(&self, ty: &Type) -> bool {
         match ty {
             Type::Named { path, generics } => {
-                path.len() == 1 && generics.is_empty() && !self.known_types.contains_key(&path[0])
+                path.len() == 1
+                    && generics.is_empty()
+                    && (self.current_type_params.contains(&path[0])
+                        || !self.known_types.contains_key(&path[0]))
             }
             Type::Pointer { inner, .. } | Type::Reference { inner, .. } => {
                 self.is_bare_type_param(inner)
@@ -8427,6 +8457,15 @@ impl TypeChecker {
         }
         None
     }
+    /// True when `name` is bound in a local scope to a function-typed value.
+    fn is_callable_local(&self, name: &str) -> bool {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name))
+            .is_some_and(|(ty, _)| matches!(ty, Type::Function { .. }))
+    }
+
     fn lookup_type(&self, name: &str) -> Option<Type> {
         self.lookup(name).map(|(ty, _)| ty)
     }
