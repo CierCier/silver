@@ -296,6 +296,8 @@ extern "C" {
     /// Sets the debug location attached to instructions built next (null clears
     /// it).
     void LLVMSetCurrentDebugLocation2(LLVMOpaqueBuilder* p0, LLVMOpaqueMetadata* p1);
+    /// Returns the debug location attached to instructions built next, or null.
+    LLVMOpaqueMetadata* LLVMGetCurrentDebugLocation2(LLVMOpaqueBuilder* p0);
 
     /// Returns the builder's current block.
     LLVMOpaqueBasicBlock* LLVMGetInsertBlock(LLVMOpaqueBuilder* p0);

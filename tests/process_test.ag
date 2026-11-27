@@ -69,9 +69,11 @@ void array_boundary_child(i32 boundary) {
 }
 
 /// Aborts when `fault`; otherwise returns the line of that abort, which the
-/// child's backtrace must name.
+/// child's backtrace must name. The next statement is on another line, so
+/// naming the line after the call fails.
 u32 trace_fault_site(bool fault) {
-    if (fault) { abort(); } return @line();
+    u32 line = @line(); if (fault) { abort(); }
+    return line;
 }
 
 i32* compound_fail_target() {
@@ -192,16 +194,18 @@ i32 linux_process_checks() {
 
     test_start("abort backtrace names the faulting line");
     Vec<String> self_argv = args();
-    String script = String.from_str("'");
-    script.push_str(self_argv.get_ptr(0).to_str());
-    script.push_str("' --child-backtrace 2>&1 | grep -qF 'trace_fault_site at process_test.ag:");
+    String frame = String.from_str("trace_fault_site at process_test.ag:");
     u32 fault_line = trace_fault_site(false);
-    script.push_display(&fault_line);
-    script.push_str(" ('");
+    frame.push_display(&fault_line);
+    frame.push_str(" (");
+    // The path and the frame are arguments, so no quoting can break them.
     Command cmd_trace = Command.new("/usr/bin/env");
     cmd_trace.arg("sh");
     cmd_trace.arg("-c");
-    cmd_trace.arg(script.to_str());
+    cmd_trace.arg("\"$1\" --child-backtrace 2>&1 | grep -qF -- \"$2\"");
+    cmd_trace.arg("sh");
+    cmd_trace.arg(self_argv.get_ptr(0).to_str());
+    cmd_trace.arg(frame.to_str());
     Result<ExitStatus, i64> trace_status = cmd_trace.status();
     assert_true(trace_status.is_ok(), "spawn the backtrace child");
     assert_eq_i32(0, trace_status.unwrap().exit_code(), "the frame names the abort line");

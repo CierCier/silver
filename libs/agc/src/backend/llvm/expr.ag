@@ -3983,9 +3983,22 @@ bool llvm_block_result_aliases_local(LlvmContext* ctx, LLVMOpaqueValue* value,
 /// an unsupported construct, which is also counted).
 LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
     if (expr_id == 0) { return (LLVMOpaqueValue*)0; }
+    // Instructions take this expression's line, and the enclosing one's
+    // line comes back afterwards: a call emitted after its arguments must
+    // not keep the last argument's line.
+    LLVMOpaqueMetadata* enclosing = LLVMGetCurrentDebugLocation2(ctx.builder);
+    llvm_debug_set_location(ctx, ctx.pool.get_expr(expr_id).span);
+    LLVMOpaqueValue* value = llvm_emit_expr_at(ctx, expr_id);
+    if (ctx.di_builder != (LLVMOpaqueDIBuilder*)0) {
+        LLVMSetCurrentDebugLocation2(ctx.builder, enclosing);
+    }
+    return value;
+}
+
+/// Emits expression `expr_id` once `llvm_emit_expr` has set its location.
+LLVMOpaqueValue* llvm_emit_expr_at(LlvmContext* ctx, u32 expr_id) {
     // Child statements can synthesize expressions and reallocate the pool.
     AstExpr expr = *ctx.pool.get_expr(expr_id);
-    llvm_debug_set_location(ctx, expr.span);
     if (expr.kind == ExprKind.Launch) { return llvm_emit_launch(ctx, expr_id); }
     if (expr.kind == ExprKind.Wait) { return llvm_emit_wait(ctx, expr_id); }
     if (expr.kind == ExprKind.Block) {
