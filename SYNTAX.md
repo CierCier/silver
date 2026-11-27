@@ -181,6 +181,20 @@ pointer a function returns derives only from its `&`-marked parameters or
 from independent data (globals, heap values, raw-pointer pointees).
 Returning a reference to a local is a compile error.
 
+A parameter typed by a bare type parameter, such as `x` in `T same<T>(T x)`,
+holds a reference when `T` is one, so `return same(&local);` is rejected too.
+A reference stored into a field keeps its referent: returning a struct whose
+field holds `&local` is an error. A method that takes `&mut self` and a `T`
+argument, such as `Vec<&Tok>.push`, keeps the reference it is given, so the
+referent must live as long as the receiver.
+
+```silver
+T same<T>(T x) { return x; }
+&Tok bad() { Tok t; return same(&t); }      // error: t dies with bad
+Vec<&Tok> refs = Vec<&Tok>.new();
+{ Tok t; refs.push(&t); }                   // error: refs outlives t
+```
+
 A semantic reference to a raw-pointer variable, such as `&slot` or `&mut slot`,
 borrows that variable's storage. It cannot outlive the variable, and a live mutable
 borrow prevents reassignment of the slot. Access through a raw pointee, such as

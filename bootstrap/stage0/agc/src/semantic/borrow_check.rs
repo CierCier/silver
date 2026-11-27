@@ -2714,6 +2714,58 @@ mod tests {
     }
 
     #[test]
+    fn reference_cannot_escape_through_a_type_parameter() {
+        let (escape, _) = integrated_safety_errors(
+            "struct Tok { i64 id; }\n\
+             T same<T>(T x) { return x; }\n\
+             T left<T>(T a, T b) { return a; }\n\
+             &T addr<T>(T x) { return &x; }\n\
+             &Tok through() { Tok t; return same(&t); }\n\
+             &Tok kept(&Tok p) { Tok t; return left(p, &t); }\n\
+             &Tok forwarded(&Tok p) { return same(p); }\n\
+             i64 value() { return same(5); }",
+            41,
+        );
+        let lines: Vec<_> = escape.iter().map(|error| error.span.start).collect();
+        assert_eq!(escape.len(), 2, "expected `addr` and `through` only: {escape:?} at {lines:?}");
+        assert!(escape.iter().all(|error| {
+            error.message == crate::diagnostics::messages::returned_reference_escapes()
+        }));
+    }
+
+    #[test]
+    fn reference_stored_by_a_container_cannot_outlive_its_referent() {
+        let (escape, _) = integrated_safety_errors(
+            "struct Tok { i64 id; }\n\
+             struct Bag<T> { T item; }\n\
+             impl<T> Bag<T> { void put(&mut self, T item) { self.item = item; } \
+             bool holds(&self, &T item) { return true; } }\n\
+             i64 bad() { Bag<&Tok> bag; { Tok t; bag.put(&t); } return 0; }\n\
+             i64 good() { Tok outer; Bag<&Tok> bag; bag.put(&outer); \
+             { Tok t; bool seen = bag.holds(&t); Bag<&Tok> inner; inner.put(&t); } return 0; }",
+            42,
+        );
+        assert_eq!(escape.len(), 1, "only the store in `bad` escapes: {escape:?}");
+        assert_eq!(
+            escape[0].message,
+            crate::diagnostics::messages::reference_escapes_scope()
+        );
+    }
+
+    #[test]
+    fn struct_holding_a_local_reference_cannot_be_returned() {
+        let (escape, _) = integrated_safety_errors(
+            "struct Tok { i64 id; }\n\
+             struct View { &Tok r; }\n\
+             View bad() { Tok t; View w; w.r = &t; return w; }\n\
+             View good(&Tok p) { View w; w.r = p; return w; }",
+            43,
+        );
+        assert_eq!(escape.len(), 1, "only `bad` returns a local reference: {escape:?}");
+        assert_eq!(escape[0].message, crate::diagnostics::messages::returned_reference_escapes());
+    }
+
+    #[test]
     fn raw_pointer_slot_reference_cannot_escape_function() {
         let (escape, _) = integrated_safety_errors(
             "i32 global_value = 7;\n\
