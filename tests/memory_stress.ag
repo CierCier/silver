@@ -450,6 +450,7 @@ i32 leaf_id_of(OwnedLeaf leaf) {
 
 /// A variant with two owned payloads.
 enum LeafTwin { Both(OwnedLeaf, OwnedLeaf); Neither; }
+enum TwinParcel { Held(LeafTwin); Empty; }
 
 struct TwinHolder {
     i32 id;
@@ -743,6 +744,24 @@ void stress_conditional_and_borrowed_transfers() {
     }
     assert_eq_i32(leaf_drop_count, 4, "a payload named like its scrutinee drops each payload once");
     assert_eq_i64(leaf_bytes_freed, 3840, "a payload named like its scrutinee frees each payload once");
+
+    // An outer move binding owns the inner enum, so a nested arm can take one
+    // payload and the binding drops the other at the outer arm's end.
+    reset_owner_counters();
+    {
+        TwinParcel parcel = TwinParcel.Held(LeafTwin.Both(OwnedLeaf.new(73, 1), OwnedLeaf.new(74, 2)));
+        match parcel {
+            Held(move twin): {
+                match twin {
+                    Both(move left, right): { keep_leaf_id(move left); },
+                    Neither: {},
+                };
+            },
+            Empty: {},
+        };
+    }
+    assert_eq_i32(leaf_drop_count, 2, "a nested move from an owned payload drops each payload once");
+    assert_eq_i64(leaf_bytes_freed, 3, "a nested move from an owned payload frees each payload once");
 
     // An arm block drops its own locals and runs its defers at the arm's end.
     reset_owner_counters();
