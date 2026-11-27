@@ -2508,8 +2508,11 @@ impl TypeChecker {
                     {
                         return result;
                     }
-                    // Check if this is a known function name first
-                    if self.functions.contains_key(&ident.name) {
+                    // A local or parameter shadows a global function of the
+                    // same name for its whole scope.
+                    if self.functions.contains_key(&ident.name)
+                        && !self.is_local_binding(&ident.name)
+                    {
                         self.resolve_overload(ident, arguments, expr.span)
                     } else {
                         // Type-check the function expression — may be a fn pointer variable
@@ -8411,6 +8414,10 @@ impl TypeChecker {
         if duplicate {
             self.error(msg::duplicate_binding(name), span);
         }
+    }
+
+    fn is_local_binding(&self, name: &str) -> bool {
+        self.scopes.iter().any(|scope| scope.contains_key(name))
     }
 
     fn lookup(&self, name: &str) -> Option<(Type, bool)> {
