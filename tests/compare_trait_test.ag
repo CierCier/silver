@@ -17,6 +17,23 @@ impl Compare for Pair {
     }
 }
 
+// A value impl and a pointer impl that both declare `read` with one argument.
+// A call through `&cell` runs the overload whose parameter fits the argument.
+trait Peek { i64 read(self, i64 i); }
+
+struct Cell<T> {
+    T value;
+    i64 tag;
+}
+
+impl<T> Cell<T> {
+    i64 read(&self, bool more) { return more ? self.tag + 1 : self.tag; }
+}
+
+impl<T> Peek for Cell<T>* {
+    i64 read(self, i64 i) { return i + 100; }
+}
+
 i32 main() {
     STDOUT.write_str("=== Compare Trait Tests ===\n\n");
 
@@ -77,6 +94,17 @@ i32 main() {
         assert_eq_i64(-1, (i64)p1.compare(&p3), "Pair(1,2) < Pair(2,0) by first");
         assert_eq_i64(1, (i64)p3.compare(&p1), "Pair(2,0) > Pair(1,2) by first");
         assert_eq_i64(0, (i64)p1.compare(&p4), "Pair(1,2) == Pair(1,2)");
+    }
+
+    // --- Overload choice through a pointer receiver ---
+    STDOUT.write_str("\n--- Overload choice through a pointer receiver ---\n");
+    {
+        Cell<i64> c;
+        c.value = 1;
+        c.tag = 6;
+        i64 n = 5;
+        assert_eq_i64(7, (&c).read(true), "bool argument runs the value impl's read");
+        assert_eq_i64(105, (&c).read(n), "i64 argument runs the pointer impl's read");
     }
 
     return done();
