@@ -5192,16 +5192,18 @@ void typecheck_generic_call_drop_ownership(
                             &probe_ok);
         i += 1;
     }
-    types.probing.pop();
     DiagnosticBag moves = DiagnosticBag.new();
     bool moves_ok = !probe_ok || pushed == 0
         || move_flow_check(&probe_pool, types, symbols, root, &parameter_locals, &stmt_ids,
                            &moves);
     types.pop_subst(pushed);
+    // The function stays on the stack through the baseline check too, which
+    // starts a fresh body check whose own calls would otherwise reach it.
     if (!moves_ok) {
         typecheck_report_instance_moves(types, symbols, root, caller_env.cfg, function, body,
                                         &moves, diagnostics, ok);
     }
+    types.probing.pop();
     parameter_locals.drop();
     stmt_ids.drop();
 
