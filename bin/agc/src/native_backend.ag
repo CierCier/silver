@@ -1116,16 +1116,10 @@ i32 native_cache_command(CliMatches* cli, bool color) {
     return 2;
 }
 
-/// Returns true for the `run` command.
-bool native_is_run(Vec<String>* arguments) {
-    i64 i = 1;
-    while (i < arguments.len()) {
-        String* argument = arguments.get_ptr(i);
-        if (argument.equals("--")) { return false; }
-        if (argument.equals("run") || argument.equals("r")) { return true; }
-        i += 1;
-    }
-    return false;
+/// Returns true for the `run` command. Reads the parsed command so that an
+/// option value such as `-o run` is not mistaken for it.
+bool native_is_run(CliMatches* cli) {
+    return cli.command.equals("run");
 }
 
 /// What a native build writes at its output path. Every kind but
@@ -2859,7 +2853,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         return true;
     }
     bool links = output_kind == NativeOutputKind.Executable;
-    if (!links && native_is_run(arguments)) {
+    if (!links && native_is_run(cli)) {
         String message = run_needs_executable(native_output_kind_name(output_kind));
         STDERR.write_str("agc: error: ");
         STDERR.write_str(message.to_str());
@@ -3613,7 +3607,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     native_progress_complete(&progress);
     profiler_print_report();
     i32 exit_code = 0;
-    if (native_is_run(arguments)) {
+    if (native_is_run(cli)) {
         Command run_command = Command.new(output.to_str());
         native_append_run_args(arguments, &run_command);
         Result<ExitStatus, i64> run_result = run_command.status();
