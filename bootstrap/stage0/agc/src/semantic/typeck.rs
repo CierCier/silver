@@ -7103,9 +7103,6 @@ impl TypeChecker {
         result
     }
 
-    /// True for a bare type-parameter reference (`T`, not `Vec<T>` and not a
-    /// known concrete type) — the operands whose operators become implicit
-    /// guards on generic functions.
     /// True when `ty` (through pointers and references) names a type
     /// parameter of the item being checked.
     fn is_current_type_param(&self, ty: &Type) -> bool {
@@ -7122,6 +7119,9 @@ impl TypeChecker {
         }
     }
 
+    /// True for a bare type-parameter reference (`T`, not `Vec<T>` and not a
+    /// known concrete type) — the operands whose operators become implicit
+    /// guards on generic functions.
     fn is_bare_type_param(&self, ty: &Type) -> bool {
         match ty {
             Type::Named { path, generics } => {
@@ -8457,6 +8457,7 @@ impl TypeChecker {
         }
         None
     }
+
     /// True when `name` is bound in a local scope to a function-typed value.
     fn is_callable_local(&self, name: &str) -> bool {
         self.scopes
