@@ -1,0 +1,496 @@
+// libs/agc/src/backend/llvm/c_abi.ag — C ABI classification of by-value structs.
+//
+// A struct crossing an `extern "C"` call by value is classified per target
+// into a `CPass`: the LLVM type that carries it in registers, or one of two
+// by-reference forms. This mirrors stage0's codegen/abi.rs; each target places
+// a struct in the same registers and stack slots as clang.
+//
+// References:
+// - System V AMD64 psABI (https://gitlab.com/x86-psABIs/x86-64-ABI)
+// - AAPCS64 (https://github.com/ARM-software/abi-aa/blob/main/aapcs64/aapcs64.rst)
+import vendor.llvm.llvm;
+import std.mem.vec;
+import backend.llvm.context;
+import backend.llvm.stmt;
+import backend.llvm.target;
+
+/// `LLVMTypeKind` values the classifiers inspect.
+const u32 C_ABI_FLOAT_KIND = 2;
+const u32 C_ABI_DOUBLE_KIND = 3;
+const u32 C_ABI_INTEGER_KIND = 8;
+const u32 C_ABI_STRUCT_KIND = 10;
+const u32 C_ABI_ARRAY_KIND = 11;
+const u32 C_ABI_POINTER_KIND = 12;
+
+/// Argument registers SysV gives integer and SSE values.
+const u32 SYSV_INTEGER_REGISTERS = 6;
+const u32 SYSV_SSE_REGISTERS = 8;
+
+/// How one C argument or result crosses a call.
+enum CPassKind {
+    /// Not a struct: passes as its Silver lowering.
+    Scalar;
+    /// As a value of `carrier`, reinterpreted from the struct's bytes.
+    Direct;
+    /// As a copy in the caller's outgoing argument area (`byval`). Arguments only.
+    ByVal;
+    /// Through a pointer to a caller-owned copy. For a result, the hidden
+    /// leading `sret` slot.
+    Indirect;
+}
+
+/// The classification of one argument or result.
+struct CPass {
+    CPassKind kind;
+    /// The type the Silver declaration lowers to.
+    LLVMOpaqueType* source;
+    /// For `Direct`, the type that carries the value.
+    LLVMOpaqueType* carrier;
+    /// For `Direct`, the `alignstack` of a value that spills to the stack (0: none).
+    u64 stack_align;
+}
+
+/// The classification of a whole C signature.
+struct CCallPlan {
+    Vec<CPass> params;
+    CPass result;
+    /// True when the ABI signature differs from the source signature.
+    bool changed;
+}
+
+/// Which eightbytes of a SysV struct hold an integer or pointer.
+struct SysvEightbytes {
+    bool integer0;
+    bool integer1;
+    bool unsupported;
+}
+
+CPass c_pass_new(CPassKind kind, LLVMOpaqueType* source, LLVMOpaqueType* carrier, u64 stack_align) {
+    CPass pass;
+    pass.kind = kind;
+    pass.source = source;
+    pass.carrier = carrier;
+    pass.stack_align = stack_align;
+    return pass;
+}
+
+/// An integer of `bytes` bytes (at least one bit).
+LLVMOpaqueType* c_abi_int_of_bytes(LlvmContext* ctx, u64 bytes) {
+    u64 bits = bytes * 8;
+    if (bits == 0) { bits = 1; }
+    return LLVMIntTypeInContext(ctx.ctx, (u32)bits);
+}
+
+u64 c_abi_size(LlvmContext* ctx, LLVMOpaqueType* ty) {
+    return LLVMABISizeOfType(ctx.target_data, ty);
+}
+
+u64 c_abi_align(LlvmContext* ctx, LLVMOpaqueType* ty) {
+    return (u64)LLVMABIAlignmentOfType(ctx.target_data, ty);
+}
+
+/// Marks the eightbyte of every integer or pointer leaf of `ty`, placed at
+/// `offset` bytes. Floats leave their eightbyte SSE; any other leaf (vectors,
+/// `f80`) is not classified.
+void c_abi_sysv_mark(LlvmContext* ctx, LLVMOpaqueType* ty, u64 offset, SysvEightbytes* classes) {
+    u32 kind = LLVMGetTypeKind(ty);
+    if (kind == C_ABI_STRUCT_KIND) {
+        u32 count = LLVMCountStructElementTypes(ty);
+        u32 i = 0;
+        while (i < count) {
+            c_abi_sysv_mark(ctx, LLVMStructGetTypeAtIndex(ty, i),
+                offset + LLVMOffsetOfElement(ctx.target_data, ty, i), classes);
+            i += 1;
+        }
+        return;
+    }
+    if (kind == C_ABI_ARRAY_KIND) {
+        LLVMOpaqueType* element = LLVMGetElementType(ty);
+        u64 element_size = c_abi_size(ctx, element);
+        if (element_size == 0) { return; }
+        u64 count = LLVMGetArrayLength2(ty);
+        u64 i = 0;
+        while (i < count) {
+            c_abi_sysv_mark(ctx, element, offset + i * element_size, classes);
+            i += 1;
+        }
+        return;
+    }
+    if (kind == C_ABI_FLOAT_KIND || kind == C_ABI_DOUBLE_KIND) { return; }
+    if (kind == C_ABI_INTEGER_KIND || kind == C_ABI_POINTER_KIND) {
+        if (offset < 8) { classes.integer0 = true; } else { classes.integer1 = true; }
+        return;
+    }
+    classes.unsupported = true;
+}
+
+/// The register carrying eightbyte `index` (`bytes` long) of a SysV struct.
+LLVMOpaqueType* c_abi_sysv_eightbyte(LlvmContext* ctx, bool integer, u64 bytes) {
+    if (integer) { return c_abi_int_of_bytes(ctx, bytes); }
+    return bytes <= 4 ? LLVMFloatTypeInContext(ctx.ctx) : LLVMDoubleTypeInContext(ctx.ctx);
+}
+
+/// System V AMD64:
+///
+/// 1. Up to 16 bytes split into one or two eightbytes, each INTEGER when any
+///    integer or pointer lies in it, else SSE.
+/// 2. An argument whose eightbytes do not fit the remaining registers
+///    (`*integer_left`, `*sse_left`) passes `byval` whole, as clang does.
+/// 3. Larger structs pass `byval` and return through `sret`.
+CPass c_abi_sysv_pass(LlvmContext* ctx, LLVMOpaqueType* ty, bool result,
+                      u32* integer_left, u32* sse_left) {
+    u64 size = c_abi_size(ctx, ty);
+    if (size == 0) { return c_pass_new(CPassKind.Direct, ty, ty, 0); }
+    if (size > 16) {
+        return c_pass_new(result ? CPassKind.Indirect : CPassKind.ByVal, ty, (LLVMOpaqueType*)0, 0);
+    }
+    SysvEightbytes classes;
+    classes.integer0 = false;
+    classes.integer1 = false;
+    classes.unsupported = false;
+    c_abi_sysv_mark(ctx, ty, 0, &classes);
+    if (classes.unsupported) {
+        i8* text = LLVMPrintTypeToString(ty);
+        ctx.note_unresolved("c-struct-abi", text);
+        LLVMDisposeMessage(text);
+        return c_pass_new(CPassKind.Direct, ty, ty, 0);
+    }
+    bool two = size > 8;
+    u32 integer_needed = (classes.integer0 ? 1 : 0) + (two && classes.integer1 ? 1 : 0);
+    u32 sse_needed = (two ? 2 : 1) - integer_needed;
+    if (!result) {
+        if (integer_needed > *integer_left || sse_needed > *sse_left) {
+            return c_pass_new(CPassKind.ByVal, ty, (LLVMOpaqueType*)0, 0);
+        }
+        *integer_left -= integer_needed;
+        *sse_left -= sse_needed;
+    }
+    LLVMOpaqueType* low = c_abi_sysv_eightbyte(ctx, classes.integer0, two ? (u64)8 : size);
+    if (!two) { return c_pass_new(CPassKind.Direct, ty, low, 0); }
+    Vec<LLVMOpaqueType*> fields = Vec<LLVMOpaqueType*>.new();
+    fields.push(low);
+    fields.push(c_abi_sysv_eightbyte(ctx, classes.integer1, size - 8));
+    LLVMOpaqueType* carrier = LLVMStructTypeInContext(ctx.ctx, fields.data, 2, 0);
+    fields.drop();
+    return c_pass_new(CPassKind.Direct, ty, carrier, 0);
+}
+
+/// Counts the registers a SysV scalar argument of type `ty` takes.
+void c_abi_sysv_consume_scalar(LLVMOpaqueType* ty, u32* integer_left, u32* sse_left) {
+    u32 kind = LLVMGetTypeKind(ty);
+    u32* left = kind == C_ABI_FLOAT_KIND || kind == C_ABI_DOUBLE_KIND ? sse_left : integer_left;
+    if (*left > 0) { *left -= 1; }
+}
+
+/// Visits the leaves of a candidate homogeneous floating-point aggregate,
+/// setting `*base` to the member type and adding members to `*count`.
+/// Returns false at a leaf that is not `*base`.
+bool c_abi_hfa_visit(LLVMOpaqueType* ty, LLVMOpaqueType** base, u64* count) {
+    u32 kind = LLVMGetTypeKind(ty);
+    if (kind == C_ABI_FLOAT_KIND || kind == C_ABI_DOUBLE_KIND) {
+        if (*base == (LLVMOpaqueType*)0) { *base = ty; }
+        *count += 1;
+        return *base == ty;
+    }
+    if (kind == C_ABI_STRUCT_KIND) {
+        u32 fields = LLVMCountStructElementTypes(ty);
+        u32 i = 0;
+        while (i < fields) {
+            if (!c_abi_hfa_visit(LLVMStructGetTypeAtIndex(ty, i), base, count)) { return false; }
+            i += 1;
+        }
+        return true;
+    }
+    if (kind == C_ABI_ARRAY_KIND) {
+        // Walk the element once: a huge array must not cost a walk per
+        // element before the four-member limit rejects it.
+        u64 length = LLVMGetArrayLength2(ty);
+        if (length == 0) { return true; }
+        u64 members = 0;
+        if (!c_abi_hfa_visit(LLVMGetElementType(ty), base, &members)) { return false; }
+        if (members > 4 || length > 4) { *count += 5; } else { *count += members * length; }
+        return true;
+    }
+    return false;
+}
+
+/// The member type of an AAPCS64 HFA (one to four members of one float type,
+/// with no padding), or null when `ty` is not one. Sets `*count`.
+LLVMOpaqueType* c_abi_hfa_base(LlvmContext* ctx, LLVMOpaqueType* ty, u64* count) {
+    LLVMOpaqueType* base = (LLVMOpaqueType*)0;
+    *count = 0;
+    if (!c_abi_hfa_visit(ty, &base, count) || base == (LLVMOpaqueType*)0) {
+        return (LLVMOpaqueType*)0;
+    }
+    if (*count < 1 || *count > 4 || c_abi_size(ctx, ty) != c_abi_size(ctx, base) * *count) {
+        return (LLVMOpaqueType*)0;
+    }
+    return base;
+}
+
+/// AAPCS64 (aarch64 Linux):
+///
+/// 1. An HFA passes as `[N x T]` in consecutive FP registers and returns as
+///    itself in `s0`-`s3`/`d0`-`d3`.
+/// 2. Other structs of up to 16 bytes pass as `i64`, `[2 x i64]`, or `i128`
+///    when 16-byte aligned, and return as an exact-width integer when they
+///    fit 8 bytes.
+/// 3. Larger structs pass as a pointer to a caller copy (not `byval`) and
+///    return through `sret`, which AArch64 places in `x8`.
+CPass c_abi_aapcs64_pass(LlvmContext* ctx, LLVMOpaqueType* ty, bool result) {
+    u64 size = c_abi_size(ctx, ty);
+    if (size == 0) { return c_pass_new(CPassKind.Direct, ty, ty, 0); }
+    u64 members = 0;
+    LLVMOpaqueType* base = c_abi_hfa_base(ctx, ty, &members);
+    if (base != (LLVMOpaqueType*)0) {
+        if (result) { return c_pass_new(CPassKind.Direct, ty, ty, 0); }
+        return c_pass_new(CPassKind.Direct, ty, LLVMArrayType(base, (u32)members), 8);
+    }
+    if (size > 16) { return c_pass_new(CPassKind.Indirect, ty, (LLVMOpaqueType*)0, 0); }
+    bool wide = c_abi_align(ctx, ty) >= 16;
+    if (result && size <= 8) {
+        return c_pass_new(CPassKind.Direct, ty, c_abi_int_of_bytes(ctx, size), 0);
+    }
+    u64 unit = wide ? (u64)16 : (u64)8;
+    LLVMOpaqueType* unit_type = c_abi_int_of_bytes(ctx, unit);
+    u64 units = (size + unit - 1) / unit;
+    LLVMOpaqueType* carrier = units == 1 ? unit_type : LLVMArrayType(unit_type, (u32)units);
+    return c_pass_new(CPassKind.Direct, ty, carrier, 0);
+}
+
+/// Classifies a struct argument or result for the module's target.
+CPass c_abi_struct_pass(LlvmContext* ctx, LLVMOpaqueType* ty, bool result,
+                        u32* integer_left, u32* sse_left) {
+    if (ctx.c_struct_abi == CStructAbi.SysV64) {
+        return c_abi_sysv_pass(ctx, ty, result, integer_left, sse_left);
+    }
+    if (ctx.c_struct_abi == CStructAbi.Aapcs64) {
+        return c_abi_aapcs64_pass(ctx, ty, result);
+    }
+    i8* text = LLVMPrintTypeToString(ty);
+    ctx.note_unresolved("c-struct-abi-target", text);
+    LLVMDisposeMessage(text);
+    return c_pass_new(CPassKind.Direct, ty, ty, 0);
+}
+
+/// Returns true when `pass` changes the type or attributes of its slot.
+bool c_pass_changes_signature(CPass* pass) {
+    if (pass.kind == CPassKind.Scalar) { return false; }
+    return pass.kind != CPassKind.Direct || pass.carrier != pass.source || pass.stack_align != 0;
+}
+
+/// Classifies every fixed parameter and the result of C function type `source`.
+CCallPlan llvm_c_call_plan(LlvmContext* ctx, LLVMOpaqueType* source) {
+    CCallPlan plan;
+    plan.params = Vec<CPass>.new();
+    plan.changed = false;
+    u32 integer_left = SYSV_INTEGER_REGISTERS;
+    u32 sse_left = SYSV_SSE_REGISTERS;
+    LLVMOpaqueType* result = LLVMGetReturnType(source);
+    plan.result = c_pass_new(CPassKind.Scalar, result, result, 0);
+    if (LLVMGetTypeKind(result) == C_ABI_STRUCT_KIND) {
+        plan.result = c_abi_struct_pass(ctx, result, true, &integer_left, &sse_left);
+        // The hidden sret pointer takes the first integer register.
+        if (plan.result.kind == CPassKind.Indirect) { integer_left -= 1; }
+    }
+    if (c_pass_changes_signature(&plan.result)) { plan.changed = true; }
+    u32 count = LLVMCountParamTypes(source);
+    Vec<LLVMOpaqueType*> types = Vec<LLVMOpaqueType*>.new();
+    u32 i = 0;
+    while (i < count) {
+        types.push((LLVMOpaqueType*)0);
+        i += 1;
+    }
+    if (count > 0) { LLVMGetParamTypes(source, types.data); }
+    i = 0;
+    while (i < count) {
+        LLVMOpaqueType* param = types.get((i64)i);
+        CPass pass = c_pass_new(CPassKind.Scalar, param, param, 0);
+        if (LLVMGetTypeKind(param) == C_ABI_STRUCT_KIND) {
+            pass = c_abi_struct_pass(ctx, param, false, &integer_left, &sse_left);
+        } else {
+            c_abi_sysv_consume_scalar(param, &integer_left, &sse_left);
+        }
+        if (c_pass_changes_signature(&pass)) { plan.changed = true; }
+        plan.params.push(pass);
+        i += 1;
+    }
+    types.drop();
+    return move plan;
+}
+
+/// The LLVM function type that `plan` gives C function type `source`.
+LLVMOpaqueType* llvm_c_plan_function_type(LlvmContext* ctx, LLVMOpaqueType* source, CCallPlan* plan) {
+    LLVMOpaqueType* pointer = LLVMPointerTypeInContext(ctx.ctx, 0);
+    Vec<LLVMOpaqueType*> params = Vec<LLVMOpaqueType*>.new();
+    if (plan.result.kind == CPassKind.Indirect) { params.push(pointer); }
+    i64 i = 0;
+    while (i < plan.params.len()) {
+        CPass* pass = plan.params.get_ptr(i);
+        if (pass.kind == CPassKind.Direct) {
+            params.push(pass.carrier);
+        } else if (pass.kind == CPassKind.Scalar) {
+            params.push(pass.source);
+        } else {
+            params.push(pointer);
+        }
+        i += 1;
+    }
+    LLVMOpaqueType* result = plan.result.kind == CPassKind.Indirect
+        ? LLVMVoidTypeInContext(ctx.ctx)
+        : plan.result.kind == CPassKind.Direct ? plan.result.carrier : plan.result.source;
+    LLVMOpaqueType* function = LLVMFunctionType(result, params.data, (u32)params.len(),
+        LLVMIsFunctionVarArg(source));
+    params.drop();
+    return function;
+}
+
+/// Adds enum attribute `name` = `value` at attribute index `index`.
+void c_abi_add_enum_attribute(LlvmContext* ctx, LLVMOpaqueValue* target, bool call_site,
+                              u32 index, str name, u64 value) {
+    u32 kind = LLVMGetEnumAttributeKindForName((i8*)name, (u64)strlen(name));
+    LLVMOpaqueAttributeRef* attribute = LLVMCreateEnumAttribute(ctx.ctx, kind, value);
+    if (call_site) { LLVMAddCallSiteAttribute(target, index, attribute); }
+    else { LLVMAddAttributeAtIndex(target, index, attribute); }
+}
+
+/// Adds type attribute `name` of `ty` at attribute index `index`.
+void c_abi_add_type_attribute(LlvmContext* ctx, LLVMOpaqueValue* target, bool call_site,
+                              u32 index, str name, LLVMOpaqueType* ty) {
+    u32 kind = LLVMGetEnumAttributeKindForName((i8*)name, (u64)strlen(name));
+    LLVMOpaqueAttributeRef* attribute = LLVMCreateTypeAttribute(ctx.ctx, kind, ty);
+    if (call_site) { LLVMAddCallSiteAttribute(target, index, attribute); }
+    else { LLVMAddAttributeAtIndex(target, index, attribute); }
+}
+
+/// Puts the `sret`, `byval` and `alignstack` attributes of `plan` on a
+/// function declaration or a call of it. Both carry the same set, as LLVM
+/// reads them from the call site.
+void llvm_c_plan_attributes(LlvmContext* ctx, CCallPlan* plan, LLVMOpaqueValue* target, bool call_site) {
+    u32 offset = 1;
+    if (plan.result.kind == CPassKind.Indirect) {
+        c_abi_add_type_attribute(ctx, target, call_site, 1, "sret", plan.result.source);
+        c_abi_add_enum_attribute(ctx, target, call_site, 1, "align",
+            c_abi_align(ctx, plan.result.source));
+        offset = 2;
+    }
+    i64 i = 0;
+    while (i < plan.params.len()) {
+        CPass* pass = plan.params.get_ptr(i);
+        u32 index = (u32)i + offset;
+        if (pass.kind == CPassKind.ByVal) {
+            c_abi_add_type_attribute(ctx, target, call_site, index, "byval", pass.source);
+            c_abi_add_enum_attribute(ctx, target, call_site, index, "align",
+                c_abi_align(ctx, pass.source));
+        } else if (pass.kind == CPassKind.Direct && pass.stack_align != 0) {
+            c_abi_add_enum_attribute(ctx, target, call_site, index, "alignstack", pass.stack_align);
+        }
+        i += 1;
+    }
+}
+
+/// Declares C function `name` whose Silver declaration lowers to function
+/// type `source`, with by-value structs classified for the target. Keeps an
+/// existing declaration of `name`.
+LLVMOpaqueValue* llvm_declare_c_function(LlvmContext* ctx, str name, LLVMOpaqueType* source) {
+    LLVMOpaqueValue* existing = LLVMGetNamedFunction(ctx.module, name);
+    if (existing != (LLVMOpaqueValue*)0) { return existing; }
+    CCallPlan plan = llvm_c_call_plan(ctx, source);
+    if (!plan.changed) {
+        plan.params.drop();
+        return LLVMAddFunction(ctx.module, name, source);
+    }
+    LLVMOpaqueValue* function = LLVMAddFunction(ctx.module, name,
+        llvm_c_plan_function_type(ctx, source, &plan));
+    llvm_c_plan_attributes(ctx, &plan, function, false);
+    plan.params.drop();
+    LlvmCSignature signature;
+    signature.function = function;
+    signature.source = source;
+    ctx.c_signatures.push(signature);
+    return function;
+}
+
+/// The Silver-level function type of C function `function` when its ABI
+/// signature differs, else null.
+LLVMOpaqueType* llvm_c_source_signature(LlvmContext* ctx, LLVMOpaqueValue* function) {
+    i64 i = 0;
+    while (i < ctx.c_signatures.len()) {
+        LlvmCSignature* signature = ctx.c_signatures.get_ptr(i);
+        if (signature.function == function) { return signature.source; }
+        i += 1;
+    }
+    return (LLVMOpaqueType*)0;
+}
+
+/// The function type a call of C function `function` is prepared against:
+/// its Silver-level signature.
+LLVMOpaqueType* llvm_c_call_type(LlvmContext* ctx, LLVMOpaqueValue* function) {
+    LLVMOpaqueType* source = llvm_c_source_signature(ctx, function);
+    return source != (LLVMOpaqueType*)0 ? source : LLVMGlobalGetValueType(function);
+}
+
+/// Reinterprets the bytes of `value` as `to` through a stack slot large and
+/// aligned enough for both. A struct and its carrier may differ in size (a
+/// 3-byte struct passes as `i64` on AArch64), so neither may read past the other.
+LLVMOpaqueValue* llvm_c_reinterpret(LlvmContext* ctx, LLVMOpaqueValue* value, LLVMOpaqueType* to) {
+    LLVMOpaqueType* from = LLVMTypeOf(value);
+    if (from == to) { return value; }
+    LLVMOpaqueType* slot_type = c_abi_size(ctx, to) > c_abi_size(ctx, from) ? to : from;
+    LLVMOpaqueValue* slot = llvm_entry_alloca(ctx, slot_type, "c_abi_slot");
+    u64 align = c_abi_align(ctx, from);
+    if (c_abi_align(ctx, to) > align) { align = c_abi_align(ctx, to); }
+    LLVMSetAlignment(slot, (u32)align);
+    LLVMBuildStore(ctx.builder, value, slot);
+    return LLVMBuildLoad2(ctx.builder, to, slot, "c_abi_value");
+}
+
+/// Emits a call of C function `function` with `arguments` in their Silver
+/// form (as prepared against `llvm_c_call_type`). Converts each by-value
+/// struct to its C ABI form and returns the result in its Silver form.
+LLVMOpaqueValue* llvm_emit_c_call(LlvmContext* ctx, LLVMOpaqueValue* function,
+                                  Vec<LLVMOpaqueValue*>* arguments) {
+    LLVMOpaqueType* abi_type = LLVMGlobalGetValueType(function);
+    LLVMOpaqueType* source = llvm_c_source_signature(ctx, function);
+    if (source == (LLVMOpaqueType*)0) {
+        return LLVMBuildCall2(ctx.builder, abi_type, function, arguments.data,
+            (u32)arguments.len(), "");
+    }
+    CCallPlan plan = llvm_c_call_plan(ctx, source);
+    Vec<LLVMOpaqueValue*> abi_arguments = Vec<LLVMOpaqueValue*>.new();
+    LLVMOpaqueValue* result_slot = (LLVMOpaqueValue*)0;
+    if (plan.result.kind == CPassKind.Indirect) {
+        result_slot = llvm_entry_alloca(ctx, plan.result.source, "c_abi_sret");
+        LLVMSetAlignment(result_slot, (u32)c_abi_align(ctx, plan.result.source));
+        abi_arguments.push(result_slot);
+    }
+    i64 i = 0;
+    while (i < arguments.len()) {
+        LLVMOpaqueValue* argument = arguments.get(i);
+        if (i < plan.params.len()) {
+            CPass* pass = plan.params.get_ptr(i);
+            if (pass.kind == CPassKind.Direct) {
+                argument = llvm_c_reinterpret(ctx, argument, pass.carrier);
+            } else if (pass.kind == CPassKind.ByVal || pass.kind == CPassKind.Indirect) {
+                LLVMOpaqueValue* copy = llvm_entry_alloca(ctx, pass.source, "c_abi_copy");
+                LLVMSetAlignment(copy, (u32)c_abi_align(ctx, pass.source));
+                LLVMBuildStore(ctx.builder, argument, copy);
+                argument = copy;
+            }
+        }
+        abi_arguments.push(argument);
+        i += 1;
+    }
+    LLVMOpaqueValue* call = LLVMBuildCall2(ctx.builder, abi_type, function,
+        abi_arguments.data, (u32)abi_arguments.len(), "");
+    llvm_c_plan_attributes(ctx, &plan, call, true);
+    abi_arguments.drop();
+    LLVMOpaqueValue* result = call;
+    if (plan.result.kind == CPassKind.Indirect) {
+        result = LLVMBuildLoad2(ctx.builder, plan.result.source, result_slot, "c_abi_result");
+    } else if (plan.result.kind == CPassKind.Direct) {
+        result = llvm_c_reinterpret(ctx, call, plan.result.source);
+    }
+    plan.params.drop();
+    return result;
+}

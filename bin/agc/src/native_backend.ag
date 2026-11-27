@@ -24,6 +24,7 @@ import frontend.serialize;
 import frontend.lint;
 import frontend.messages;
 import backend.llvm.optimization;
+import backend.llvm.target;
 
 #[link(c)]
 #[link(pthread)]
@@ -337,9 +338,22 @@ void native_set_tool(String* tool, str environment_name) {
     }
 }
 
+/// The glibc dynamic loader of `triple` as (file name, standard path).
+str native_dynamic_linker_name(str triple) {
+    return llvm_target_arch(triple) == LlvmTargetArch.Aarch64
+        ? "ld-linux-aarch64.so.1" : "ld-linux-x86-64.so.2";
+}
+
+/// The standard install path of the glibc dynamic loader of `triple`.
+str native_dynamic_linker_standard_path(str triple) {
+    return llvm_target_arch(triple) == LlvmTargetArch.Aarch64
+        ? "/lib/ld-linux-aarch64.so.1" : "/lib64/ld-linux-x86-64.so.2";
+}
+
 /// Asks the C compiler (`SILVER_STAGE1_CC`, default `cc`) for the path of
-/// `ld-linux-x86-64.so.2`. Forks a child process. Returns false when unknown.
-bool native_discover_dynamic_linker(String* output) {
+/// the host's glibc loader `loader_name`. Forks a child process. Returns
+/// false when unknown.
+bool native_discover_dynamic_linker(String* output, str loader_name) {
     String compiler = String.from_str("cc");
     native_set_tool(&compiler, "SILVER_STAGE1_CC");
 
@@ -359,9 +373,11 @@ bool native_discover_dynamic_linker(String* output) {
         sys_close((i64)fds[0]);
         if (sys_dup2((i64)fds[1], 1) < 0) { sys_exit_group(127); }
         if (fds[1] != 1) { sys_close((i64)fds[1]); }
+        String query = String.from_str("-print-file-name=");
+        query.push_str(loader_name);
         str argv[3];
         argv[0] = compiler.to_str();
-        argv[1] = "-print-file-name=ld-linux-x86-64.so.2";
+        argv[1] = query.to_str();
         argv[2] = (str)0;
         i8** envp = silver_envp();
         sys_execve((i64)compiler.to_str(), (i64)&argv[0], (i64)envp);
@@ -1194,31 +1210,44 @@ void native_append_run_args(Vec<String>* arguments, Command* command) {
     }
 }
 
-/// Returns false, reporting an error, for a target the native backend does
-/// not support.
-bool native_validate_target(CliMatches* cli) {
-    str host_triple_raw = LLVMGetDefaultTargetTriple();
-    String host_triple = String.from_str(host_triple_raw);
-    LLVMDisposeMessage(host_triple_raw);
+/// Returns true when the native backend emits code for `triple`: x86_64 or
+/// aarch64 Linux.
+bool native_triple_supported(str triple) {
+    return llvm_target_arch(triple) != LlvmTargetArch.Unsupported && llvm_target_is_linux(triple);
+}
 
-    bool supported_host = host_triple.starts_with("x86_64-")
-        && host_triple.contains("-linux-");
-    Optional<String> requested_target = cli.value("target");
-    bool supported_target = true;
-    if (requested_target.is_some()) {
-        String target = requested_target.unwrap();
-        supported_target = target.equals(host_triple.to_str());
-        target.drop();
-    }
+/// The triple a native build targets: `--target`, else the LLVM host triple.
+String native_target_triple(CliMatches* cli) {
+    Optional<String> requested = cli.value("target");
+    if (requested.is_some()) { return requested.unwrap(); }
+    return llvm_host_triple();
+}
+
+/// Returns true when binaries for `triple` cannot run directly on the host.
+bool native_target_is_foreign(str triple) {
+    String host = llvm_host_triple();
+    bool foreign = llvm_target_arch(triple) != llvm_target_arch(host.to_str());
+    host.drop();
+    return foreign;
+}
+
+/// Returns false, reporting an error, for a host or target the native
+/// backend does not support.
+bool native_validate_target(CliMatches* cli) {
+    String host_triple = llvm_host_triple();
+    bool supported_host = native_triple_supported(host_triple.to_str());
+    String target = native_target_triple(cli);
+    bool supported_target = native_triple_supported(target.to_str());
 
     if (!supported_host) {
-        STDERR.write_str("agc: error: stage1 native backend requires an x86_64 Linux host\n");
+        STDERR.write_str("agc: error: stage1 native backend requires an x86_64 or aarch64 Linux host\n");
     } else if (!supported_target) {
-        STDERR.write_str("agc: error: stage1 native backend supports only the host target triple (");
-        STDERR.write_str(host_triple.to_str());
-        STDERR.write_str(")\n");
+        STDERR.write_str("agc: error: stage1 native backend supports only x86_64 and aarch64 Linux targets, not ");
+        STDERR.write_str(target.to_str());
+        STDERR.write_str("\n");
     }
     host_triple.drop();
+    target.drop();
     return supported_host && supported_target;
 }
 
@@ -2385,8 +2414,8 @@ void native_print_diagnostic(Diagnostic* diagnostic, str root_path, String* root
 bool native_compile_module_object(SyntaxTree* tree, TypeTable* types, Interner* names,
                                  SymbolTable* symbols, Vec<String>* source_paths,
                                  str root_path, String* root_source,
-                                 bool debug_mode, bool module_object, LlvmOptimization optimization,
-                                 u32 source_file_id, Vec<u32>* owned_source_ids,
+                                 bool debug_mode, bool module_object, str target_triple,
+                                 LlvmOptimization optimization, u32 source_file_id, Vec<u32>* owned_source_ids,
                                  Vec<u32>* standalone_source_ids, str object_path,
                                  String* cache_path, NativeBuildProgress* progress,
                                  str progress_target, bool* was_cached, i32* result,
@@ -2408,7 +2437,7 @@ bool native_compile_module_object(SyntaxTree* tree, TypeTable* types, Interner* 
         native_progress_start(progress, progress_target);
         Instant t0 = now();
         AstPool ast_pool = AstPool.new();
-        LlvmGenerator gen = LlvmGenerator.new("silver_native", optimization);
+        LlvmGenerator gen = LlvmGenerator.new("silver_native", target_triple, optimization);
         bool compile_ok = gen.compile(tree, &ast_pool, types, names, symbols,
             source_paths, debug_mode, module_object, source_file_id,
             owned_source_ids, standalone_source_ids);
@@ -2535,6 +2564,7 @@ struct NativeCompilePool {
     String* root_source;
     bool debug_mode;
     bool module_object;
+    str target_triple;
     LlvmOptimization optimization;
 }
 
@@ -2573,7 +2603,7 @@ bool native_compile_one(NativeCompileWorker* worker) {
     result.compiled = native_compile_module_object(pool.tree,
         &worker.symbols.types, &worker.symbols.names, &worker.symbols,
         pool.source_paths, pool.root_path, pool.root_source, pool.debug_mode,
-        pool.module_object, pool.optimization, job.source_file_id, &job.owned_source_ids,
+        pool.module_object, pool.target_triple, pool.optimization, job.source_file_id, &job.owned_source_ids,
         pool.standalone_source_ids, job.object_path.to_str(),
         &job.cache_path, &quiet, job.module_name.to_str(), &result.cached,
         &result.result, &result.ir_gen_ms, &result.verify_ms, &result.optimize_ms,
@@ -2602,8 +2632,8 @@ bool native_compile_jobs(SyntaxTree* tree, SymbolTable* symbols,
                          Vec<String>* source_paths, str root_path,
                          Vec<u32>* standalone_source_ids,
                          String* root_source, NativeBuildProgress* progress,
-                         bool debug_mode, bool module_object, LlvmOptimization optimization,
-                         i64 requested_jobs,
+                         bool debug_mode, bool module_object, str target_triple,
+                         LlvmOptimization optimization, i64 requested_jobs,
                          Vec<NativeCompileJob>* jobs,
                          Vec<NativeCompileResult>* results) {
     if (jobs.len() == 0) { return true; }
@@ -2619,6 +2649,7 @@ bool native_compile_jobs(SyntaxTree* tree, SymbolTable* symbols,
     pool.root_source = root_source;
     pool.debug_mode = debug_mode;
     pool.module_object = module_object;
+    pool.target_triple = target_triple;
     pool.optimization = optimization;
 
     i64 worker_count = thread_available_parallelism();
@@ -2856,12 +2887,9 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     CfgSet cfg = linux_defaults();
     if (optimization != LlvmOptimization.Unspecified
         && optimization != LlvmOptimization.O0) { cfg.set_release(); }
-    Optional<String> requested_target = cli.value("target");
-    if (requested_target.is_some()) {
-        String target = requested_target.unwrap();
-        cfg_apply_target(&cfg, target.to_str());
-        target.drop();
-    }
+    String target_triple = native_target_triple(cli);
+    cfg_apply_target(&cfg, target_triple.to_str());
+    cfg_set_lowering_target(target_triple.to_str());
     Vec<String> includes = Vec<String>.new();
     i64 ei = 0;
     while (ei < extra_includes.len()) {
@@ -3171,7 +3199,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     bool modules_ok = native_compile_jobs(&tree, &symbols, &source_paths,
         source_path, &standalone_source_ids, &source_copy, &progress,
         cfg.contains("debug"),
-        module_object, optimization, requested_jobs, &jobs, &results);
+        module_object, target_triple.to_str(), optimization, requested_jobs, &jobs, &results);
     if (profiler_verbose()) {
         i64 total_ir_gen = 0;
         i64 total_verify = 0;
@@ -3302,6 +3330,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         native_set_tool(&linker, "SILVER_STAGE1_CC");
     }
     Command cc_command = Command.new(linker.to_str());
+    bool foreign_target = native_target_is_foreign(target_triple.to_str());
     bool static_link = native_static_link_requested(arguments);
     bool has_dynamic_link_inputs = native_has_link_inputs(arguments) || link_libs.len() > 0;
     if (direct_linker && (linker.equals("lld") || linker.ends_with("/lld"))) {
@@ -3316,6 +3345,12 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         cc_command.arg(output.to_str());
         cc_command.arg("-nostdlib");
         cc_command.arg("-no-pie");
+        if (foreign_target) {
+            String target_flag = String.from_str("--target=");
+            target_flag.push_str(target_triple.to_str());
+            cc_command.arg(target_flag.to_str());
+            target_flag.drop();
+        }
     }
     i64 generated_index = 0;
     while (generated_index < object_paths.len()) {
@@ -3343,7 +3378,12 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
             String configured = dynamic_linker.unwrap();
             dl.push_str(configured.to_str());
             configured.drop();
-        } else if (direct_linker && !native_discover_dynamic_linker(&dl)) {
+        } else if (direct_linker && foreign_target) {
+            // ld.lld takes the machine from the objects; only the loader
+            // path is per architecture.
+            dl.push_str(native_dynamic_linker_standard_path(target_triple.to_str()));
+        } else if (direct_linker && !native_discover_dynamic_linker(&dl,
+                native_dynamic_linker_name(target_triple.to_str()))) {
             STDERR.write_str("agc: error: could not discover the dynamic linker; set SILVER_DYNAMIC_LINKER\n");
             dl.drop();
             linker.drop();
@@ -3506,6 +3546,16 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     i32 exit_code = 0;
     if (native_is_run(arguments)) {
         Command run_command = Command.new(output.to_str());
+        if (foreign_target) {
+            // A Linux binary for another architecture runs under qemu user mode.
+            String runner = String.from_str("qemu-");
+            runner.push_str(llvm_target_arch(target_triple.to_str()) == LlvmTargetArch.Aarch64
+                ? "aarch64" : "x86_64");
+            native_set_tool(&runner, "SILVER_TEST_RUNNER");
+            run_command = Command.new(runner.to_str());
+            run_command.arg(output.to_str());
+            runner.drop();
+        }
         native_append_run_args(arguments, &run_command);
         Result<ExitStatus, i64> run_result = run_command.status();
         if (run_result.is_err()) {

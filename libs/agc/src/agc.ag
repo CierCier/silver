@@ -29,3 +29,5 @@ import backend.llvm.context;
 import backend.llvm.expr;
 import backend.llvm.stmt;
 import backend.llvm.generator;
+import backend.llvm.target;
+import backend.llvm.c_abi;

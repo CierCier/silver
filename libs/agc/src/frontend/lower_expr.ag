@@ -1820,24 +1820,9 @@ impl ExprLowerer {
         }
         temp_args.drop();
 
-        String constraints = String.from_str("={rax}");
-        str reg_names[7];
-        reg_names[0] = "{rax}";
-        reg_names[1] = "{rdi}";
-        reg_names[2] = "{rsi}";
-        reg_names[3] = "{rdx}";
-        reg_names[4] = "{r10}";
-        reg_names[5] = "{r8}";
-        reg_names[6] = "{r9}";
-
-        i64 r = 0;
-        while (r < (i64)args_count && r < 7) {
-            constraints.push((u8)',');
-            constraints.push_str(reg_names[r]);
-            r += 1;
-        }
-        constraints.push_str(",~{rcx},~{r11}");
-
+        // Only the caller's clobbers: codegen adds the target's fixed register
+        // model (result, input and always-clobbered registers).
+        String constraints = String.new();
         if (cursor != (SyntaxNode*)0 && cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Comma) {
             cursor = cursor.next_sibling;
         }
@@ -1855,7 +1840,7 @@ impl ExprLowerer {
                         pattern.push_str(cstr);
                         pattern.push((u8)'}');
                         if (!constraints.contains(pattern.to_str())) {
-                            constraints.push((u8)',');
+                            if (constraints.len() > 0) { constraints.push((u8)','); }
                             constraints.push_str(pattern.to_str());
                         }
                         pattern.drop();
@@ -2876,7 +2861,7 @@ impl ExprLowerer {
                 && strcmp(name_node.text, "cfg") == 0) {
                 SyntaxNode* paren = name_node.next_sibling;
                 if (paren != (SyntaxNode*)0 && paren.kind == NodeKind.Parenthesized) {
-                    CfgSet cfg = linux_defaults();
+                    CfgSet cfg = cfg_lowering_defaults();
                     i64 val = cfg_argument_value(paren, &cfg);
                     *next_out = paren.next_sibling;
                     if (val == 1) {
@@ -4072,7 +4057,7 @@ impl ExprLowerer {
             return 0;
         }
 
-        CfgSet defaults = linux_defaults();
+        CfgSet defaults = cfg_lowering_defaults();
         i64 cfg_val = cfg_condition_value(cond_node, &defaults);
 
         SyntaxNode* next_after_then = then_node.next_sibling;
