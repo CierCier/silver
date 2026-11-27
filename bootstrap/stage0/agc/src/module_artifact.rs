@@ -693,6 +693,7 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
     // names get collision-safe hashed link names (mirroring the codegen
     // symbol rule: single-signature names keep the plain name).
     let mut function_arity: HashMap<String, Vec<(Vec<String>, String, bool)>> = HashMap::default();
+    let mut program_consts = crate::const_fold::ProgramConsts::new(program);
     for item in &program.items {
         if item.span.file != lib_file
             || matches!(item.visibility, ast::Visibility::Private)
@@ -1035,14 +1036,13 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                 } else {
                     ExportKind::Global
                 };
-                let const_value = if !is_mutable && let Some(init) = &global.initializer {
-                    match &init.kind.as_ref() {
-                        ast::ExpressionKind::Literal(ast::Literal::Integer(v)) => Some(v.to_string()),
-                        ast::ExpressionKind::Literal(ast::Literal::Bool(v)) => Some((*v as i32).to_string()),
-                        _ => None,
-                    }
-                } else {
+                // Importers fold constants defined from this one.
+                let const_value = if is_mutable || global.is_volatile {
                     None
+                } else {
+                    program_consts
+                        .value(&global.name.name)
+                        .map(|value| value.to_string())
                 };
                 exports.push(ModuleExport {
                     kind,
@@ -1638,5 +1638,29 @@ mod reference_abi_tests {
         };
         assert!(signature("Counter::bump").starts_with("fn(&mut Counter)"));
         assert!(signature("Counter::read").starts_with("fn(&Counter)"));
+    }
+
+    #[test]
+    fn exported_constants_record_folded_values() {
+        let dir = std::env::temp_dir().join(format!("agc-const-export-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("sizes.ag");
+        std::fs::write(
+            &path,
+            "const i32 DERIVED = BASE + 1;\nconst i32 BASE = 3;\nconst u8 WRAPPED = (u8)(BASE * 100);\ni32 counter = BASE;\n",
+        )
+        .expect("write module");
+        let artifact = ModuleArtifact::from_source(&path).expect("build artifact");
+        let _ = std::fs::remove_dir_all(&dir);
+        let value = |name: &str| {
+            artifact
+                .exports
+                .iter()
+                .find(|export| export.name == name)
+                .and_then(|export| export.const_value.clone())
+        };
+        assert_eq!(value("DERIVED").as_deref(), Some("4"));
+        assert_eq!(value("WRAPPED").as_deref(), Some("44"));
+        assert_eq!(value("counter"), None);
     }
 }
