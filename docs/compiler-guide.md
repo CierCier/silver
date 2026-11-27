@@ -106,12 +106,18 @@ accepted for text emissions and streams them to stdout.
 
 ### Native target contract
 
-Stage1's native backend uses the triple returned by
-`LLVMGetDefaultTargetTriple()` for its LLVM target machine. The supported
-runtime and linker path is x86_64 Linux. Omitting `--target` selects this host
-path. An explicit target must match the LLVM default triple exactly, including
-its vendor and environment components. The error reports the supported triple.
-Aliases and different ABI environments are not treated as equivalent.
+Stage1's native backend targets x86_64 and aarch64 Linux. Omitting `--target`
+selects the host triple from `LLVMGetDefaultTargetTriple()`; an explicit
+`--target` may name either architecture with a Linux OS component, from either
+host. The triple sets the LLVM target machine, the `arch.*`/`os.*` cfg keys
+(including `@cfg` inside function bodies), the inline `asm()` register model,
+the C struct ABI, and the glibc loader for dynamic links. `agc run` executes a
+binary for the other architecture under `qemu-<arch>` (or `SILVER_TEST_RUNNER`).
+
+By-value structs at `extern "C"` calls follow the System V AMD64 psABI or
+AAPCS64, as in stage0 ([`c_abi.ag`](../libs/agc/src/backend/llvm/c_abi.ag)):
+small structs travel in the registers clang uses, larger ones as `byval` copies
+or caller copies, and large results through `sret`.
 
 The restriction covers native source and workspace build/run commands, including
 object and module emission. Unsupported targets fail before source compilation
