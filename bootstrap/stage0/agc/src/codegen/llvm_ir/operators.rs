@@ -2595,7 +2595,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 }
 
 /// True when the type is an unsigned integer primitive.
-pub(crate) fn type_is_unsigned(ty: &ast::Type) -> bool {
+fn type_is_unsigned(ty: &ast::Type) -> bool {
     matches!(
         ty.kind.as_ref(),
         ast::TypeKind::Primitive(

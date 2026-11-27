@@ -8,6 +8,7 @@ pub mod builtin_macros;
 pub mod cache_store;
 pub mod cfg;
 pub mod codegen;
+pub(crate) mod const_fold;
 pub mod debug_info;
 pub mod diagnostics;
 pub mod driver;

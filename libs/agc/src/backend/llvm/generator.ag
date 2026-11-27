@@ -1882,8 +1882,10 @@ impl LlvmGenerator {
                     // Integer and bool initializers may combine literals and
                     // other constants: `const i32 B = A + 1;`.
                     i64 g_folded = 0;
+                    u32 g_folded_type = TYPE_UNKNOWN;
+                    ConstEval g_eval = ConstEval.new(types, names, tree.root);
                     if (eq_node != (SyntaxNode*)0 && const_eval_bits(g_type_id) > 0
-                        && const_eval_global(pool, types, names, tree.root, item, 0, &g_folded)) {
+                        && g_eval.fold_item(item, &g_folded_type, &g_folded)) {
                         g_init = LLVMConstInt(g_llvm_type, (u64)g_folded,
                             type_is_signed_integer(g_type_id) ? 1 : 0);
                     }

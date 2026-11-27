@@ -14,6 +14,7 @@ use crate::codegen::SilverGenerator;
 use crate::codegen::llvm_ir::LlvmIrGenerator;
 use crate::codegen::llvm_ir::VarInfo;
 use crate::codegen::{CodegenError, CodegenResult};
+use crate::const_fold::{ConstEnv, ConstIntShape, ConstOperand, fold_const_int};
 use crate::diagnostics::messages as msg;
 use crate::lexer::Span;
 use crate::parser::ast;
@@ -506,8 +507,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ast::ExpressionKind::Binary { .. } | ast::ExpressionKind::Identifier(_)
                 if target.is_int_type() =>
             {
-                let shape = self.const_int_shape(target_type);
-                let value = self.fold_const_int(expr, shape).ok_or_else(|| {
+                let value = self
+                    .const_int_shape(target_type)
+                    .and_then(|shape| Some((fold_const_int(self, expr, shape)?, shape)));
+                let (value, shape) = value.ok_or_else(|| {
                     CodegenError::with_span(
                         "global initializer must be a compile-time constant expression",
                         expr.span,
@@ -526,27 +529,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         self.const_cast_value_to_basic_type(value, target, &expr.span)
     }
 
-    /// Type and initializer of the immutable global `name`, unless it is
-    /// already being folded (a cycle).
-    fn const_reference(&self, name: &str) -> Option<(ast::Type, ast::Expression)> {
-        if self.const_eval_stack.iter().any(|active| active == name) {
-            return None;
-        }
-        self.const_global_initializers.get(name).cloned()
-    }
-
-    /// Bit width and signedness used to wrap folded integer constants of `ty`.
-    fn const_int_shape(&mut self, ty: &ast::Type) -> ConstIntShape {
-        let unsigned = super::operators::type_is_unsigned(ty)
-            || matches!(
-                ty.kind.as_ref(),
-                ast::TypeKind::Primitive(ast::PrimitiveType::Bool | ast::PrimitiveType::Char)
-            );
-        let bits = match self.lower_basic_type(ty) {
-            Ok(BasicTypeEnum::IntType(int_ty)) => int_ty.get_bit_width(),
-            _ => 128,
-        };
-        ConstIntShape { bits, unsigned }
+    /// Shape of integer or bool type `ty`, resolving aliases through the
+    /// lowered type (signed unless the type is an unsigned primitive).
+    fn const_int_shape(&mut self, ty: &ast::Type) -> Option<ConstIntShape> {
+        ConstIntShape::primitive(ty).or_else(|| match self.lower_basic_type(ty) {
+            Ok(BasicTypeEnum::IntType(int_ty)) => Some(ConstIntShape {
+                bits: int_ty.get_bit_width(),
+                unsigned: false,
+            }),
+            _ => None,
+        })
     }
 
     fn const_int_with_shape(
@@ -560,110 +552,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .const_int_from_string(&bits.to_string(), StringRadix::Decimal)
             .unwrap_or_else(|| int_ty.const_zero())
             .as_basic_value_enum()
-    }
-
-    /// Folds an integer or bool constant expression to its value in `shape`,
-    /// wrapping like the runtime operation. Operands are literals, other
-    /// constants, casts, and unary or binary operators; `None` means the
-    /// expression is not a compile-time constant (or divides by zero).
-    fn fold_const_int(&mut self, expr: &ast::Expression, shape: ConstIntShape) -> Option<i128> {
-        let value = match expr.kind.as_ref() {
-            ast::ExpressionKind::Literal(ast::Literal::Integer(value)) => *value,
-            ast::ExpressionKind::Literal(ast::Literal::Bool(value)) => i128::from(*value),
-            ast::ExpressionKind::Literal(ast::Literal::Char(value)) => {
-                i128::from(u32::from(*value))
-            }
-            ast::ExpressionKind::Identifier(identifier) => {
-                let name = &identifier.name;
-                if self.variables.iter().any(|scope| scope.contains_key(name)) {
-                    return None;
-                }
-                if let Some((ty, init)) = self.const_reference(name) {
-                    let own_shape = self.const_int_shape(&ty);
-                    self.const_eval_stack.push(name.clone());
-                    let value = self.fold_const_int(&init, own_shape);
-                    self.const_eval_stack.pop();
-                    value?
-                } else {
-                    // An imported constant whose module recorded its value.
-                    *self.global_const_values.get(&identifier.name)?
-                }
-            }
-            ast::ExpressionKind::Cast {
-                expression,
-                target_type,
-            } => {
-                let cast_shape = self.const_int_shape(target_type);
-                cast_shape.wrap(self.fold_const_int(expression, ConstIntShape::WIDE)?)
-            }
-            ast::ExpressionKind::Unary { operator, operand } => {
-                let inner = self.fold_const_int(operand, shape)?;
-                match operator {
-                    ast::UnaryOperator::Plus => inner,
-                    ast::UnaryOperator::Minus => inner.checked_neg()?,
-                    ast::UnaryOperator::Not if shape.bits == 1 => i128::from(inner == 0),
-                    ast::UnaryOperator::Not | ast::UnaryOperator::BitwiseNot => !inner,
-                    _ => return None,
-                }
-            }
-            ast::ExpressionKind::Binary {
-                left,
-                operator,
-                right,
-            } => {
-                use ast::BinaryOperator as Op;
-                // Comparisons and logical operators read operands in their
-                // own types; the result is a bool.
-                if matches!(
-                    operator,
-                    Op::Equal
-                        | Op::NotEqual
-                        | Op::Less
-                        | Op::Greater
-                        | Op::LessEqual
-                        | Op::GreaterEqual
-                        | Op::LogicalAnd
-                        | Op::LogicalOr
-                ) {
-                    let lhs = self.fold_const_int(left, ConstIntShape::WIDE)?;
-                    let rhs = self.fold_const_int(right, ConstIntShape::WIDE)?;
-                    let truth = match operator {
-                        Op::Equal => lhs == rhs,
-                        Op::NotEqual => lhs != rhs,
-                        Op::Less => lhs < rhs,
-                        Op::Greater => lhs > rhs,
-                        Op::LessEqual => lhs <= rhs,
-                        Op::GreaterEqual => lhs >= rhs,
-                        Op::LogicalAnd => lhs != 0 && rhs != 0,
-                        _ => lhs != 0 || rhs != 0,
-                    };
-                    return Some(i128::from(truth));
-                }
-                let lhs = self.fold_const_int(left, shape)?;
-                let rhs = self.fold_const_int(right, shape)?;
-                match operator {
-                    Op::Add => lhs.checked_add(rhs)?,
-                    Op::Subtract => lhs.checked_sub(rhs)?,
-                    Op::Multiply => lhs.checked_mul(rhs)?,
-                    Op::Divide => lhs.checked_div(rhs)?,
-                    Op::Modulo => lhs.checked_rem(rhs)?,
-                    Op::BitwiseAnd => lhs & rhs,
-                    Op::BitwiseOr => lhs | rhs,
-                    Op::BitwiseXor => lhs ^ rhs,
-                    Op::LeftShift | Op::RightShift => {
-                        let amount = u32::try_from(rhs).ok().filter(|n| *n < shape.bits)?;
-                        if matches!(operator, Op::LeftShift) {
-                            lhs << amount
-                        } else {
-                            lhs >> amount
-                        }
-                    }
-                    _ => return None,
-                }
-            }
-            _ => return None,
-        };
-        Some(shape.wrap(value))
     }
 
     pub(crate) fn generate_global_variable_item(
@@ -4309,39 +4197,37 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     }
 }
 
-/// Width and signedness of an integer constant being folded. Values are held
-/// as `i128`; `wrap` truncates them the way the runtime operation would.
-#[derive(Clone, Copy)]
-struct ConstIntShape {
-    bits: u32,
-    unsigned: bool,
-}
-
-impl ConstIntShape {
-    /// No truncation: operands whose type the context does not fix.
-    const WIDE: Self = Self {
-        bits: 128,
-        unsigned: false,
-    };
-
-    fn mask(self) -> u128 {
-        if self.bits >= 128 {
-            u128::MAX
-        } else {
-            (1u128 << self.bits) - 1
-        }
+impl ConstEnv for LlvmIrGenerator<'_> {
+    fn shape(&mut self, ty: &ast::Type) -> Option<ConstIntShape> {
+        self.const_int_shape(ty)
     }
 
-    fn wrap(self, value: i128) -> i128 {
-        if self.bits >= 128 {
-            return value;
+    /// A constant of this program, folded once, or an imported constant
+    /// whose module recorded its value. A local of the same name shadows it.
+    fn reference(&mut self, name: &str) -> Option<ConstOperand> {
+        if self.variables.iter().any(|scope| scope.contains_key(name)) {
+            return None;
         }
-        let truncated = (value as u128) & self.mask();
-        let sign_bit = 1u128 << (self.bits - 1);
-        if !self.unsigned && truncated & sign_bit != 0 {
-            (truncated | !self.mask()) as i128
-        } else {
-            truncated as i128
+        let Some((ty, init)) = self.const_global_initializers.get(name).cloned() else {
+            let value = *self.global_const_values.get(name)?;
+            let shape = self
+                .extern_globals
+                .get(name)
+                .and_then(ConstIntShape::primitive);
+            return Some(ConstOperand { value, shape });
+        };
+        let shape = self.const_int_shape(&ty)?;
+        if let Some(value) = self.const_int_cache.get(name) {
+            return Some(ConstOperand::typed(*value, shape));
         }
+        if self.const_eval_stack.iter().any(|active| active == name) {
+            return None;
+        }
+        self.const_eval_stack.push(name.to_string());
+        let value = fold_const_int(self, &init, shape);
+        self.const_eval_stack.pop();
+        let value = value?;
+        self.const_int_cache.insert(name.to_string(), value);
+        Some(ConstOperand::typed(value, shape))
     }
 }
