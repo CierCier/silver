@@ -311,7 +311,9 @@ const i32 WIDTH = COLUMNS * 8 + 2; // folded at compile time
 An integer or `bool` initializer may combine literals and other `const`
 integers or bools with casts and arithmetic, bitwise, shift, comparison and
 logical operators. Constants may be declared in any order and wrap to their
-declared type. Mutable globals, calls, and a cycle of constants are rejected.
+declared type. Each operation folds with the same widening and signedness as
+the same expression inside a function. Mutable globals, calls, and a cycle of
+constants are rejected.
 
 `mut i32 g_counter` is **not** valid — `mut` cannot start a type declaration (variables are mutable by default).
 

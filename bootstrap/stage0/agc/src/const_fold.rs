@@ -189,17 +189,13 @@ fn fold_const_binary(
     context: ConstIntShape,
 ) -> Option<ConstOperand> {
     use ast::BinaryOperator as Op;
-    // Mixed widths widen to the wider operand; at equal width unsigned wins.
+    // Like the runtime operation: mixed widths widen to the wider operand,
+    // and the left operand's signedness picks signed or unsigned compares,
+    // division and right shifts.
     let typed = match (lhs.shape, rhs.shape) {
         (Some(l), Some(r)) => Some(ConstIntShape {
             bits: l.bits.max(r.bits),
-            unsigned: if l.bits == r.bits {
-                l.unsigned || r.unsigned
-            } else if l.bits > r.bits {
-                l.unsigned
-            } else {
-                r.unsigned
-            },
+            unsigned: l.unsigned,
         }),
         (l, r) => l.or(r),
     };

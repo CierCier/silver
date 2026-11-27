@@ -5102,16 +5102,25 @@ bool const_eval_compares(u32 op) {
         || op == (u32)TokenKind.And || op == (u32)TokenKind.Or;
 }
 
-/// Type a binary operation on operands of types `a` and `b` folds in: the
-/// wider one, unsigned at equal width, or the typed one beside a bare
-/// literal (TYPE_UNKNOWN).
+/// Type a binary operation on operands of types `a` and `b` folds in, like
+/// the runtime operation: the wider width, unsigned when either operand is
+/// unsigned, or the typed one beside a bare literal (TYPE_UNKNOWN).
 u32 const_eval_common_type(u32 a, u32 b) {
     if (a == TYPE_UNKNOWN) { return b; }
     if (b == TYPE_UNKNOWN) { return a; }
     i64 a_bits = const_eval_bits(a);
     i64 b_bits = const_eval_bits(b);
-    if (a_bits != b_bits) { return a_bits > b_bits ? a : b; }
-    return type_is_unsigned_integer(b) ? b : a;
+    u32 wider = a_bits >= b_bits ? a : b;
+    if (type_is_unsigned_integer(wider)
+        || !(type_is_unsigned_integer(a) || type_is_unsigned_integer(b))) {
+        return wider;
+    }
+    i64 bits = const_eval_bits(wider);
+    if (bits == 8) { return TYPE_U8; }
+    if (bits == 16) { return TYPE_U16; }
+    if (bits == 32) { return TYPE_U32; }
+    if (bits == 64) { return TYPE_U64; }
+    return wider;
 }
 
 /// Folds `lhs op rhs` in the operands' type (`context` when both are bare

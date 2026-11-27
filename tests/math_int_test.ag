@@ -21,6 +21,10 @@ const u64 ALL_ONES_SQUARED = ALL_ONES * ALL_ONES;
 const i8 NARROW_TERM = 100;
 const i32 WIDENED_SUM = NARROW_TERM + WIDE_BASE;
 const bool LITERALS_EQUAL = (1 + 1) == 2;
+const i32 MINUS_ONE = -1;
+const u32 PLUS_ONE = 1;
+const bool MIXED_SIGN_LESS = MINUS_ONE < PLUS_ONE;
+const bool MIXED_SIGN_GREATER = PLUS_ONE > MINUS_ONE;
 
 i32 main() {
     STDOUT.write_str("=== Math Int Tests ===\n\n");
@@ -40,6 +44,12 @@ i32 main() {
         assert_eq_u64(1, ALL_ONES_SQUARED, "u64 multiplication wraps");
         assert_eq_i32(356, WIDENED_SUM, "i8 + i32 widens to i32");
         assert_true(LITERALS_EQUAL, "literal arithmetic inside a comparison");
+        i32 minus_one = MINUS_ONE;
+        u32 plus_one = PLUS_ONE;
+        assert_true(MIXED_SIGN_LESS == (minus_one < plus_one),
+                    "mixed-sign constant comparison matches runtime");
+        assert_true(MIXED_SIGN_GREATER == (plus_one > minus_one),
+                    "mixed-sign constant comparison matches runtime (reversed)");
     }
 
 
