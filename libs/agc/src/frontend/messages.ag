@@ -129,6 +129,29 @@ String llvm_optimization_failed(str detail) {
     return move message;
 }
 
+/// Diagnostic text for more than one output-kind flag. Returns an owned string.
+String conflicting_output_kind_flags() {
+    return String.from_str(
+        "conflicting flags: choose only one of --emit-llvm, -S, or -c (or use --emit=...)");
+}
+
+/// Diagnostic text: "native builds cannot emit '{}'; ...". Returns an owned string.
+String unsupported_native_output_kind(str kind) {
+    String message = String.from_str("native builds cannot emit '");
+    message.push_str(kind);
+    message.push_str("'; expected exe, obj, asm, llvm-ir, or module (use the lex, parse, ast, or check commands for frontend output)");
+    return move message;
+}
+
+/// Diagnostic text: "run needs an executable; '{}' output cannot be run".
+/// Returns an owned string.
+String run_needs_executable(str kind) {
+    String message = String.from_str("run needs an executable; '");
+    message.push_str(kind);
+    message.push_str("' output cannot be run");
+    return move message;
+}
+
 /// Returns the suffix ", did you mean '{}'?" for appending to a message.
 String did_you_mean(str suggestion) {
     String s = String.from_str(", did you mean '");

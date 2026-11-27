@@ -2536,6 +2536,32 @@ impl LlvmGenerator {
 
     /// Writes the module as an object file to `output_path`.
     bool emit_object_file(LlvmGenerator* self, str output_path, String* out_error) {
+        return self.emit_machine_file(output_path, LLVMCodeGenFileType.LLVMObjectFile, out_error);
+    }
+
+    /// Writes the module as target assembly to `output_path` ("-" is stdout).
+    bool emit_assembly_file(LlvmGenerator* self, str output_path, String* out_error) {
+        return self.emit_machine_file(output_path, LLVMCodeGenFileType.LLVMAssemblyFile, out_error);
+    }
+
+    /// Writes the module's textual IR to `output_path` ("-" is stdout).
+    bool emit_ir_file(LlvmGenerator* self, str output_path, String* out_error) {
+        i8* print_err = (i8*)0;
+        if (LLVMPrintModuleToFile(self.module, output_path, &print_err) != 0) {
+            if (print_err != (i8*)0) {
+                out_error.push_str(print_err);
+                LLVMDisposeMessage(print_err);
+            } else {
+                out_error.push_str("failed to write LLVM IR");
+            }
+            return false;
+        }
+        return true;
+    }
+
+    /// Runs the target machine's code generator into `output_path`.
+    bool emit_machine_file(LlvmGenerator* self, str output_path, LLVMCodeGenFileType file_type,
+                           String* out_error) {
         if (self.target_machine == (LLVMOpaqueTargetMachine*)0 || self.target_data == (LLVMTargetDataRef*)0) {
             out_error.push_str("failed to initialize target machine and data layout");
             return false;
@@ -2543,9 +2569,7 @@ impl LlvmGenerator {
 
         i8* emit_err = (i8*)0;
         i32 emit_res = LLVMTargetMachineEmitToFile(
-            self.target_machine, self.module, output_path,
-            LLVMCodeGenFileType.LLVMObjectFile,
-            &emit_err
+            self.target_machine, self.module, output_path, file_type, &emit_err
         );
 
         if (emit_res != 0) {
@@ -2553,7 +2577,7 @@ impl LlvmGenerator {
                 out_error.push_str(emit_err);
                 LLVMDisposeMessage(emit_err);
             } else {
-                out_error.push_str("failed to emit object file");
+                out_error.push_str("failed to emit machine code");
             }
             return false;
         }

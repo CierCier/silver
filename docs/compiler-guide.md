@@ -144,9 +144,11 @@ implements. An accepted spelling alone does not establish behavior.
 | `--manifest PATH`, `--bin NAME`, `--lib NAME` | Select supported package/workspace targets. Git dependencies remain unsupported. See the [workspace implementation](../bin/agc/src/workspace.ag). |
 | `-o FILE`, `--output FILE`, `--output=FILE` | Select the output path. |
 | `--emit=exe` or no emit option | Produce an executable. |
-| `--emit=object` or `--emit object` | Produce an ELF relocatable object. The advertised `--emit=obj` and `-c` currently produce executables instead. |
+| `--emit=obj`, `--emit=object`, `-c`, `--compile-only` | Produce one ELF relocatable object for the whole program, without linking. |
+| `-S`, `--emit-asm`, `--emit=asm` | Write target assembly for the whole program, without linking. |
+| `--emit-llvm`, `--emit=llvm-ir` | Write textual LLVM IR for the whole program (after the selected `-O` passes), without linking. `-o -` streams assembly or IR to stdout. |
 | `--emit=module` | Produce frontend AGM metadata plus its native object. Rich ABI/layout metadata parity remains open. `--shared` does not select shared native output. |
-| `-S`, `--emit-asm`, `--emit-llvm`, other `--emit` values | No requested-mode handling. `asm`, `llvm-ir`, `check`, `tokens`, `ast`, and `grammar` fall back to executable output on `build`. Use the frontend commands for checking and dumps. |
+| Output-kind conflicts and other `--emit` values | More than one of `-c`, `-S`, and `--emit-llvm` is rejected; `--emit` overrides them, as in stage0. `run` rejects unlinked output kinds. Native builds reject `--emit` values `check`, `tokens`, `ast`, and `grammar`; use the frontend commands for checking and dumps. Unlinked outputs default to `./<stem>.<ext>`. |
 | `-I DIR`, `-IDIR`, `--include DIR`, `--include=DIR`, `--include-path DIR` | Add source import roots. `--root DIR` is accepted but does not set a native import root. |
 | `--target TRIPLE` or `--target=TRIPLE` | Exact LLVM host triple only for native output, as described above. |
 | `--cfg KEY=VALUE,...` | Add cfg values; repeated flags are accepted. Explicit cfg values can coexist with derived values. |
