@@ -693,12 +693,94 @@ impl MoveFlow {
     /// by the owned array it is missing.
     void require(MoveFlow* self, FlowState* state, i64 place, Span span) {
         if (!state.reachable) { return; }
+        i64 gap = self.unusable_gap(state, place);
+        if (gap >= 0) { self.report_gap(state, place, gap, span); }
+    }
+
+    /// The part of `place` that keeps it from being used, as `require`
+    /// judges it, or -1.
+    i64 unusable_gap(MoveFlow* self, FlowState* state, i64 place) {
         i64 gap = self.first_gap(state, place, true);
         if (gap < 0 && !self.assigned_in_struct(state, place)) {
             if (self.zero_filled(state, place)) { gap = self.owned_array_gap(state, place); }
             if (gap < 0) { gap = self.first_gap(state, place, false); }
         }
-        if (gap >= 0) { self.report_gap(state, place, gap, span); }
+        return gap;
+    }
+
+    /// Requires the read `id`, whose path has a non-constant index into
+    /// the owned array `array`, to be usable on whichever element the index
+    /// picks. The path after the index is followed below every element with
+    /// a place, and the array's own entry stands for the elements without
+    /// one, so a field moved out of one element does not block reading a
+    /// sibling field. A step that cannot be followed requires the place
+    /// reached so far.
+    void require_any_element(MoveFlow* self, FlowState* state, i64 array, u32 id, Span span) {
+        if (!state.reachable) { return; }
+        Vec<u32> steps = Vec<u32>.new();
+        u32 index_id = self.element_steps(id, &steps);
+        // `resolve` stops at the deepest existing place, which may be an
+        // ancestor of the indexed array; only the array itself has elements
+        // the steps apply to.
+        bool exact = index_id != 0 && self.places.get(array).type_id
+            == self.types.resolve_subst(self.pool.get_expr(self.pool.get_expr(index_id).inner0).inferred_type);
+        if (!exact) {
+            steps.drop();
+            self.require(state, array, span);
+            return;
+        }
+        i64 gap = -1;
+        if (self.own_counts(array) && self.init_at(state, array) != FlowInit.Init) { gap = array; }
+        i64 element = self.places.get(array).first_child;
+        while (gap < 0 && element >= 0) {
+            gap = self.unusable_gap(state, self.follow_steps(element, &steps));
+            element = self.places.get(element).next_sibling;
+        }
+        steps.drop();
+        if (gap >= 0) { self.report_gap(state, array, gap, span); }
+    }
+
+    /// Collects into `steps`, outermost first, the field and index
+    /// expressions of chain `id` that come after its first non-constant
+    /// index, the one `resolve` stops at for a read. Returns that index
+    /// expression, or 0 when there is none.
+    u32 element_steps(MoveFlow* self, u32 id, Vec<u32>* steps) {
+        AstExpr expr = *self.pool.get_expr(id);
+        if (expr.kind != ExprKind.Field && expr.kind != ExprKind.Index) { return 0; }
+        u32 found = self.element_steps(expr.inner0, steps);
+        if (found != 0) {
+            steps.push(id);
+            return found;
+        }
+        if (expr.kind != ExprKind.Index) { return 0; }
+        AstExpr index = *self.pool.get_expr(expr.inner1);
+        bool constant = index.kind == ExprKind.Literal
+            && typecheck_literal_index(self.symbols.names.get(index.inner0)) >= 0;
+        return constant ? 0 : id;
+    }
+
+    /// The deepest existing place `steps` reach from `place`, as a read
+    /// resolves a path.
+    i64 follow_steps(MoveFlow* self, i64 place, Vec<u32>* steps) {
+        i64 i = 0;
+        while (i < steps.len()) {
+            AstExpr step = *self.pool.get_expr(steps.get(i));
+            FlowPlace info = self.places.get(place);
+            i64 next = -1;
+            if (step.kind == ExprKind.Field) {
+                next = self.child(place, step.aux, false);
+            } else {
+                AstExpr index = *self.pool.get_expr(step.inner1);
+                if (index.kind != ExprKind.Literal) { return place; }
+                i64 value = typecheck_literal_index(self.symbols.names.get(index.inner0));
+                if (value < 0) { return place; }
+                next = self.child(place, (u32)value, info.is_array && info.expanded);
+            }
+            if (next < 0) { return place; }
+            place = next;
+            i += 1;
+        }
+        return place;
     }
 
     // ---- Locals and places ------------------------------------------------
@@ -826,7 +908,7 @@ impl MoveFlow {
     /// may initialize its target, so the place holds a value afterwards; the
     /// runtime state records what the callee actually did.
     void use_place(MoveFlow* self, FlowState* state, i64 place, FlowUse use,
-                   bool unknown_element, Span span) {
+                   bool unknown_element, u32 id, Span span) {
         if (!state.reachable) { return; }
         if (use == FlowUse.BorrowMut) {
             i64 moved = self.first_gap(state, place, true);
@@ -836,8 +918,13 @@ impl MoveFlow {
             }
             return;
         }
+        FlowPlace info = self.places.get(place);
+        if (unknown_element && use == FlowUse.Read && info.is_array && !info.is_copy) {
+            self.require_any_element(state, place, id, span);
+            return;
+        }
         self.require(state, place, span);
-        if (use != FlowUse.Consume || self.places.get(place).is_copy) { return; }
+        if (use != FlowUse.Consume || info.is_copy) { return; }
         if (unknown_element) {
             self.weaken_tree(state, place, span);
         } else {
@@ -889,7 +976,7 @@ impl MoveFlow {
                 self.walk_subscripts(state, id);
                 bool copy = expr.inferred_type != TYPE_UNKNOWN && self.is_copy(expr.inferred_type);
                 self.use_place(state, place, copy && use == FlowUse.Consume ? FlowUse.Read : use,
-                               unknown_element, expr.span);
+                               unknown_element, id, expr.span);
                 return;
             }
             if (expr.kind == ExprKind.Field) {
@@ -1091,7 +1178,7 @@ impl MoveFlow {
             self.join(state, &missed);
             if (arm.moves_payload && scrutinee >= 0) {
                 self.use_place(&branch, scrutinee, FlowUse.Consume, unknown_element,
-                               self.pool.get_expr(expr.inner0).span);
+                               expr.inner0, self.pool.get_expr(expr.inner0).span);
             }
             if (arm.body_stmt_id != 0) {
                 self.walk_stmt(&branch, arm.body_stmt_id);
