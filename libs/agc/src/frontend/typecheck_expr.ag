@@ -2813,7 +2813,7 @@ u32 typecheck_method_return_type_for_call(AstPool* pool, SyntaxNode* root,
     i64 best_score = -1;
     u32 best_return_type = typecheck_method_return_type_at_depth(pool, root, types,
         receiver_type, resolved_receiver, owner_name, receiver_depth, method_name,
-        param_count, args_start, static_method, &best_score);
+        param_count, args_start, static_method, false, &best_score);
     if (best_return_type == TYPE_UNKNOWN && receiver_depth > 0) {
         return typecheck_method_return_type_for_call(pool, root, types, resolved_receiver,
             method_name, param_count, args_start, static_method);
@@ -2824,7 +2824,7 @@ u32 typecheck_method_return_type_for_call(AstPool* pool, SyntaxNode* root,
         i64 value_score = -1;
         u32 value_return_type = typecheck_method_return_type_at_depth(pool, root, types,
             resolved_receiver, resolved_receiver, owner_name, 0, method_name,
-            param_count, args_start, static_method, &value_score);
+            param_count, args_start, static_method, true, &value_score);
         if (value_return_type != TYPE_UNKNOWN && value_score > best_score) {
             return value_return_type;
         }
@@ -2832,14 +2832,42 @@ u32 typecheck_method_return_type_for_call(AstPool* pool, SyntaxNode* root,
     return best_return_type;
 }
 
+/// Whether `impl_item`'s target type arguments fit those of `receiver`, as
+/// monomorphization requires before it picks a method from that impl.
+bool typecheck_impl_fits_receiver_args(SyntaxNode* root, TypeTable* types,
+                                       SyntaxNode* impl_item, SyntaxNode* target,
+                                       u32 receiver) {
+    TypeEntry* entry = types.get(receiver);
+    Vec<u32> arg_ids = Vec<u32>.new();
+    i64 i = 0;
+    while (i < entry.count) {
+        arg_ids.push(types.resolve_subst(types.type_args.get(entry.inner + (u32)i)));
+        i += 1;
+    }
+    Vec<u32> declared = Vec<u32>.new();
+    mono_impl_type_parameters(impl_item, types, &declared);
+    if (declared.len() == 0) {
+        mono_collect_struct_parameters(root, target.text, types, &declared);
+    }
+    Vec<u32> bound = Vec<u32>.new();
+    bool fits = mono_match_target_args(target, types, &declared, &arg_ids, &bound);
+    bound.drop();
+    declared.drop();
+    arg_ids.drop();
+    return fits;
+}
+
 /// Returns the return type of the best-fitting `method_name` among impls of
 /// `owner_name` at `receiver_depth`, and its argument score in `*out_score`.
+/// With `check_args`, impls whose target type arguments do not fit the
+/// receiver's are skipped.
 u32 typecheck_method_return_type_at_depth(AstPool* pool, SyntaxNode* root,
                                           TypeTable* types, u32 receiver_type,
                                           u32 resolved_receiver, str owner_name,
                                           u32 receiver_depth, str method_name,
                                           i64 param_count, u32 args_start,
-                                          bool static_method, i64* out_score) {
+                                          bool static_method, bool check_args,
+                                          i64* out_score) {
     u32 best_return_type = TYPE_UNKNOWN;
     i64 best_score = -1;
     SyntaxNode* item = root.first_child;
@@ -2847,7 +2875,9 @@ u32 typecheck_method_return_type_at_depth(AstPool* pool, SyntaxNode* root,
         if (item.kind == NodeKind.Impl) {
             SyntaxNode* target = impl_target_identifier(item);
             if (target != (SyntaxNode*)0 && strcmp(target.text, owner_name) == 0
-                && impl_target_pointer_depth(item) == receiver_depth) {
+                && impl_target_pointer_depth(item) == receiver_depth
+                && (!check_args || typecheck_impl_fits_receiver_args(
+                    root, types, item, target, resolved_receiver))) {
                 SyntaxNode* block = item.first_child;
                 while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
                     block = block.next_sibling;
