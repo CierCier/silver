@@ -2797,6 +2797,23 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
+    /// Lowers `expr` where the surrounding construct supplies `target`, such
+    /// as a return type or a parameter type. A brace initializer has no type
+    /// of its own, so it takes `target`; every other expression lowers as
+    /// usual and is left for the caller to cast.
+    pub(crate) fn emit_value_with_target(
+        &mut self,
+        expr: &ast::Expression,
+        target: Option<&ast::Type>,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        match (expr.kind.as_ref(), target) {
+            (ast::ExpressionKind::Initializer { items }, Some(target)) => {
+                self.emit_typed_initializer_value(items, target, &expr.span)
+            }
+            _ => self.emit_expression_value(expr),
+        }
+    }
+
     pub(crate) fn emit_expression_value_for_expected(
         &mut self,
         expr: &ast::Expression,

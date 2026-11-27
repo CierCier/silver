@@ -3374,7 +3374,15 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
             }
             field_index += 1;
         }
-        inferred = types.get_named(symbols.names.get(expr.inner0));
+        // A brace initializer has no type of its own; the target it was
+        // checked against (see `typecheck_adopt_literal_target`) names it.
+        if (expr.inner0 != 0) {
+            inferred = types.get_named(symbols.names.get(expr.inner0));
+        } else if (expr.inferred_type != 0 && types.get(expr.inferred_type).kind == TypeKind.Named) {
+            inferred = expr.inferred_type;
+        } else {
+            inferred = TYPE_UNKNOWN;
+        }
     } else if (expr.kind == ExprKind.Asm) {
         AstAsm* asm_info = pool.asms.get_ptr((i64)expr.aux);
         i64 i = 0;
@@ -3711,6 +3719,8 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 TypeKind parameter_kind = parameter_entry.kind;
                 u32 arg_id = pool.args.get((i64)expr.inner1 + i);
                 u32 actual_type = infer_expr(pool, types, symbols, root, env, arg_id, diagnostics, ok);
+                actual_type = typecheck_adopt_literal_target(pool, types, symbols, root, arg_id,
+                    actual_type, parameter_type, diagnostics, ok);
                 typecheck_char_pointer_argument(types, parameter_type, actual_type,
                     pool.get_expr(arg_id).span, diagnostics, ok);
                 if (parameter_kind != TypeKind.Pointer
@@ -3821,7 +3831,8 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                                 ? typecheck_parameter_base_type_id(types, param)
                                 : typecheck_parameter_type_id(types, param));
                         u32 arg_expr_id = pool.args.get((i64)expr.inner1 + i);
-                        u32 actual_arg_type = arg_types.get(i);
+                        u32 actual_arg_type = typecheck_adopt_literal_target(pool, types,
+                            symbols, root, arg_expr_id, arg_types.get(i), expected_arg_type, diagnostics, ok);
                         typecheck_char_pointer_argument(types, expected_arg_type, actual_arg_type,
                             pool.get_expr(arg_expr_id).span, diagnostics, ok);
                         TypeEntry* expected_entry = types.get(expected_arg_type);
@@ -4082,7 +4093,8 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 u32 expected_arg_type = typecheck_method_parameter_type_for_call(
                     pool, root, types, receiver_type, method_name, total_param_count,
                     expr.inner1, static_method, parameter_index, (bool*)0);
-                u32 arg_type = pool.get_expr(arg_id).inferred_type;
+                u32 arg_type = typecheck_adopt_literal_target(pool, types, symbols, root,
+                    arg_id, pool.get_expr(arg_id).inferred_type, expected_arg_type, diagnostics, ok);
                 typecheck_char_pointer_argument(types, expected_arg_type, arg_type,
                     pool.get_expr(arg_id).span, diagnostics, ok);
                 AstExpr* argument = pool.get_expr(arg_id);
@@ -4427,6 +4439,98 @@ void typecheck_reject_defer_control(AstPool* pool, u32 node_id, bool is_stmt,
     }
 }
 
+/// Names the struct literal `value_id` after `target_type`, the type its
+/// position expects (an assignment target, a return type, or a parameter),
+/// when the literal has no declared type of its own: a brace initializer,
+/// or a nested literal named after a generic field's type parameter (`U` in
+/// `Box<U>`). Returns the literal's type, or `value_type` otherwise.
+u32 typecheck_adopt_literal_target(AstPool* pool, TypeTable* types, SymbolTable* symbols,
+                                   SyntaxNode* root, u32 value_id, u32 value_type,
+                                   u32 target_type, DiagnosticBag* diagnostics, bool* ok) {
+    AstExpr* value_expr = pool.get_expr(value_id);
+    if (value_expr.kind != ExprKind.StructLit || target_type == TYPE_UNKNOWN) {
+        return value_type;
+    }
+    bool untyped_literal = value_expr.inner0 == 0
+        || (find_item_by_name(root, NodeKind.Struct, symbols.names.get(value_expr.inner0))
+                == (SyntaxNode*)0
+            && find_enum_item(root, symbols.names.get(value_expr.inner0)) == (SyntaxNode*)0);
+    if (!untyped_literal) { return value_type; }
+    u32 resolved_target = types.resolve_subst(target_type);
+    // Enums are named types too, but a brace initializer only builds a struct.
+    bool enum_target = types.get(resolved_target).kind == TypeKind.Named
+        && find_enum_item(root, types.names.get(types.get(resolved_target).name_id))
+            != (SyntaxNode*)0;
+    if (types.get(resolved_target).kind != TypeKind.Named || enum_target) {
+        if (value_expr.inner0 == 0 && resolved_target != TYPE_UNKNOWN) {
+            diagnostics.error(value_expr.span,
+                initializer_target_not_struct(types.type_name(resolved_target)));
+            *ok = false;
+        }
+        return value_type;
+    }
+    value_expr.inferred_type = resolved_target;
+    if (value_expr.inner0 == 0) {
+        typecheck_brace_initializer_fields(pool, types, symbols, root, value_id,
+                                           resolved_target, diagnostics, ok);
+    }
+    return resolved_target;
+}
+
+/// Checks the entries of brace initializer `literal_id` against the fields of
+/// struct `target`: each designated name must exist, positional entries must
+/// not outnumber the fields, and each value must fit its field's type. A
+/// nested brace initializer adopts and checks its field's type in turn.
+void typecheck_brace_initializer_fields(AstPool* pool, TypeTable* types, SymbolTable* symbols,
+                                        SyntaxNode* root, u32 literal_id, u32 target,
+                                        DiagnosticBag* diagnostics, bool* ok) {
+    str target_name = types.names.get(types.get(target).name_id);
+    SyntaxNode* item = find_item_by_name(root, NodeKind.Struct, target_name);
+    if (item == (SyntaxNode*)0) { return; }
+    u32 fields_start = pool.get_expr(literal_id).inner1;
+    i64 field_count = (i64)pool.get_expr(literal_id).aux;
+    i64 index = 0;
+    while (index < field_count) {
+        u32 name_id = pool.args.get((i64)fields_start + index * 2);
+        u32 val_id = pool.args.get((i64)fields_start + index * 2 + 1);
+        Span value_span = pool.get_expr(val_id).span;
+        str field_name = (str)0;
+        if (name_id != 0) {
+            field_name = symbols.names.get(name_id);
+        } else {
+            SyntaxNode* positional = struct_field_name_at(item, index);
+            if (positional == (SyntaxNode*)0) {
+                diagnostics.error(value_span,
+                    initializer_too_many_entries(types.type_name(target)));
+                *ok = false;
+                return;
+            }
+            field_name = positional.text;
+        }
+        u32 field_type = struct_field_type_id(types, item, field_name);
+        if (field_type == TYPE_UNKNOWN) {
+            diagnostics.error(value_span, unknown_field(field_name, types.type_name(target)));
+            *ok = false;
+        } else {
+            field_type = types.resolve_subst(
+                resolve_generic_member_type(types, root, target, field_type));
+            u32 value_type = typecheck_adopt_literal_target(pool, types, symbols, root, val_id,
+                pool.get_expr(val_id).inferred_type, field_type, diagnostics, ok);
+            if (value_type != TYPE_UNKNOWN
+                && !typecheck_type_is_unresolved(types, field_type, 0)
+                && !types_match_value(types, field_type, value_type,
+                                      expr_is_literal(pool, val_id))
+                && !typecheck_tuple_literal_fits(pool, root, types, field_type, val_id)
+                && !typecheck_implicit_cast(root, types, value_type, field_type)) {
+                diagnostics.error(value_span, type_mismatch(types.type_name(field_type),
+                                                            types.type_name(value_type)));
+                *ok = false;
+            }
+        }
+        index += 1;
+    }
+}
+
 // Resolve local initializers with the same expression checker as function bodies.
 // The environment is supplied by the caller's scope model.
 /// Returns the type of a declaration initializer.
@@ -4565,23 +4669,8 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
     } else if (stmt.kind == StmtKind.Assign) {
         u32 target_type = infer_expr(pool, types, symbols, root, env, stmt.inner0, diagnostics, ok);
         u32 val_type = infer_expr(pool, types, symbols, root, env, stmt.inner1, diagnostics, ok);
-        AstExpr* value_expr = pool.get_expr(stmt.inner1);
-        // A nested literal in a generic field is named after the field's type
-        // parameter (`U` in `Box<U>`), not a declared type: it takes the target's.
-        bool untyped_literal = value_expr.kind == ExprKind.StructLit
-            && (value_expr.inner0 == 0
-                || (find_item_by_name(root, NodeKind.Struct, symbols.names.get(value_expr.inner0))
-                        == (SyntaxNode*)0
-                    && find_enum_item(root, symbols.names.get(value_expr.inner0))
-                        == (SyntaxNode*)0));
-        if (untyped_literal) {
-            u32 resolved_target = types.resolve_subst(target_type);
-            TypeEntry* target_entry = types.get(resolved_target);
-            if (target_entry.kind == TypeKind.Named) {
-                value_expr.inferred_type = resolved_target;
-                val_type = resolved_target;
-            }
-        }
+        val_type = typecheck_adopt_literal_target(pool, types, symbols, root, stmt.inner1,
+                                                  val_type, target_type, diagnostics, ok);
         if (pool.get_expr(stmt.inner1).kind != ExprKind.Move) {
             typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
                                                stmt.inner1, diagnostics, ok);
@@ -4606,6 +4695,8 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
         u32 expr_id = stmt.inner0;
         if (expr_id != 0) {
             u32 actual_type = infer_expr(pool, types, symbols, root, env, expr_id, diagnostics, ok);
+            actual_type = typecheck_adopt_literal_target(pool, types, symbols, root, expr_id,
+                                                         actual_type, expected_return, diagnostics, ok);
             TypeEntry* return_entry = types.get(expected_return);
             if (return_entry.kind != TypeKind.Pointer && return_entry.kind != TypeKind.Reference
                 && pool.get_expr(expr_id).kind != ExprKind.Move) {
