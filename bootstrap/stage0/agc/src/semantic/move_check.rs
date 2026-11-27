@@ -903,6 +903,7 @@ pub fn analyze_program_with_imports(
         current_plan: super::init_plan::FunctionInitPlan::default(),
         owner_bindings: FxHashMap::default(),
         locked_bindings: FxHashMap::default(),
+        borrowed_payloads: FxHashSet::default(),
         loops: Vec::new(),
         defers: Vec::new(),
     };
@@ -954,6 +955,9 @@ struct MoveChecker {
     /// Owning payload bindings of a match on a lock block's value, with their
     /// types: the Mutex still owns what they name.
     locked_bindings: FxHashMap<String, ast::Type>,
+    /// Payload bindings of the enclosing match arms that borrow their
+    /// payload: the matched enum still owns it.
+    borrowed_payloads: FxHashSet<String>,
     /// Enclosing loops of the statement being checked, innermost last.
     loops: Vec<LoopFrame>,
     /// Registered `defer` statements with the scope depth that owns them.
@@ -989,6 +993,7 @@ impl OwnerLayouts {
             current_plan: Default::default(),
             owner_bindings: FxHashMap::default(),
             locked_bindings: FxHashMap::default(),
+            borrowed_payloads: FxHashSet::default(),
             loops: Vec::new(),
             defers: Vec::new(),
         };
@@ -1898,6 +1903,7 @@ impl MoveChecker {
         var_types: &mut FxHashMap<String, ast::Type>,
     ) {
         let name = &identifier.name;
+        self.borrowed_payloads.remove(name);
         let old_locked = self.locked_bindings.remove(name);
         if let Some(ty) = ty {
             let old_owner = self.owner_bindings.remove(name);
@@ -3029,9 +3035,31 @@ impl MoveChecker {
                 let mut merged: Option<State> = None;
                 // A heap container keeps owning its elements, so an arm cannot
                 // move payloads out of one, as `move v[i]` cannot.
-                let container_move = arms.iter().any(|arm| Self::pattern_has_move(&arm.pattern))
-                    && self.reject_container_element_move(expression, var_types);
+                let moves = arms.iter().any(|arm| Self::pattern_has_move(&arm.pattern));
+                let container_move = moves && self.reject_container_element_move(expression, var_types);
+                if moves && !container_move {
+                    self.reject_borrowed_scrutinee_move(expression);
+                    // A field whose holder has its own destructor stays whole.
+                    if let Some((root, path)) = expr_root_and_path(expression)
+                        && !path.is_empty()
+                    {
+                        self.reject_partial_move_from_drop_ancestor(
+                            &root,
+                            &path,
+                            expression.span,
+                            var_types,
+                        );
+                    }
+                }
+                // An arm after an unguarded catch-all never runs; codegen
+                // emits none, so it neither checks nor joins.
+                let mut caught = false;
+                let mut guarded = false;
                 for arm in arms {
+                    if caught {
+                        break;
+                    }
+                    caught = arm.guard.is_none() && !Self::pattern_is_refutable(&arm.pattern);
                     if arm.guard.is_some() && Self::pattern_has_move(&arm.pattern) {
                         self.error(
                             "cannot move out of payload in a match arm with a guard".to_string(),
@@ -3048,6 +3076,12 @@ impl MoveChecker {
                         self.check_expr(guard, state, scopes, var_types);
                     }
                     let mut arm_state = state.clone();
+                    // An earlier guard may have consumed the scrutinee, and
+                    // this arm reads its payloads again.
+                    if guarded && Self::pattern_has_move(&arm.pattern) {
+                        self.check_expr(expression, &mut arm_state, &mut scopes.clone(), var_types);
+                    }
+                    guarded |= arm.guard.is_some();
                     let mut arm_scopes = scopes.clone();
                     if let Some(missed) = &missed {
                         join_changed(state, missed);
@@ -3096,6 +3130,7 @@ impl MoveChecker {
                     // hides an outer local of its name until the arm ends,
                     // and keeps its payload type for nested matches.
                     let typed = self.payload_bindings(&arm.pattern, scrutinee.as_ref(), true);
+                    let saved_borrowed = self.borrowed_payloads.clone();
                     for binding in Self::payload_binding_names(&arm.pattern) {
                         if owned.iter().any(|(o, _)| o.name == binding.name) {
                             continue;
@@ -3107,6 +3142,7 @@ impl MoveChecker {
                         if let Some((_, ty)) = typed.iter().find(|(t, _)| t.name == name) {
                             var_types.insert(name.clone(), ty.clone());
                         }
+                        self.borrowed_payloads.insert(name.clone());
                         arm_scopes.last_mut().expect("arm scope is pushed").push((
                             name, old_state, old_type, old_owner, None,
                         ));
@@ -3118,6 +3154,7 @@ impl MoveChecker {
                     self.pop_scope(&mut arm_state, &mut arm_scopes, var_types);
                     self.reject_locked_move(&arm.body, var_types);
                     self.locked_bindings = saved;
+                    self.borrowed_payloads = saved_borrowed;
                     if !expression_terminates(&arm.body) {
                         // Join every fall-through arm, as an if/else does:
                         // two arms at the same level can still move
@@ -3336,6 +3373,16 @@ impl MoveChecker {
                 Some((binding?.clone(), Self::substitute_type(payload, &substitutions)))
             })
             .collect()
+    }
+
+    /// Rejects an arm that moves payloads out of an enclosing arm's borrowed
+    /// payload binding: the outer enum still owns them and drops them.
+    fn reject_borrowed_scrutinee_move(&mut self, expression: &ast::Expression) {
+        if let Some(place) = place_from_expr(expression)
+            && self.borrowed_payloads.contains(&place.local)
+        {
+            self.error(msg::cannot_move_out_of_borrowed_payload(&place.local), expression.span);
+        }
     }
 
     /// The identifiers an enum arm binds to its payloads.
@@ -3930,26 +3977,70 @@ mod tests {
                        Neither: {} }; } else { Inner gone = h.inner; } i64 n = h.inner.id;";
         let errors = errors_with_items(items, partial);
         assert!(!errors.moves.is_empty(), "{partial}: {errors:?}");
-        // A borrowed payload keeps its type, so a nested payload move in it
-        // still tracks its owners.
+        // A borrowed payload stays owned by the matched enum, so a nested arm
+        // cannot move its payloads; one bound with `move` can.
         let items = "enum Twin { Both(Text, Text); Neither; }\n\
-                     enum Crate { Held(Twin); Empty; }\n";
-        let nested = "Twin w = Twin.Neither; Crate c = Crate.Held(Twin.Both(fresh(), fresh())); \
+                     enum Parcel { Held(Twin); Empty; }\n";
+        let nested = "Twin w = Twin.Neither; Parcel c = Parcel.Held(Twin.Both(fresh(), fresh())); \
                       match c { Held(w): { match w { Both(move a, b): { Text kept = a; eat(a); }, \
                       Neither: {} }; }, Empty: {} };";
         let errors = errors_with_items(items, nested);
         assert!(
-            errors.moves.iter().any(|error| error.contains("'a'")),
+            errors.moves.contains(&crate::diagnostics::messages::cannot_move_out_of_borrowed_payload("w")),
             "{nested}: {errors:?}"
+        );
+        let owned = "Parcel c = Parcel.Held(Twin.Both(fresh(), fresh())); \
+                     match c { Held(move w): { match w { Both(move a, b): { eat(a); eat(b); }, \
+                     Neither: {} }; }, Empty: {} };";
+        let errors = errors_with_items(items, owned);
+        assert!(
+            errors.types.is_empty() && errors.moves.is_empty(),
+            "{owned}: {errors:?}"
         );
         // A heap container keeps its elements.
         let items = "enum Twin { Both(Text, Text); Neither; }\n";
-        let container = "Vec<Twin> v = Vec<Twin>.new(); \
-                         match v[0] { Both(move a, b): { eat(a); }, Neither: {} };";
+        let container = "Bag<Twin> bag; \
+                         match bag[0] { Both(move a, b): { eat(a); }, Neither: {} };";
         let errors = errors_with_items(items, container);
+        assert!(errors.types.is_empty(), "{container}: {errors:?}");
         assert!(
-            errors.moves.iter().any(|error| error.contains("index")),
+            errors.moves.contains(&crate::diagnostics::messages::cannot_move_out_of_indexed_element("Bag<Twin>")),
             "{container}: {errors:?}"
+        );
+        // A guard that consumes the scrutinee leaves nothing for a later arm
+        // to take, and a field of a holder with a destructor stays whole.
+        let items = "enum Twin { Both(Text, Text); Neither; }\n\
+                     struct Kept { Twin twin; }\n\
+                     impl Drop for Kept { void drop(*self) {} }\n\
+                     bool used(Twin t) { return false; }\n";
+        for (misuse, expected) in [
+            (
+                "Twin w = Twin.Both(fresh(), fresh()); \
+                 match w { Both(a, b), used(w): {}, Both(move a, b): { eat(a); eat(b); }, \
+                 Neither: {} };",
+                "'w'",
+            ),
+            (
+                "Kept k; k.twin = Twin.Both(fresh(), fresh()); \
+                 match k.twin { Both(move a, b): { eat(a); eat(b); }, Neither: {} };",
+                "implements Drop",
+            ),
+        ] {
+            let errors = errors_with_items(items, misuse);
+            assert!(errors.types.is_empty(), "{misuse}: {errors:?}");
+            assert!(
+                errors.moves.iter().any(|error| error.contains(expected)),
+                "{misuse}: {errors:?}"
+            );
+        }
+        // An arm after an unguarded catch-all never runs.
+        let unreachable = "Twin w = Twin.Both(fresh(), fresh()); \
+                           match w { _: {}, Both(move a, b): { eat(a); eat(b); } }; \
+                           match w { Both(a, b): {}, Neither: {} };";
+        let errors = errors_with_items(items, unreachable);
+        assert!(
+            errors.types.is_empty() && errors.moves.is_empty(),
+            "{unreachable}: {errors:?}"
         );
     }
 

@@ -3572,7 +3572,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                                 VarInfo {
                                                     ptr: alloca,
                                                     ty: concrete_pt.clone(),
-                                                    is_mutable: false,
+                                                    // An owned binding is mutable, as typeck binds it.
+                                                    is_mutable: is_move || any_move,
                                                     is_volatile: false,
                                                     drop_flag: None,
                                                     field_flags: Vec::new(),

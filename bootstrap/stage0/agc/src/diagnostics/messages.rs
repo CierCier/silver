@@ -435,6 +435,12 @@ pub fn use_of_moved_field(place: &str) -> String {
     format!("use of moved value '{place}'")
 }
 
+pub fn cannot_move_out_of_borrowed_payload(name: &str) -> String {
+    format!(
+        "cannot move payloads out of '{name}': it borrows a payload the matched enum still owns; bind it with 'move {name}' to take it"
+    )
+}
+
 pub fn cannot_move_field_out_of_drop_type(place: &str, owner: &str) -> String {
     format!("cannot move '{place}' out of '{owner}' because it implements Drop")
 }
