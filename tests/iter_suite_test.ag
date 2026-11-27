@@ -38,6 +38,27 @@ i64 multiply_pairs(i64 acc, i64 x) {
     return acc * x;
 }
 
+// User items named like std/iter.ag's type parameters (`A`, `B` of
+// `ChainIter` and `ZipIter`) and callable parameter (`f` of `iter_fold` and
+// `iter_reduce`). std must keep resolving its own names (issue #74).
+struct A {
+    i64 v;
+}
+
+impl A {
+    i64 next(*self) {
+        return self.v + 1000;
+    }
+}
+
+struct B {
+    i64 w;
+}
+
+i64 f(i64 acc, i64 x) {
+    return -1;
+}
+
 i32 main() {
     STDOUT.write_str("=== Zero-Cost Iterator & Collection Tests ===\n\n");
 
@@ -261,6 +282,44 @@ i32 main() {
         assert_eq_i64(2, count, "HashMap iter count is 2");
 
         map2.drop();
+    }
+
+    // 8. User items named like std parameters do not change std's names.
+    STDOUT.write_str("\n--- 8. User Names Beside Std Parameters ---\n");
+    {
+        Vec<i64> a = Vec<i64>.new();
+        a.push((i64)1);
+        a.push((i64)2);
+        Vec<i64> b = Vec<i64>.new();
+        b.push((i64)3);
+        b.push((i64)4);
+
+        SliceIter<i64> it_a = a.iter();
+        SliceIter<i64> it_b = b.iter();
+        ChainIter<SliceIter<i64>, SliceIter<i64>, i64> chained = iter_chain<SliceIter<i64>, SliceIter<i64>, i64>(&it_a, &it_b);
+        assert_eq_i64(10, iter_sum_i64<ChainIter<SliceIter<i64>, SliceIter<i64>, i64>>(&chained), "chain beside user A and B sums to 10");
+
+        SliceIter<i64> it_z1 = a.iter();
+        SliceIter<i64> it_z2 = b.iter();
+        ZipIter<SliceIter<i64>, SliceIter<i64>, i64, i64> zipped = iter_zip<SliceIter<i64>, SliceIter<i64>, i64, i64>(&it_z1, &it_z2);
+        Zipped<i64, i64> pair = zipped.next().unwrap();
+        assert_eq_i64(4, pair.a + pair.b, "zip beside user A and B pairs 1 with 3");
+
+        SliceIter<i64> it_fold = b.iter();
+        assert_eq_i64(107, iter_fold<SliceIter<i64>, i64, i64>(&it_fold, (i64)100, add_pairs), "fold calls its parameter, not user f");
+        SliceIter<i64> it_red = b.iter();
+        assert_eq_i64(7, iter_reduce<SliceIter<i64>, i64>(&it_red, add_pairs), "reduce calls its parameter, not user f");
+
+        A user_a;
+        user_a.v = 5;
+        B user_b;
+        user_b.w = 6;
+        assert_eq_i64(1005, user_a.next(), "user A keeps its own next");
+        assert_eq_i64(6, user_b.w, "user B is usable");
+        assert_eq_i64(-1, f(1, 2), "user f is still callable");
+
+        a.drop();
+        b.drop();
     }
 
     return done();

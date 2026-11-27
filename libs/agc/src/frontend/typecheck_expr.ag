@@ -2824,6 +2824,11 @@ u32 typecheck_method_return_type_for_call(AstPool* pool, SyntaxNode* root,
         receiver = types.get(resolved_receiver);
     }
     if (receiver.kind != TypeKind.Named) { return TYPE_UNKNOWN; }
+    // A type parameter's methods are known only after instantiation.
+    if (receiver.count == 0
+        && mono_contains_type_param(&types.scope_type_params, receiver.name_id)) {
+        return TYPE_UNKNOWN;
+    }
     str owner_name = types.names.get(receiver.name_id);
     u32 best_return_type = TYPE_UNKNOWN;
     i64 best_score = -1;
