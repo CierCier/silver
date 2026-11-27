@@ -160,7 +160,9 @@ struct Checker<'a> {
     /// Per local of the current function: its source before any store into
     /// one of its places, and the frame-local references stored at each
     /// place path (`None` for a store that a later one cannot replace).
-    place_stores: FxHashMap<String, PlaceStores>,
+    /// Keyed by name and declaration depth, so a shadowing local in an
+    /// inner block keeps its own history.
+    place_stores: FxHashMap<(String, usize), PlaceStores>,
 }
 
 #[derive(Default)]
@@ -1056,7 +1058,8 @@ impl Checker<'_> {
                     self.error(msg::reference_escapes_scope(), init.span);
                 }
                 if let ast::PatternKind::Identifier(ident) = &let_stmt.pattern.kind {
-                    self.place_stores.remove(&ident.name);
+                    self.place_stores
+                        .remove(&(ident.name.clone(), scopes.len() - 1));
                 }
                 Self::record_pattern_refs(&let_stmt.pattern, declared_source, scopes, ref_sources);
                 Self::record_pointer_binding(let_stmt, ptr_locals);
@@ -1218,6 +1221,7 @@ impl Checker<'_> {
             }
             return;
         };
+        let declared_depth = root_depth;
         // A value parameter dies with the frame, like a local in the body.
         if root_depth == 0 && !ref_params.contains(&root.name) {
             root_depth = 1;
@@ -1230,7 +1234,7 @@ impl Checker<'_> {
         // a field path replaces what that path held before.
         let entry = self
             .place_stores
-            .entry(root.name.clone())
+            .entry((root.name.clone(), declared_depth))
             .or_insert_with(|| PlaceStores {
                 base: ref_sources.get(&root.name).cloned(),
                 stores: Vec::new(),
