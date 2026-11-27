@@ -55,6 +55,13 @@ struct B {
     i64 w;
 }
 
+impl B {
+    // A generic method of the same name must not be matched either.
+    i64 next<U>(*self, U extra) {
+        return self.w + 2000;
+    }
+}
+
 i64 f(i64 acc, i64 x) {
     return -1;
 }
@@ -315,7 +322,7 @@ i32 main() {
         B user_b;
         user_b.w = 6;
         assert_eq_i64(1005, user_a.next(), "user A keeps its own next");
-        assert_eq_i64(6, user_b.w, "user B is usable");
+        assert_eq_i64(2006, user_b.next((i64)1), "user B keeps its own generic next");
         assert_eq_i64(-1, f(1, 2), "user f is still callable");
 
         a.drop();

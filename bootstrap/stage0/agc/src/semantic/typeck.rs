@@ -2697,8 +2697,10 @@ impl TypeChecker {
                     return Type::Unknown;
                 }
                 // Check if this is an enum variant construction first
+                // A type parameter named like an enum is not that enum.
                 if let Type::Named { path: ty_path, .. } = &receiver_ty
                     && ty_path.len() == 1
+                    && !self.is_current_type_param(&receiver_ty)
                 {
                     let enum_name = &ty_path[0];
                     if let Some(enum_def) = self.enum_defs.get(enum_name)

@@ -2980,6 +2980,10 @@ u32 typecheck_method_parameter_type_for_call(AstPool* pool, SyntaxNode* root,
         receiver = types.get(resolved_receiver);
     }
     if (receiver.kind != TypeKind.Named) { return TYPE_UNKNOWN; }
+    if (receiver.count == 0
+        && mono_contains_type_param(&types.scope_type_params, receiver.name_id)) {
+        return TYPE_UNKNOWN;
+    }
     str owner_name = types.names.get(receiver.name_id);
     u32 best_parameter_type = TYPE_UNKNOWN;
     u32 fallback_parameter_type = TYPE_UNKNOWN;
@@ -3743,7 +3747,31 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                     typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
                                                        arg_id, diagnostics, ok);
                 }
+                // Types still naming a generic parameter are checked at
+                // instantiation.
+                if (!typecheck_type_is_unresolved(types, parameter_type, 0)
+                    && !typecheck_type_is_unresolved(types, actual_type, 0)
+                    && !typecheck_call_argument_matches(types, parameter_type, actual_type,
+                        expr_is_literal(pool, arg_id))
+                    && !typecheck_implicit_borrow(types, parameter_type, actual_type,
+                        expr_is_literal(pool, arg_id))
+                    && !typecheck_tuple_literal_fits(pool, root, types, parameter_type, arg_id)
+                    && !typecheck_implicit_cast(root, types, actual_type, parameter_type)) {
+                    diagnostics.error(pool.get_expr(arg_id).span,
+                        argument_type_mismatch(i + 1, types.type_name(parameter_type),
+                            types.type_name(actual_type)));
+                    *ok = false;
+                }
                 i += 1;
+            }
+            if ((i64)arg_count != callable_count) {
+                String message = String.from_str("argument count mismatch: expected ");
+                message.push_display(&callable_count);
+                message.push_str(", found ");
+                i64 actual_count = (i64)arg_count;
+                message.push_display(&actual_count);
+                diagnostics.error(expr.span, move message);
+                *ok = false;
             }
             inferred = types.type_args.get(callable_inner);
         }
