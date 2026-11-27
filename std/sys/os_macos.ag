@@ -1,0 +1,3191 @@
+// std/sys/os_macos.ag — macOS implementation of the OS seam.
+//
+// macOS has no stable system-call ABI: Apple changes syscall numbers and
+// argument conventions between releases and supports only libSystem as the
+// kernel interface. This seam therefore calls libSystem (libc, pthread,
+// os_sync) through `extern "C"`, the way os_windows.ag calls Win32. It is
+// imported by std/sys/os.ag only on `os.macos`; unconditional here.
+//
+// Every seam keeps the Linux contract that the rest of std is written
+// against: results are the value or a negated *Linux* errno, and flag words,
+// struct layouts (`struct stat`, `sockaddr`, `pollfd`, `termios`), socket
+// option numbers, and ioctl requests use Linux values. The functions here
+// translate at the libSystem boundary, so std above the seam is the same on
+// every POSIX target.
+//
+// Variadic C functions (open, openat, fcntl, ioctl) are declared variadic:
+// Apple arm64 passes variadic arguments on the stack, not in registers, so a
+// fixed-arity declaration would hand the callee garbage.
+
+import std.atomic;
+import std.sys.errno;
+import std.sys.result;
+
+// ---------------------------------------------------------------------------
+// libSystem externs. Names carry a `mac_` prefix so they never collide with
+// the seam functions that wrap them.
+// ---------------------------------------------------------------------------
+
+extern "C" {
+    /// libSystem `__error`: the calling thread's errno slot.
+    #[link_name("__error")]
+    i32* mac_errno_ptr();
+
+    /// libSystem `mmap`.
+    #[link_name("mmap")]
+    i64 mac_mmap(i64 addr, i64 len, i32 prot, i32 flags, i32 fd, i64 off);
+    /// libSystem `munmap`.
+    #[link_name("munmap")]
+    i32 mac_munmap(i64 addr, i64 len);
+
+    /// libSystem `read`.
+    #[link_name("read")]
+    i64 mac_read(i32 fd, i64 buf, i64 len);
+    /// libSystem `write`.
+    #[link_name("write")]
+    i64 mac_write(i32 fd, i64 buf, i64 len);
+    /// libSystem `pread`.
+    #[link_name("pread")]
+    i64 mac_pread(i32 fd, i64 buf, i64 len, i64 off);
+    /// libSystem `readv`.
+    #[link_name("readv")]
+    i64 mac_readv(i32 fd, i64 iov, i32 count);
+    /// libSystem `writev`.
+    #[link_name("writev")]
+    i64 mac_writev(i32 fd, i64 iov, i32 count);
+    /// libSystem `openat` (variadic: the mode follows the flags).
+    #[link_name("openat")]
+    i32 mac_openat(i32 dirfd, i64 path, i32 flags, ...);
+    /// libSystem `close`.
+    #[link_name("close")]
+    i32 mac_close(i32 fd);
+    /// libSystem `fcntl` (variadic).
+    #[link_name("fcntl")]
+    i32 mac_fcntl(i32 fd, i32 cmd, ...);
+    /// libSystem `ioctl` (variadic).
+    #[link_name("ioctl")]
+    i32 mac_ioctl(i32 fd, u64 request, ...);
+    /// libSystem `lseek`.
+    #[link_name("lseek")]
+    i64 mac_lseek(i32 fd, i64 off, i32 whence);
+    /// libSystem `ftruncate`.
+    #[link_name("ftruncate")]
+    i32 mac_ftruncate(i32 fd, i64 len);
+    /// libSystem `fsync`.
+    #[link_name("fsync")]
+    i32 mac_fsync(i32 fd);
+    /// libSystem `unlinkat`.
+    #[link_name("unlinkat")]
+    i32 mac_unlinkat(i32 dirfd, i64 path, i32 flags);
+    /// libSystem `renameat`.
+    #[link_name("renameat")]
+    i32 mac_renameat(i32 fromfd, i64 from, i32 tofd, i64 to);
+    /// libSystem `fstatat` (arm64 has only the 64-bit-inode `struct stat`).
+    #[link_name("fstatat")]
+    i32 mac_fstatat(i32 dirfd, i64 path, u8* buf, i32 flags);
+    /// libSystem `fstat`.
+    #[link_name("fstat")]
+    i32 mac_fstat(i32 fd, u8* buf);
+    /// libSystem `readlinkat`.
+    #[link_name("readlinkat")]
+    i64 mac_readlinkat(i32 dirfd, i64 path, i64 buf, i64 len);
+    /// libSystem `mkdirat`.
+    #[link_name("mkdirat")]
+    i32 mac_mkdirat(i32 dirfd, i64 path, u16 mode);
+    /// libSystem `faccessat`.
+    #[link_name("faccessat")]
+    i32 mac_faccessat(i32 dirfd, i64 path, i32 mode, i32 flags);
+    /// libSystem `getcwd`.
+    #[link_name("getcwd")]
+    u8* mac_getcwd(u8* buf, i64 cap);
+    /// libSystem `chdir`.
+    #[link_name("chdir")]
+    i32 mac_chdir(i64 path);
+    /// libSystem `pipe`.
+    #[link_name("pipe")]
+    i32 mac_pipe(i32* fds);
+    /// libSystem `dup`.
+    #[link_name("dup")]
+    i32 mac_dup(i32 fd);
+    /// libSystem `dup2`.
+    #[link_name("dup2")]
+    i32 mac_dup2(i32 old_fd, i32 new_fd);
+    /// libSystem `poll`.
+    #[link_name("poll")]
+    i32 mac_poll(u8* fds, u32 nfds, i32 timeout_ms);
+    /// libSystem `getdirentries` replacement: `__getdirentries64`.
+    #[link_name("__getdirentries64")]
+    i64 mac_getdirentries64(i32 fd, u8* buf, i64 nbytes, i64* basep);
+
+    /// libSystem `_exit`: ends the process without running atexit handlers.
+    #[link_name("_exit")]
+    void mac_exit_process(i32 code);
+    /// libSystem `getpid`.
+    #[link_name("getpid")]
+    i32 mac_getpid();
+    /// libSystem `getppid`.
+    #[link_name("getppid")]
+    i32 mac_getppid();
+    /// libSystem `kill`.
+    #[link_name("kill")]
+    i32 mac_kill(i32 pid, i32 sig);
+    /// libSystem `fork`.
+    #[link_name("fork")]
+    i32 mac_fork();
+    /// libSystem `execve`.
+    #[link_name("execve")]
+    i32 mac_execve(i64 path, i64 argv, i64 envp);
+    /// libSystem `wait4`.
+    #[link_name("wait4")]
+    i32 mac_wait4(i32 pid, i32* status, i32 options, u8* rusage);
+    /// libSystem `setsid`.
+    #[link_name("setsid")]
+    i32 mac_setsid();
+    /// libSystem `sigaction`.
+    #[link_name("sigaction")]
+    i32 mac_sigaction(i32 sig, u8* act, u8* old);
+
+    /// libSystem `pthread_create`.
+    #[link_name("pthread_create")]
+    i32 mac_pthread_create(i64* thread, u8* attr, i64 start, i64 arg);
+    /// libSystem `pthread_attr_init`.
+    #[link_name("pthread_attr_init")]
+    i32 mac_pthread_attr_init(u8* attr);
+    /// libSystem `pthread_attr_setstacksize`.
+    #[link_name("pthread_attr_setstacksize")]
+    i32 mac_pthread_attr_setstacksize(u8* attr, i64 size);
+    /// libSystem `pthread_attr_destroy`.
+    #[link_name("pthread_attr_destroy")]
+    i32 mac_pthread_attr_destroy(u8* attr);
+    /// libSystem `pthread_join`.
+    #[link_name("pthread_join")]
+    i32 mac_pthread_join(i64 thread, i64* result);
+    /// libSystem `pthread_main_np`: nonzero on the process's main thread.
+    #[link_name("pthread_main_np")]
+    i32 mac_pthread_main_np();
+    /// libSystem `pthread_exit`.
+    #[link_name("pthread_exit")]
+    void mac_pthread_exit(i64 value);
+    /// libSystem `sched_yield`.
+    #[link_name("sched_yield")]
+    i32 mac_sched_yield();
+    /// libSystem `pthread_threadid_np`: the system-wide unique thread id.
+    #[link_name("pthread_threadid_np")]
+    i32 mac_pthread_threadid_np(i64 thread, u64* id);
+
+    /// libSystem `os_sync_wait_on_address` (macOS 14.4+).
+    #[link_name("os_sync_wait_on_address")]
+    i32 mac_os_sync_wait_on_address(u8* addr, u64 value, i64 size, u32 flags);
+    /// libSystem `os_sync_wait_on_address_with_timeout` (macOS 14.4+).
+    #[link_name("os_sync_wait_on_address_with_timeout")]
+    i32 mac_os_sync_wait_on_address_with_timeout(u8* addr, u64 value, i64 size, u32 flags, u32 clock, u64 timeout_ns);
+    /// libSystem `os_sync_wake_by_address_any`.
+    #[link_name("os_sync_wake_by_address_any")]
+    i32 mac_os_sync_wake_by_address_any(u8* addr, i64 size, u32 flags);
+    /// libSystem `os_sync_wake_by_address_all`.
+    #[link_name("os_sync_wake_by_address_all")]
+    i32 mac_os_sync_wake_by_address_all(u8* addr, i64 size, u32 flags);
+
+    /// libSystem `clock_gettime`.
+    #[link_name("clock_gettime")]
+    i32 mac_clock_gettime(i32 clock, i64* ts);
+    /// libSystem `nanosleep`.
+    #[link_name("nanosleep")]
+    i32 mac_nanosleep(i64* req, i64* rem);
+    /// libSystem `getentropy`: at most 256 bytes per call.
+    #[link_name("getentropy")]
+    i32 mac_getentropy(u8* buf, i64 len);
+    /// libSystem `socket`.
+    #[link_name("socket")]
+    i32 mac_socket(i32 domain, i32 kind, i32 protocol);
+    /// libSystem `socketpair`.
+    #[link_name("socketpair")]
+    i32 mac_socketpair(i32 domain, i32 kind, i32 protocol, i32* fds);
+    /// libSystem `bind`.
+    #[link_name("bind")]
+    i32 mac_bind(i32 fd, u8* addr, u32 len);
+    /// libSystem `listen`.
+    #[link_name("listen")]
+    i32 mac_listen(i32 fd, i32 backlog);
+    /// libSystem `accept`.
+    #[link_name("accept")]
+    i32 mac_accept(i32 fd, u8* addr, u32* len);
+    /// libSystem `connect`.
+    #[link_name("connect")]
+    i32 mac_connect(i32 fd, u8* addr, u32 len);
+    /// libSystem `shutdown`.
+    #[link_name("shutdown")]
+    i32 mac_shutdown(i32 fd, i32 how);
+    /// libSystem `setsockopt`.
+    #[link_name("setsockopt")]
+    i32 mac_setsockopt(i32 fd, i32 level, i32 name, u8* value, u32 len);
+    /// libSystem `getsockopt`.
+    #[link_name("getsockopt")]
+    i32 mac_getsockopt(i32 fd, i32 level, i32 name, u8* value, u32* len);
+    /// libSystem `getsockname`.
+    #[link_name("getsockname")]
+    i32 mac_getsockname(i32 fd, u8* addr, u32* len);
+    /// libSystem `getpeername`.
+    #[link_name("getpeername")]
+    i32 mac_getpeername(i32 fd, u8* addr, u32* len);
+    /// libSystem `sendto`.
+    #[link_name("sendto")]
+    i64 mac_sendto(i32 fd, i64 buf, i64 len, i32 flags, u8* addr, u32 addr_len);
+    /// libSystem `recvfrom`.
+    #[link_name("recvfrom")]
+    i64 mac_recvfrom(i32 fd, i64 buf, i64 len, i32 flags, u8* addr, u32* addr_len);
+
+    /// libSystem `preadv`.
+    #[link_name("preadv")]
+    i64 mac_preadv(i32 fd, i64 iov, i32 count, i64 off);
+    /// libSystem `pwritev`.
+    #[link_name("pwritev")]
+    i64 mac_pwritev(i32 fd, i64 iov, i32 count, i64 off);
+    /// libSystem `pwrite`.
+    #[link_name("pwrite")]
+    i64 mac_pwrite(i32 fd, i64 buf, i64 len, i64 off);
+    /// libSystem `_NSGetExecutablePath`: the path the executable was started
+    /// from (may hold symlinks or `..`).
+    #[link_name("_NSGetExecutablePath")]
+    i32 mac_NSGetExecutablePath(u8* buf, u32* size);
+    /// libSystem `realpath`.
+    #[link_name("realpath")]
+    u8* mac_realpath(u8* path, u8* resolved);
+    /// Mach `task_info`.
+    #[link_name("task_info")]
+    i32 mac_task_info(u32 task, i32 flavor, u8* info, u32* count);
+    /// Mach port of the calling task (what `mach_task_self()` reads). Named
+    /// as in C: extern variables take no `#[link_name]`.
+    u32 mach_task_self_;
+    /// libSystem `kqueue`.
+    #[link_name("kqueue")]
+    i32 mac_kqueue();
+    /// libSystem `kevent`.
+    #[link_name("kevent")]
+    i32 mac_kevent(i32 kq, u8* changes, i32 nchanges, u8* events, i32 nevents, i64* timeout);
+    /// libSystem `isatty`.
+    #[link_name("isatty")]
+    i32 mac_isatty(i32 fd);
+
+    /// libSystem `sysctlbyname`.
+    #[link_name("sysctlbyname")]
+    i32 mac_sysctlbyname(str name, u8* old, i64* old_len, u8* new, i64 new_len);
+}
+
+// ---------------------------------------------------------------------------
+// errno: Darwin and Linux agree on 1..34 and diverge above.
+// ---------------------------------------------------------------------------
+
+/// Maps a Darwin errno to the Linux errno the seam contract reports.
+i64 mac_errno_to_linux(i64 e) {
+    if (e <= 34) {
+        return e;
+    }
+    if (e == 35) { return 11; }   // EAGAIN / EWOULDBLOCK
+    if (e == 36) { return 115; }  // EINPROGRESS
+    if (e == 37) { return 114; }  // EALREADY
+    if (e == 38) { return 88; }   // ENOTSOCK
+    if (e == 39) { return 89; }   // EDESTADDRREQ
+    if (e == 40) { return 90; }   // EMSGSIZE
+    if (e == 41) { return 91; }   // EPROTOTYPE
+    if (e == 42) { return 92; }   // ENOPROTOOPT
+    if (e == 43) { return 93; }   // EPROTONOSUPPORT
+    if (e == 44) { return 94; }   // ESOCKTNOSUPPORT
+    if (e == 45 || e == 102) { return 95; } // ENOTSUP / EOPNOTSUPP
+    if (e == 46) { return 96; }   // EPFNOSUPPORT
+    if (e == 47) { return 97; }   // EAFNOSUPPORT
+    if (e == 48) { return 98; }   // EADDRINUSE
+    if (e == 49) { return 99; }   // EADDRNOTAVAIL
+    if (e == 50) { return 100; }  // ENETDOWN
+    if (e == 51) { return 101; }  // ENETUNREACH
+    if (e == 52) { return 102; }  // ENETRESET
+    if (e == 53) { return 103; }  // ECONNABORTED
+    if (e == 54) { return 104; }  // ECONNRESET
+    if (e == 55) { return 105; }  // ENOBUFS
+    if (e == 56) { return 106; }  // EISCONN
+    if (e == 57) { return 107; }  // ENOTCONN
+    if (e == 58) { return 108; }  // ESHUTDOWN
+    if (e == 59) { return 109; }  // ETOOMANYREFS
+    if (e == 60) { return 110; }  // ETIMEDOUT
+    if (e == 61) { return 111; }  // ECONNREFUSED
+    if (e == 62) { return 40; }   // ELOOP
+    if (e == 63) { return 36; }   // ENAMETOOLONG
+    if (e == 64) { return 112; }  // EHOSTDOWN
+    if (e == 65) { return 113; }  // EHOSTUNREACH
+    if (e == 66) { return 39; }   // ENOTEMPTY
+    if (e == 67) { return 11; }   // EPROCLIM: too many processes, retry later
+    if (e == 68) { return 87; }   // EUSERS
+    if (e == 69) { return 122; }  // EDQUOT
+    if (e == 70) { return 116; }  // ESTALE
+    if (e == 71) { return 66; }   // EREMOTE
+    if (e == 77) { return 37; }   // ENOLCK
+    if (e == 78) { return 38; }   // ENOSYS
+    if (e == 84) { return 75; }   // EOVERFLOW
+    if (e == 85) { return 125; }  // ECANCELED
+    if (e == 86) { return 43; }   // EIDRM
+    if (e == 87) { return 42; }   // ENOMSG
+    if (e == 88) { return 84; }   // EILSEQ
+    if (e == 89) { return 61; }   // ENOATTR -> ENODATA
+    if (e == 90) { return 74; }   // EBADMSG
+    if (e == 91) { return 72; }   // EMULTIHOP
+    if (e == 92) { return 61; }   // ENODATA
+    if (e == 93) { return 67; }   // ENOLINK
+    if (e == 94) { return 63; }   // ENOSR
+    if (e == 95) { return 60; }   // ENOSTR
+    if (e == 96) { return 71; }   // EPROTO
+    if (e == 97) { return 62; }   // ETIME
+    if (e == 104) { return 131; } // ENOTRECOVERABLE
+    if (e == 105) { return 130; } // EOWNERDEAD
+    return 5; // EIO: Darwin-only codes (EFTYPE, EAUTH, EBADEXEC, ...)
+}
+
+/// The calling thread's errno, as a negated Linux errno.
+i64 mac_neg_errno() {
+    return -mac_errno_to_linux((i64)*mac_errno_ptr());
+}
+
+/// Seam result for a libSystem call returning -1 on failure.
+i64 mac_ret(i64 r) {
+    if (r == -1) {
+        return mac_neg_errno();
+    }
+    return r;
+}
+
+// ---------------------------------------------------------------------------
+// Linux <-> Darwin flag words.
+// ---------------------------------------------------------------------------
+
+/// Darwin `O_*` values for the Linux bits in std/sys/result.ag.
+const i32 MAC_O_NONBLOCK = 0x4;
+const i32 MAC_O_APPEND = 0x8;
+const i32 MAC_O_CREAT = 0x200;
+const i32 MAC_O_TRUNC = 0x400;
+const i32 MAC_O_EXCL = 0x800;
+const i32 MAC_O_NOFOLLOW = 0x100;
+const i32 MAC_O_NOCTTY = 0x20000;
+const i32 MAC_O_DIRECTORY = 0x100000;
+const i32 MAC_O_CLOEXEC = 0x1000000;
+/// Linux `O_NOCTTY` and `O_NOFOLLOW` (aarch64 layout: std gates on arch, and
+/// macOS is aarch64). result.ag does not name them; pty and process code do.
+const i64 LINUX_O_NOCTTY = 0x100;
+const i64 LINUX_O_NOFOLLOW = 0x8000;
+
+/// Translates Linux open(2) flags to Darwin's.
+i32 mac_open_flags(i64 flags) {
+    i32 out = (i32)(flags & 3); // access mode: same three values
+    if ((flags & O_CREAT) != 0) { out = out | MAC_O_CREAT; }
+    if ((flags & O_EXCL) != 0) { out = out | MAC_O_EXCL; }
+    if ((flags & O_TRUNC) != 0) { out = out | MAC_O_TRUNC; }
+    if ((flags & O_APPEND) != 0) { out = out | MAC_O_APPEND; }
+    if ((flags & O_NONBLOCK) != 0) { out = out | MAC_O_NONBLOCK; }
+    if ((flags & O_DIRECTORY) != 0) { out = out | MAC_O_DIRECTORY; }
+    if ((flags & O_CLOEXEC) != 0) { out = out | MAC_O_CLOEXEC; }
+    if ((flags & LINUX_O_NOCTTY) != 0) { out = out | MAC_O_NOCTTY; }
+    if ((flags & LINUX_O_NOFOLLOW) != 0) { out = out | MAC_O_NOFOLLOW; }
+    return out;
+}
+
+/// Translates Darwin file status flags (F_GETFL) back to Linux's.
+i64 mac_status_flags_to_linux(i64 flags) {
+    i64 out = flags & 3;
+    if ((flags & (i64)MAC_O_APPEND) != 0) { out = out | O_APPEND; }
+    if ((flags & (i64)MAC_O_NONBLOCK) != 0) { out = out | O_NONBLOCK; }
+    return out;
+}
+
+/// Linux `*at` flags (AT_SYMLINK_NOFOLLOW, AT_REMOVEDIR) and the
+/// AT_FDCWD sentinel (Linux -100, Darwin -2).
+const i64 AT_SYMLINK_NOFOLLOW = 256;
+const i64 AT_REMOVEDIR = 512;
+const i32 MAC_AT_FDCWD = -2;
+const i32 MAC_AT_SYMLINK_NOFOLLOW = 0x20;
+const i32 MAC_AT_REMOVEDIR = 0x80;
+
+/// Translates a Linux dirfd (AT_FDCWD = -100) to Darwin's.
+i32 mac_dirfd(i64 dirfd) {
+    if (dirfd == AT_FDCWD) {
+        return MAC_AT_FDCWD;
+    }
+    return (i32)dirfd;
+}
+
+/// Translates Linux `*at` flags to Darwin's.
+i32 mac_at_flags(i64 flags) {
+    i32 out = 0;
+    if ((flags & AT_SYMLINK_NOFOLLOW) != 0) { out = out | MAC_AT_SYMLINK_NOFOLLOW; }
+    if ((flags & AT_REMOVEDIR) != 0) { out = out | MAC_AT_REMOVEDIR; }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// Memory.
+// ---------------------------------------------------------------------------
+
+/// Darwin `MAP_ANON`; MAP_SHARED, MAP_PRIVATE, and MAP_FIXED match Linux.
+const i32 MAC_MAP_ANON = 0x1000;
+
+/// Seam: mmap(2) with Linux flag values. MAP_POPULATE has no Darwin
+/// counterpart and is dropped (pages fault in on first touch).
+i64 sys_mmap(i64 addr, i64 len, i64 prot, i64 flags, i64 fd, i64 off) {
+    if (len == 0 || (flags & 3) == 0) {
+        return -22; // EINVAL, as the Linux kernel reports
+    }
+    if (fd >= 0) {
+        MacUring* ring = mac_uring_find(fd);
+        if (ring != (MacUring*)0) {
+            return mac_uring_map(ring, len, off);
+        }
+    }
+    i32 mflags = (i32)(flags & (MAP_SHARED | MAP_PRIVATE | MAP_FIXED));
+    if ((flags & MAP_ANONYMOUS) != 0) {
+        mflags = mflags | MAC_MAP_ANON;
+    }
+    return mac_ret(mac_mmap(addr, len, (i32)prot, mflags, (i32)fd, off));
+}
+
+/// Seam: munmap(2). Returns 0 or -errno.
+i64 sys_munmap(i64 addr, i64 len) {
+    return mac_ret((i64)mac_munmap(addr, len));
+}
+
+/// Seam: mremap(2). Darwin has no mremap: shrinking keeps the mapping,
+/// growing with MREMAP_MAYMOVE maps fresh pages and copies, otherwise ENOMEM
+/// (the Linux result when the mapping cannot grow in place).
+i64 sys_mremap(i64 old_addr, i64 old_size, i64 new_size, i64 flags, i64 new_addr) {
+    if (old_addr == 0 || new_size == 0 || (old_addr & 4095) != 0) {
+        return -22;
+    }
+    if (new_size <= old_size) {
+        return old_addr;
+    }
+    if ((flags & MREMAP_MAYMOVE) == 0) {
+        return -12; // ENOMEM
+    }
+    i64 fresh = sys_mmap(0, new_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (fresh < 0) {
+        return fresh;
+    }
+    @memcpy((u8*)fresh, (u8*)old_addr, old_size);
+    sys_munmap(old_addr, old_size);
+    return fresh;
+}
+
+// ---------------------------------------------------------------------------
+// Files and descriptors.
+// ---------------------------------------------------------------------------
+
+/// Seam: write(2). Returns the count or -errno.
+i64 sys_write(i64 fd, i64 buf, i64 len) {
+    MacEventFd* e = mac_eventfd_find(fd);
+    if (e != (MacEventFd*)0) {
+        return mac_eventfd_write(e, buf, len);
+    }
+    return mac_ret(mac_write((i32)fd, buf, len));
+}
+
+/// Seam: read(2). Returns the count, 0 at EOF, or -errno.
+i64 sys_read(i64 fd, i64 buf, i64 len) {
+    MacEventFd* e = mac_eventfd_find(fd);
+    if (e != (MacEventFd*)0) {
+        return mac_eventfd_read(e, buf, len);
+    }
+    return mac_ret(mac_read((i32)fd, buf, len));
+}
+
+/// Seam: openat(2) with Linux flags and dirfd. Returns the fd or -errno.
+i64 sys_openat(i64 dirfd, i64 path, i64 flags, i64 mode) {
+    return mac_ret((i64)mac_openat(mac_dirfd(dirfd), path, mac_open_flags(flags), (i32)mode));
+}
+
+/// Seam: open(2) relative to the working directory.
+i64 sys_open(i64 path, i64 flags, i64 mode) {
+    return sys_openat(AT_FDCWD, path, flags, mode);
+}
+
+/// Seam: closes `fd`. Returns 0 or -errno.
+i64 sys_close(i64 fd) {
+    MacEventFd* e = mac_eventfd_find(fd);
+    if (e != (MacEventFd*)0) {
+        return mac_eventfd_close(e);
+    }
+    mac_pty_release(fd);
+    MacUring* ring = mac_uring_find(fd);
+    if (ring != (MacUring*)0) {
+        mac_uring_release(ring);
+    }
+    return mac_ret((i64)mac_close((i32)fd));
+}
+
+/// Linux and Darwin fcntl commands that differ.
+const i64 LINUX_F_DUPFD_CLOEXEC = 1030;
+const i32 MAC_F_DUPFD_CLOEXEC = 67;
+/// F_GETFD/F_SETFD (1/2) and FD_CLOEXEC (1) match on both.
+
+/// Seam: fcntl(2) with Linux commands and status flags. Returns the result
+/// or -errno.
+i64 sys_fcntl(i64 fd, i64 cmd, i64 arg) {
+    if (cmd == F_GETFL) {
+        i64 r = mac_ret((i64)mac_fcntl((i32)fd, (i32)cmd));
+        return r < 0 ? r : mac_status_flags_to_linux(r);
+    }
+    if (cmd == F_SETFL) {
+        // Only O_APPEND and O_NONBLOCK are settable; Darwin and Linux both
+        // ignore the access mode and creation bits here.
+        i32 mflags = 0;
+        if ((arg & O_APPEND) != 0) { mflags = mflags | MAC_O_APPEND; }
+        if ((arg & O_NONBLOCK) != 0) { mflags = mflags | MAC_O_NONBLOCK; }
+        return mac_ret((i64)mac_fcntl((i32)fd, (i32)cmd, mflags));
+    }
+    if (cmd == LINUX_F_DUPFD_CLOEXEC) {
+        return mac_eventfd_dup(fd, mac_ret((i64)mac_fcntl((i32)fd, MAC_F_DUPFD_CLOEXEC, (i32)arg)));
+    }
+    if (cmd == 0) { // F_DUPFD
+        return mac_eventfd_dup(fd, mac_ret((i64)mac_fcntl((i32)fd, 0, (i32)arg)));
+    }
+    if (cmd >= 1 && cmd <= 2) {
+        // F_GETFD, F_SETFD.
+        return mac_ret((i64)mac_fcntl((i32)fd, (i32)cmd, (i32)arg));
+    }
+    return -22; // EINVAL: no other command is part of the seam
+}
+
+/// Seam: lseek(2). SEEK_SET/CUR/END match. Returns the offset or -errno.
+i64 sys_lseek(i64 fd, i64 off, i64 whence) {
+    return mac_ret(mac_lseek((i32)fd, off, (i32)whence));
+}
+
+/// Seam: ftruncate(2). Returns 0 or -errno.
+i64 sys_ftruncate(i64 fd, i64 len) {
+    return mac_ret((i64)mac_ftruncate((i32)fd, len));
+}
+
+/// Seam: fsync(2). Returns 0 or -errno.
+i64 sys_fsync(i64 fd) {
+    return mac_ret((i64)mac_fsync((i32)fd));
+}
+
+/// Seam: unlinkat(2) with Linux flags.
+i64 sys_unlinkat(i64 dirfd, i64 path, i64 flags) {
+    return mac_ret((i64)mac_unlinkat(mac_dirfd(dirfd), path, mac_at_flags(flags)));
+}
+
+/// Seam: unlink(2). Returns 0 or -errno.
+i64 sys_unlink(i64 path) {
+    return sys_unlinkat(AT_FDCWD, path, 0);
+}
+
+/// Seam: rename(2), replacing `to`. Returns 0 or -errno.
+i64 sys_rename(i64 from, i64 to) {
+    return mac_ret((i64)mac_renameat(MAC_AT_FDCWD, from, MAC_AT_FDCWD, to));
+}
+
+/// Byte size of Darwin's arm64 `struct stat`.
+const i64 MAC_STAT_SIZE = 144;
+
+/// Rewrites a Darwin `struct stat` into the Linux x86_64 layout the seam
+/// promises (std/sys/os.ag). Both are 144 bytes; `buf` is converted in place
+/// from a copy.
+///   Darwin: dev i32 @0, mode u16 @4, nlink u16 @6, ino u64 @8, uid @16,
+///           gid @20, rdev i32 @24, atim @32, mtim @48, ctim @64,
+///           birthtim @80, size @96, blocks @104, blksize i32 @112.
+///   Linux:  dev @0, ino @8, nlink u64 @16, mode u32 @24, uid @28, gid @32,
+///           rdev @40, size @48, blksize i64 @56, blocks @64, atim @72,
+///           mtim @88, ctim @104.
+void mac_stat_to_linux(u8* mac, u8* buf) {
+    i32* mw = (i32*)mac;
+    u16* mh = (u16*)mac;
+    i64* mq = (i64*)mac;
+    u32* lw = (u32*)buf;
+    i64* lq = (i64*)buf;
+    @memset(buf, 0, MAC_STAT_SIZE);
+    lq[0] = (i64)(u32)mw[0];   // st_dev
+    lq[1] = mq[1];             // st_ino
+    lq[2] = (i64)mh[3];        // st_nlink
+    lw[6] = (u32)mh[2];        // st_mode (S_IF* and permission bits match)
+    lw[7] = (u32)mw[4];        // st_uid
+    lw[8] = (u32)mw[5];        // st_gid
+    lq[5] = (i64)(u32)mw[6];   // st_rdev
+    lq[6] = mq[12];            // st_size
+    lq[7] = (i64)mw[28];       // st_blksize
+    lq[8] = mq[13];            // st_blocks
+    lq[9] = mq[4];             // st_atim
+    lq[10] = mq[5];
+    lq[11] = mq[6];            // st_mtim
+    lq[12] = mq[7];
+    lq[13] = mq[8];            // st_ctim
+    lq[14] = mq[9];
+}
+
+/// Seam: fstatat(2) into the Linux layout at `buf` (144 bytes). Returns 0
+/// or -errno.
+i64 sys_fstatat(i64 dirfd, i64 path, i64 buf, i64 flags) {
+    u8 mac[144];
+    i64 r = mac_ret((i64)mac_fstatat(mac_dirfd(dirfd), path, &mac[0], mac_at_flags(flags)));
+    if (r == 0) {
+        mac_stat_to_linux(&mac[0], (u8*)buf);
+    }
+    return r;
+}
+
+/// Seam: fstat(2) into the Linux layout. Returns 0 or -errno.
+i64 sys_fstat(i64 fd, i64 buf) {
+    u8 mac[144];
+    i64 r = mac_ret((i64)mac_fstat((i32)fd, &mac[0]));
+    if (r == 0) {
+        mac_stat_to_linux(&mac[0], (u8*)buf);
+    }
+    return r;
+}
+
+/// Seam: stat(2) into the Linux layout (st_size @48, st_mtim @88/96).
+i64 sys_stat(i64 path, i64 buf) {
+    return sys_fstatat(AT_FDCWD, path, buf, 0);
+}
+
+/// Seam: lstat(2): like `sys_stat`, but a symlink reports itself.
+i64 sys_lstat(i64 path, i64 buf) {
+    return sys_fstatat(AT_FDCWD, path, buf, AT_SYMLINK_NOFOLLOW);
+}
+
+/// Seam: readlink(2). Returns the byte count (no NUL is written) or -errno.
+i64 sys_readlink(i64 path, i64 buf, i64 len) {
+    return mac_ret(mac_readlinkat(MAC_AT_FDCWD, path, buf, len));
+}
+
+/// Seam: mkdir(2) with permission bits `mode`. Returns 0 or -errno.
+i64 sys_mkdir(i64 path, i64 mode) {
+    return mac_ret((i64)mac_mkdirat(MAC_AT_FDCWD, path, (u16)mode));
+}
+
+/// Seam: access(2) check of `mode` bits (F_OK/R_OK/W_OK/X_OK match).
+i64 sys_access(i64 path, i64 mode) {
+    return mac_ret((i64)mac_faccessat(MAC_AT_FDCWD, path, (i32)mode, 0));
+}
+
+/// Seam: rmdir(2); the directory must be empty. Returns 0 or -errno.
+i64 sys_rmdir(i64 path) {
+    return sys_unlinkat(AT_FDCWD, path, AT_REMOVEDIR);
+}
+
+/// Seam: getcwd(2) semantics. Writes the NUL-terminated working directory
+/// into `buf` and returns its length including the terminator; -ERANGE
+/// when `cap` is too small.
+i64 sys_getcwd(i64 buf, i64 cap) {
+    if (mac_getcwd((u8*)buf, cap) == (u8*)0) {
+        return mac_neg_errno();
+    }
+    return (i64)strlen((str)buf) + 1;
+}
+
+/// Seam: chdir(2). Returns 0 or -errno.
+i64 sys_chdir(i64 path) {
+    return mac_ret((i64)mac_chdir(path));
+}
+
+/// Seam: pipe2(2). O_CLOEXEC and O_NONBLOCK are applied to both ends after
+/// creation (Darwin has no pipe2), which is atomic only with respect to
+/// this thread. Writes the read and write fds as two i32 at `fds`.
+i64 sys_pipe2(i64 fds, i64 flags) {
+    i32* out = (i32*)fds;
+    i64 r = mac_ret((i64)mac_pipe(out));
+    if (r < 0) {
+        return r;
+    }
+    i64 i = 0;
+    while (i < 2) {
+        i64 fr = mac_apply_fd_flags((i64)out[i], flags);
+        if (fr < 0) {
+            mac_close(out[0]);
+            mac_close(out[1]);
+            return fr;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+/// Applies Linux O_CLOEXEC / O_NONBLOCK bits from `flags` to `fd` (the
+/// creation-time flags Darwin's pipe, socket, and accept cannot take).
+i64 mac_apply_fd_flags(i64 fd, i64 flags) {
+    if ((flags & O_CLOEXEC) != 0) {
+        i64 r = mac_ret((i64)mac_fcntl((i32)fd, 2, 1)); // F_SETFD FD_CLOEXEC
+        if (r < 0) {
+            return r;
+        }
+    }
+    if ((flags & O_NONBLOCK) != 0) {
+        i64 cur = mac_ret((i64)mac_fcntl((i32)fd, (i32)F_GETFL));
+        if (cur < 0) {
+            return cur;
+        }
+        i64 r = mac_ret((i64)mac_fcntl((i32)fd, (i32)F_SETFL, (i32)cur | MAC_O_NONBLOCK));
+        if (r < 0) {
+            return r;
+        }
+    }
+    return 0;
+}
+
+/// Seam: pipe(2): writes the read and write fds as two i32 at `fds`.
+i64 sys_pipe(i64 fds) {
+    return sys_pipe2(fds, 0);
+}
+
+/// Seam: dup(2). Returns the new fd or -errno. A duplicate of an eventfd
+/// is the same eventfd.
+i64 sys_dup(i64 fd) {
+    return mac_eventfd_dup(fd, mac_ret((i64)mac_dup((i32)fd)));
+}
+
+/// Seam: dup2(2): makes `new_fd` a copy of `old_fd`. Returns `new_fd` or
+/// -errno. Replacing an eventfd descriptor drops its eventfd entry first.
+i64 sys_dup2(i64 old_fd, i64 new_fd) {
+    if (old_fd != new_fd && mac_fd_is_open(old_fd)) {
+        MacEventFd* replaced = mac_eventfd_find(new_fd);
+        if (replaced != (MacEventFd*)0) {
+            mac_eventfd_forget(replaced);
+        }
+    }
+    return mac_eventfd_dup(old_fd, mac_ret((i64)mac_dup2((i32)old_fd, (i32)new_fd)));
+}
+
+/// Seam: dup3(2). Equal fds are EINVAL as on Linux; O_CLOEXEC is the only
+/// flag.
+i64 sys_dup3(i64 old_fd, i64 new_fd, i64 flags) {
+    if (old_fd == new_fd) {
+        return -22;
+    }
+    i64 r = sys_dup2(old_fd, new_fd);
+    if (r < 0) {
+        return r;
+    }
+    i64 fr = mac_apply_fd_flags(new_fd, flags & O_CLOEXEC);
+    return fr < 0 ? fr : r;
+}
+
+/// Seam: poll(2) on Linux `struct pollfd` values, which Darwin shares
+/// (i32 fd, i16 events, i16 revents; POLLIN/PRI/OUT/ERR/HUP/NVAL match).
+/// Linux-only POLLRDHUP (0x2000) is cleared before the call. A negative
+/// timeout waits forever. Returns the ready count, 0 on timeout, or -errno.
+i64 sys_poll(i64 fds, i64 nfds, i64 timeout_ms) {
+    u8* p = (u8*)fds;
+    i64 i = 0;
+    while (i < nfds) {
+        u16* events = (u16*)(p + i * 8 + 4);
+        events[0] = events[0] & (u16)0xDFFF;
+        i += 1;
+    }
+    i32 t = timeout_ms < 0 ? -1 : (timeout_ms > 2147483647 ? 2147483647 : (i32)timeout_ms);
+    return mac_ret((i64)mac_poll(p, (u32)nfds, t));
+}
+
+/// Darwin `struct dirent` (64-bit inode): d_ino u64 @0, d_seekoff u64 @8,
+/// d_reclen u16 @16, d_namlen u16 @18, d_type u8 @20, d_name @21.
+const i64 MAC_DIRENT_RECLEN = 16;
+/// Byte offset of `d_namlen` in the Darwin dirent.
+const i64 MAC_DIRENT_NAMLEN = 18;
+/// Byte offset of `d_name` in the Darwin dirent.
+const i64 MAC_DIRENT_NAME = 21;
+
+/// List NUL-separated entry names of directory `path` into `buf` (capacity
+/// `cap` bytes). Returns the entry count, or a negative errno. "." and ".."
+/// are excluded. Overflow reports ENAMETOOLONG (-36).
+i64 sys_list_dir(i64 path, u8* buf, i64 cap) {
+    if (path == 0 || buf == (u8*)0 || cap <= 0) {
+        return -22; // EINVAL
+    }
+    i64 fd = sys_open(path, O_DIRECTORY | O_CLOEXEC, 0);
+    if (fd < 0) {
+        return fd;
+    }
+    u8 tmp[8192];
+    i64 base = 0;
+    i64 off = 0;
+    i64 count = 0;
+    while (true) {
+        i64 nread = mac_ret(mac_getdirentries64((i32)fd, &tmp[0], 8192, &base));
+        if (nread < 0) {
+            mac_close((i32)fd);
+            return nread;
+        }
+        if (nread == 0) {
+            break;
+        }
+        i64 bpos = 0;
+        while (bpos < nread) {
+            u16 reclen = *(u16*)&tmp[bpos + MAC_DIRENT_RECLEN];
+            if (reclen == (u16)0) {
+                break;
+            }
+            i64 len = (i64)*(u16*)&tmp[bpos + MAC_DIRENT_NAMLEN];
+            u8* name = &tmp[bpos + MAC_DIRENT_NAME];
+            bool dot = len == 1 && name[0] == (u8)46;
+            bool dotdot = len == 2 && name[0] == (u8)46 && name[1] == (u8)46;
+            if (!dot && !dotdot) {
+                if (off + len + 1 > cap) {
+                    mac_close((i32)fd);
+                    return -36; // ENAMETOOLONG
+                }
+                @memcpy(buf + off, name, len);
+                buf[off + len] = (u8)0;
+                off += len + 1;
+                count += 1;
+            }
+            bpos += (i64)reclen;
+        }
+    }
+    mac_close((i32)fd);
+    return count;
+}
+
+// ---------------------------------------------------------------------------
+// Processes and signals.
+// ---------------------------------------------------------------------------
+
+/// Seam: ends the whole process with `code`, skipping destructors and
+/// buffer flushes.
+i64 sys_exit_group(i64 code) {
+    mac_exit_process((i32)code);
+    return 0;
+}
+
+/// Threads started by `thread_spawn_raw` that have not exited. Linux
+/// exit(2) ends the process when the last thread leaves; pthread_exit would
+/// end it with status 0 instead of `code`, so the last thread calls _exit.
+i64 g_mac_spawned_threads;
+
+/// Seam: exit(2) semantics: ends the calling thread, and the process with
+/// `code` when no other thread remains (the forked-child case).
+i64 sys_exit(i64 code) {
+    if (mac_pthread_main_np() != 0) {
+        if (__atomic_load_i64(&g_mac_spawned_threads, ATOMIC_ACQUIRE) == 0) {
+            mac_exit_process((i32)code);
+        }
+    } else {
+        __atomic_fetch_sub_i64(&g_mac_spawned_threads, 1, ATOMIC_ACQ_REL);
+    }
+    mac_pthread_exit(0);
+    return 0;
+}
+
+/// Seam: returns the process id.
+i64 sys_getpid() {
+    return (i64)mac_getpid();
+}
+
+/// Seam: returns the parent process id.
+i64 sys_getppid() {
+    return (i64)mac_getppid();
+}
+
+/// Seam: kill(2). Signal numbers std uses (0, 6 SIGABRT, 9 SIGKILL, 15
+/// SIGTERM, 1 SIGHUP, 2 SIGINT, 3 SIGQUIT) match Linux.
+i64 sys_kill(i64 pid, i64 sig) {
+    return mac_ret((i64)mac_kill((i32)pid, (i32)mac_signal(sig)));
+}
+
+/// Maps a Linux signal number to Darwin's. 1-6, 8, 9, 11, 13-15, 21, 22,
+/// and 24-28 match.
+i64 mac_signal(i64 sig) {
+    if (sig == 7) { return 10; }   // SIGBUS
+    if (sig == 10) { return 30; }  // SIGUSR1
+    if (sig == 12) { return 31; }  // SIGUSR2
+    if (sig == 17) { return 20; }  // SIGCHLD
+    if (sig == 18) { return 19; }  // SIGCONT
+    if (sig == 19) { return 17; }  // SIGSTOP
+    if (sig == 20) { return 18; }  // SIGTSTP
+    if (sig == 23) { return 16; }  // SIGURG
+    if (sig == 29) { return 23; }  // SIGIO
+    if (sig == 31) { return 12; }  // SIGSYS
+    return sig;
+}
+
+/// Maps a Darwin signal number back to Linux's (for wait statuses).
+i64 mac_signal_to_linux(i64 sig) {
+    if (sig == 10) { return 7; }
+    if (sig == 30) { return 10; }
+    if (sig == 31) { return 12; }
+    if (sig == 20) { return 17; }
+    if (sig == 19) { return 18; }
+    if (sig == 17) { return 19; }
+    if (sig == 18) { return 20; }
+    if (sig == 16) { return 23; }
+    if (sig == 23) { return 29; }
+    if (sig == 12) { return 31; }
+    return sig;
+}
+
+/// Linux `sa_flags` bits and their Darwin values, packed linux << 32 | darwin:
+/// SA_NOCLDSTOP, SA_SIGINFO, SA_ONSTACK, SA_RESTART, SA_NODEFER,
+/// SA_RESETHAND.
+u64 g_mac_sa_flag_map[6] = {
+    0x0000000100000008, 0x0000000400000040, 0x0800000000000001, 0x1000000000000002,
+    0x4000000000000010, 0x8000000000000004
+};
+
+/// Seam: rt_sigaction(2) with the Linux kernel `struct sigaction` (handler
+/// @0, flags u64 @8, restorer @16, mask u64 @24) and Linux signal numbers.
+/// `sigsetsize` must be 8, as on Linux. Linux SA_RESTORER is ignored: Darwin
+/// installs its own trampoline.
+i64 sys_rt_sigaction(i64 sig, i64 act, i64 old, i64 sigsetsize) {
+    if (sigsetsize != 8) {
+        return -22;
+    }
+    u8 mact[16];
+    u8 mold[16];
+    @memset(&mold[0], 0, 16);
+    u8* mact_ptr = (u8*)0;
+    if (act != 0) {
+        i64* lin = (i64*)act;
+        @memset(&mact[0], 0, 16);
+        *(i64*)&mact[0] = lin[0];
+        *(u32*)&mact[8] = mac_sigset_from_linux((u64)lin[3]);
+        *(i32*)&mact[12] = (i32)mac_map_flags((u64)lin[1], &g_mac_sa_flag_map[0], 6, true);
+        mact_ptr = &mact[0];
+    }
+    i64 r = mac_ret((i64)mac_sigaction((i32)mac_signal(sig), mact_ptr, &mold[0]));
+    if (r == 0 && old != 0) {
+        i64* lin = (i64*)old;
+        lin[0] = *(i64*)&mold[0];
+        lin[1] = (i64)mac_map_flags((u64)(u32)*(i32*)&mold[12], &g_mac_sa_flag_map[0], 6, false);
+        lin[2] = 0;
+        lin[3] = (i64)mac_sigset_to_linux(*(u32*)&mold[8]);
+    }
+    return r;
+}
+
+/// Translates a Linux signal mask (bit n-1 = signal n) to Darwin's 32-bit
+/// sigset_t.
+u32 mac_sigset_from_linux(u64 set) {
+    u32 out = (u32)0;
+    i64 sig = 1;
+    while (sig <= 31) {
+        if ((set & ((u64)1 << (u64)(sig - 1))) != (u64)0) {
+            i64 m = mac_signal(sig);
+            if (m >= 1 && m <= 31) {
+                out = out | ((u32)1 << (u32)(m - 1));
+            }
+        }
+        sig += 1;
+    }
+    return out;
+}
+
+/// Translates a Darwin sigset_t back to a Linux signal mask.
+u64 mac_sigset_to_linux(u32 set) {
+    u64 out = (u64)0;
+    i64 sig = 1;
+    while (sig <= 31) {
+        if ((set & ((u32)1 << (u32)(sig - 1))) != (u32)0) {
+            out = out | ((u64)1 << (u64)(mac_signal_to_linux(sig) - 1));
+        }
+        sig += 1;
+    }
+    return out;
+}
+
+/// Seam: fork(2): the child pid in the parent, 0 in the child, or -errno.
+/// The child has only the forking thread.
+i64 sys_fork() {
+    i64 r = mac_ret((i64)mac_fork());
+    if (r == 0) {
+        __atomic_store_i64(&g_mac_spawned_threads, 0, ATOMIC_RELEASE);
+    }
+    return r;
+}
+
+/// Seam: execve(2). Returns only on failure, with -errno.
+i64 sys_execve(i64 path, i64 argv, i64 envp) {
+    return mac_ret((i64)mac_execve(path, argv, envp));
+}
+
+/// Seam: wait4(2). WNOHANG (1) and WUNTRACED (2) match. The Darwin wait
+/// status uses the Linux encoding except for signal numbers, which are
+/// translated. Returns the pid, 0 with WNOHANG, or -errno.
+i64 sys_wait4(i64 pid, i64 status, i64 options, i64 rusage) {
+    i32 st = 0;
+    i64 r = mac_ret((i64)mac_wait4((i32)pid, &st, (i32)options, (u8*)rusage));
+    if (r > 0 && status != 0) {
+        i64 low = (i64)st & 0x7f;
+        i64 out = (i64)st;
+        if (low != 0 && low != 0x7f) {
+            // Killed by a signal: low 7 bits are the signal, bit 7 the core flag.
+            out = ((i64)st & ~0x7f) | mac_signal_to_linux(low);
+        } else if (low == 0x7f) {
+            // Stopped: the stop signal is in bits 8..15.
+            out = (mac_signal_to_linux(((i64)st >> 8) & 0xff) << 8) | 0x7f;
+        }
+        *(i32*)status = (i32)out;
+    }
+    return r;
+}
+
+/// Seam: setsid(2). Returns the new session id or -errno.
+i64 sys_setsid() {
+    return mac_ret((i64)mac_setsid());
+}
+
+// ---------------------------------------------------------------------------
+// Threads: pthreads with a 2 MiB stack. The registry's `tid` is the
+// pthread_t; `thread_reclaim` joins it to release the thread's resources.
+// ---------------------------------------------------------------------------
+
+/// Byte size of Darwin's `pthread_attr_t`.
+const i64 MAC_PTHREAD_ATTR_SIZE = 64;
+/// Thread stack size, matching the Linux runtime's dedicated stacks.
+const i64 MAC_THREAD_STACK_SIZE = 2097152;
+
+/// Seam: starts a thread running `fn(arg)`. `flags`, `stack_top`, and `ctid`
+/// are the Linux clone contract and unused here (pthreads own the stack).
+/// Returns the pthread_t (> 0) or 0 on failure.
+i64 thread_spawn_raw(i64 flags, u8* stack_top, i64 fn, i64 arg, i32* ctid) {
+    u8 attr[64];
+    if (mac_pthread_attr_init(&attr[0]) != 0) {
+        return 0;
+    }
+    mac_pthread_attr_setstacksize(&attr[0], MAC_THREAD_STACK_SIZE);
+    i64 thread = 0;
+    __atomic_fetch_add_i64(&g_mac_spawned_threads, 1, ATOMIC_ACQ_REL);
+    // `fn` is void(i64); a pthread start routine is void*(void*). Both take
+    // the argument in x0, and the result is never read.
+    i32 r = mac_pthread_create(&thread, &attr[0], fn, arg);
+    mac_pthread_attr_destroy(&attr[0]);
+    if (r != 0) {
+        __atomic_fetch_sub_i64(&g_mac_spawned_threads, 1, ATOMIC_ACQ_REL);
+        return 0;
+    }
+    return thread;
+}
+
+/// Seam: ends only the calling thread.
+void thread_exit(i64 code) {
+    sys_exit(code);
+}
+
+/// Seam: yields the CPU to another runnable thread.
+void thread_yield() {
+    mac_sched_yield();
+}
+
+/// Seam: joins the exited thread `tid` (a pthread_t) to free its stack and
+/// thread record.
+void thread_reclaim(i64 tid) {
+    if (tid > 0) {
+        i64 ignored = 0;
+        mac_pthread_join(tid, &ignored);
+    }
+}
+
+/// Returns the calling thread's system-wide id (never 0).
+i64 mac_thread_id() {
+    u64 id = (u64)0;
+    mac_pthread_threadid_np(0, &id);
+    return (i64)id;
+}
+
+/// Number of logical CPUs available to the process (`hw.activecpu`).
+i64 mac_cpu_count() {
+    i32 n = 0;
+    i64 len = 4;
+    if (mac_sysctlbyname("hw.activecpu", (u8*)&n, &len, (u8*)0, 0) != 0 || n < 1) {
+        return 1;
+    }
+    return (i64)n;
+}
+
+// ---------------------------------------------------------------------------
+// Futex -> os_sync_wait_on_address.
+// ---------------------------------------------------------------------------
+
+/// `OS_SYNC_WAIT_ON_ADDRESS_NONE` / `OS_SYNC_WAKE_BY_ADDRESS_NONE`: the
+/// address is private to this process, like FUTEX_PRIVATE_FLAG.
+const u32 MAC_OS_SYNC_NONE = 0;
+/// `OS_CLOCK_MACH_ABSOLUTE_TIME`, the only timeout clock os_sync offers.
+const u32 MAC_OS_CLOCK_MACH_ABSOLUTE_TIME = 32;
+/// Linux FUTEX_PRIVATE_FLAG; masked off the op.
+const i64 FUTEX_PRIVATE = 128;
+
+/// Seam: futex(2) WAIT (0) and WAKE (1), with or without FUTEX_PRIVATE_FLAG.
+/// WAIT sleeps while the u32 at `uaddr` equals `val` (re-checked atomically
+/// by the kernel) until woken or the relative timespec `timeout` passes.
+/// Returns 0 when woken, -EAGAIN when the value differed, -ETIMEDOUT, or
+/// -EINTR; WAKE returns the number of waiters it was asked to wake.
+i64 sys_futex(i64 uaddr, i64 op, i64 val, i64 timeout, i64 uaddr2, i64 val3) {
+    i64 cmd = op & ~FUTEX_PRIVATE;
+    u8* addr = (u8*)uaddr;
+    if (cmd == 1) {
+        if (val == 1) {
+            mac_os_sync_wake_by_address_any(addr, 4, MAC_OS_SYNC_NONE);
+        } else {
+            // Over-waking is safe: every futex user re-checks its word.
+            mac_os_sync_wake_by_address_all(addr, 4, MAC_OS_SYNC_NONE);
+        }
+        return val;
+    }
+    if (cmd != 0) {
+        return -38; // ENOSYS: only WAIT and WAKE are part of the seam
+    }
+    i32 r = 0;
+    if (timeout == 0) {
+        r = mac_os_sync_wait_on_address(addr, (u64)(u32)val, 4, MAC_OS_SYNC_NONE);
+    } else {
+        i64* ts = (i64*)timeout;
+        if (ts[0] < 0 || ts[1] < 0 || ts[1] >= 1000000000) {
+            return -22;
+        }
+        u64 ns = (u64)ts[0] * (u64)1000000000 + (u64)ts[1];
+        if (ns == (u64)0) {
+            return -110; // ETIMEDOUT: a zero wait never sleeps
+        }
+        r = mac_os_sync_wait_on_address_with_timeout(addr, (u64)(u32)val, 4, MAC_OS_SYNC_NONE,
+            MAC_OS_CLOCK_MACH_ABSOLUTE_TIME, ns);
+    }
+    if (r >= 0) {
+        // os_sync returns immediately (with 0 waiters) when the value already
+        // differs; FUTEX_WAIT reports that as EAGAIN.
+        if (__atomic_load_i32((i32*)addr, ATOMIC_ACQUIRE) != (i32)val) {
+            return -11;
+        }
+        return 0;
+    }
+    return mac_neg_errno();
+}
+
+// ---------------------------------------------------------------------------
+// Time and randomness.
+// ---------------------------------------------------------------------------
+
+/// Darwin clock ids for Linux CLOCK_REALTIME (0) and CLOCK_MONOTONIC (1).
+const i32 MAC_CLOCK_REALTIME = 0;
+const i32 MAC_CLOCK_MONOTONIC = 6;
+
+/// Seam: clock_gettime(2) into the `{i64 sec, i64 nsec}` at `ts`.
+/// CLOCK_MONOTONIC keeps counting while the machine sleeps, like Linux
+/// CLOCK_BOOTTIME; elapsed-time measurements are unaffected.
+i64 sys_clock_gettime(i64 clk, i64 ts) {
+    i32 id = clk == 1 ? MAC_CLOCK_MONOTONIC : MAC_CLOCK_REALTIME;
+    return mac_ret((i64)mac_clock_gettime(id, (i64*)ts));
+}
+
+/// Seam: nanosleep(2) on `{i64 sec, i64 nsec}` timespecs.
+i64 sys_nanosleep(i64 req, i64 rem) {
+    return mac_ret((i64)mac_nanosleep((i64*)req, (i64*)rem));
+}
+
+/// Seam: fills `len` bytes at `buf` from the kernel CSPRNG. getentropy
+/// takes at most 256 bytes per call, so larger requests loop. Returns `len`
+/// or -errno.
+i64 sys_getrandom(i64 buf, i64 len, i64 flags) {
+    i64 done = 0;
+    while (done < len) {
+        i64 chunk = len - done;
+        if (chunk > 256) {
+            chunk = 256;
+        }
+        if (mac_getentropy((u8*)(buf + done), chunk) != 0) {
+            return mac_neg_errno();
+        }
+        done += chunk;
+    }
+    return len;
+}
+
+/// Seam: platform startup hook; nothing to do on macOS. SIGPIPE keeps its
+/// default action, as on Linux; sockets opt out per descriptor
+/// (SO_NOSIGPIPE), which is what Linux std asks for with MSG_NOSIGNAL.
+void sys_platform_init() {
+}
+
+// ---------------------------------------------------------------------------
+// Sockets. Callers pass Linux values: a sockaddr whose first two bytes are
+// a little-endian family, AF_INET6 = 10, SOL_SOCKET = 1 with Linux SO_*
+// numbers, Linux MSG_* flags, and SOCK_NONBLOCK/SOCK_CLOEXEC in the type.
+// BSD sockaddrs instead start with a length byte and a one-byte family.
+// Every socket gets SO_NOSIGPIPE: Linux std sends with MSG_NOSIGNAL, which
+// Darwin lacks.
+// ---------------------------------------------------------------------------
+
+/// Linux and Darwin address families that differ (AF_UNIX = 1 and
+/// AF_INET = 2 match).
+const i64 LINUX_AF_INET6 = 10;
+const i64 MAC_AF_INET6 = 30;
+/// Linux socket type flags (std/sys/socket.ag).
+const i64 LINUX_SOCK_NONBLOCK = 2048;
+const i64 LINUX_SOCK_CLOEXEC = 524288;
+/// Darwin `SOL_SOCKET`.
+const i32 MAC_SOL_SOCKET = 0xFFFF;
+/// Darwin `SO_NOSIGPIPE`.
+const i32 MAC_SO_NOSIGPIPE = 0x1022;
+/// Darwin `SO_ERROR`, `SO_RCVTIMEO`, and `SO_SNDTIMEO`.
+const i32 MAC_SO_ERROR = 0x1007;
+const i32 MAC_SO_RCVTIMEO = 0x1006;
+const i32 MAC_SO_SNDTIMEO = 0x1005;
+/// Largest Darwin `sockaddr_un` (Linux's is 110 bytes; Darwin's path is
+/// 104 bytes, so 106 in all).
+const i64 MAC_SOCKADDR_UN_MAX = 106;
+/// Largest sockaddr the seam converts (sockaddr_storage).
+const i64 MAC_SOCKADDR_MAX = 128;
+
+/// Copies the Linux sockaddr at `addr` into `out` in Darwin form. Returns
+/// the Darwin length or -EINVAL.
+i64 mac_sockaddr_from_linux(i64 addr, i64 len, u8* out) {
+    if (addr == 0 || len < 2 || len > MAC_SOCKADDR_MAX) {
+        return -22;
+    }
+    @memcpy(out, (u8*)addr, len);
+    i64 family = (i64)out[0] | ((i64)out[1] << 8);
+    if (family == LINUX_AF_INET6) {
+        family = MAC_AF_INET6;
+    }
+    if (family == 1) {
+        if (len > 2 && out[2] == (u8)0) {
+            return -22; // the Linux abstract namespace has no Darwin form
+        }
+        if (len > MAC_SOCKADDR_UN_MAX) {
+            // Linux callers often pass the full 110-byte struct; Darwin
+            // takes the path up to its NUL.
+            i64 end = 2;
+            while (end < len && out[end] != (u8)0) {
+                end += 1;
+            }
+            if (end >= MAC_SOCKADDR_UN_MAX) {
+                return -36; // ENAMETOOLONG: the path does not fit Darwin's
+            }
+            len = MAC_SOCKADDR_UN_MAX;
+        }
+    }
+    out[0] = (u8)len;
+    out[1] = (u8)family;
+    return len;
+}
+
+/// Rewrites the Darwin sockaddr at `addr` (`len` valid bytes) to Linux form
+/// in place.
+void mac_sockaddr_to_linux(i64 addr, i64 len) {
+    if (addr == 0 || len < 2) {
+        return;
+    }
+    u8* p = (u8*)addr;
+    i64 family = (i64)p[1];
+    if (family == MAC_AF_INET6) {
+        family = LINUX_AF_INET6;
+    }
+    p[0] = (u8)family;
+    p[1] = (u8)0;
+}
+
+/// Darwin result for an address-returning call into a caller buffer: the
+/// call writes a Darwin sockaddr of up to `cap` bytes; this converts it and
+/// keeps the Linux length contract (the full address size).
+void mac_sockaddr_result(i64 addr, u32* len_ptr) {
+    if (addr != 0 && len_ptr != (u32*)0) {
+        mac_sockaddr_to_linux(addr, (i64)len_ptr[0]);
+    }
+}
+
+/// Translates Linux send/recv flags to Darwin's.
+i32 mac_msg_flags(i64 flags) {
+    i32 out = (i32)(flags & 0x7); // MSG_OOB, MSG_PEEK, MSG_DONTROUTE match
+    if ((flags & 0x20) != 0) { out = out | 0x10; }   // MSG_TRUNC
+    if ((flags & 0x40) != 0) { out = out | 0x80; }   // MSG_DONTWAIT
+    if ((flags & 0x80) != 0) { out = out | 0x8; }    // MSG_EOR
+    if ((flags & 0x100) != 0) { out = out | 0x40; }  // MSG_WAITALL
+    // MSG_NOSIGNAL (0x4000): every socket already has SO_NOSIGPIPE.
+    return out;
+}
+
+/// Prepares a fresh socket the way Linux would hand it out: SO_NOSIGPIPE,
+/// then the requested SOCK_CLOEXEC / SOCK_NONBLOCK, with O_NONBLOCK
+/// cleared otherwise (Darwin's accept inherits it from the listener).
+/// Closes `fd` and returns -errno on failure.
+i64 mac_socket_setup(i64 fd, i64 flags) {
+    i32 one = 1;
+    mac_setsockopt((i32)fd, MAC_SOL_SOCKET, MAC_SO_NOSIGPIPE, (u8*)&one, 4);
+    i64 cur = mac_ret((i64)mac_fcntl((i32)fd, (i32)F_GETFL));
+    i64 r = cur;
+    if (cur >= 0) {
+        i64 want = (flags & LINUX_SOCK_NONBLOCK) != 0 ? cur | (i64)MAC_O_NONBLOCK : cur & ~(i64)MAC_O_NONBLOCK;
+        r = want == cur ? (i64)0 : mac_ret((i64)mac_fcntl((i32)fd, (i32)F_SETFL, (i32)want));
+    }
+    if (r >= 0 && (flags & LINUX_SOCK_CLOEXEC) != 0) {
+        r = mac_ret((i64)mac_fcntl((i32)fd, 2, 1)); // F_SETFD FD_CLOEXEC
+    }
+    if (r < 0) {
+        mac_close((i32)fd);
+        return r;
+    }
+    return fd;
+}
+
+/// Seam: socket(2) with a Linux family and type (flags included).
+i64 sys_socket(i64 domain, i64 kind, i64 protocol) {
+    i64 family = domain == LINUX_AF_INET6 ? MAC_AF_INET6 : domain;
+    i64 base = kind & ~(LINUX_SOCK_NONBLOCK | LINUX_SOCK_CLOEXEC);
+    i64 fd = mac_ret((i64)mac_socket((i32)family, (i32)base, (i32)protocol));
+    if (fd < 0) {
+        return fd;
+    }
+    return mac_socket_setup(fd, kind);
+}
+
+/// Seam: socketpair(2) with a Linux family and type; writes two i32 fds.
+i64 sys_socketpair(i64 domain, i64 kind, i64 protocol, i64 fds) {
+    i64 base = kind & ~(LINUX_SOCK_NONBLOCK | LINUX_SOCK_CLOEXEC);
+    i32* out = (i32*)fds;
+    i64 r = mac_ret((i64)mac_socketpair((i32)domain, (i32)base, (i32)protocol, out));
+    if (r < 0) {
+        return r;
+    }
+    i64 a = mac_socket_setup((i64)out[0], kind);
+    if (a < 0) {
+        mac_close(out[1]);
+        return a;
+    }
+    i64 b = mac_socket_setup((i64)out[1], kind);
+    if (b < 0) {
+        mac_close(out[0]);
+        return b;
+    }
+    return 0;
+}
+
+/// Seam: bind(2) on a Linux sockaddr.
+i64 sys_bind(i64 fd, i64 addr, i64 len) {
+    u8 sa[128];
+    i64 n = mac_sockaddr_from_linux(addr, len, &sa[0]);
+    if (n < 0) {
+        return n;
+    }
+    return mac_ret((i64)mac_bind((i32)fd, &sa[0], (u32)n));
+}
+
+/// Seam: listen(2).
+i64 sys_listen(i64 fd, i64 backlog) {
+    return mac_ret((i64)mac_listen((i32)fd, (i32)backlog));
+}
+
+/// Seam: accept4(2). The peer address (when requested) is in Linux form;
+/// SOCK_NONBLOCK / SOCK_CLOEXEC apply to the new socket only.
+i64 sys_accept4(i64 fd, i64 addr, i64 len_ptr, i64 flags) {
+    u32* lenp = (u32*)len_ptr;
+    i64 conn = 0;
+    if (addr != 0 && len_ptr != 0) {
+        conn = mac_ret((i64)mac_accept((i32)fd, (u8*)addr, lenp));
+    } else {
+        conn = mac_ret((i64)mac_accept((i32)fd, (u8*)0, (u32*)0));
+    }
+    if (conn < 0) {
+        return conn;
+    }
+    mac_sockaddr_result(addr, lenp);
+    return mac_socket_setup(conn, flags);
+}
+
+/// Seam: accept(2).
+i64 sys_accept(i64 fd, i64 addr, i64 len_ptr) {
+    return sys_accept4(fd, addr, len_ptr, 0);
+}
+
+/// Seam: connect(2) on a Linux sockaddr. A non-blocking connect reports
+/// EINPROGRESS (115) as on Linux.
+i64 sys_connect(i64 fd, i64 addr, i64 len) {
+    u8 sa[128];
+    i64 n = mac_sockaddr_from_linux(addr, len, &sa[0]);
+    if (n < 0) {
+        return n;
+    }
+    return mac_ret((i64)mac_connect((i32)fd, &sa[0], (u32)n));
+}
+
+/// Seam: shutdown(2); SHUT_RD/WR/RDWR match.
+i64 sys_shutdown(i64 fd, i64 how) {
+    return mac_ret((i64)mac_shutdown((i32)fd, (i32)how));
+}
+
+/// Darwin (level << 32 | name) for a Linux socket option; 0 accepts the
+/// option as a no-op, -1 reports ENOPROTOOPT.
+i64 mac_sockopt(i64 level, i64 name) {
+    if (level == 1) { // SOL_SOCKET
+        i64 mname = match name {
+            2: 0x4,      // SO_REUSEADDR
+            3: 0x1008,   // SO_TYPE
+            4: 0x1007,   // SO_ERROR
+            5: 0x10,     // SO_DONTROUTE
+            6: 0x20,     // SO_BROADCAST
+            7: 0x1001,   // SO_SNDBUF
+            8: 0x1002,   // SO_RCVBUF
+            9: 0x8,      // SO_KEEPALIVE
+            10: 0x100,   // SO_OOBINLINE
+            13: 0x1080,  // SO_LINGER (SO_LINGER_SEC: seconds, as on Linux)
+            15: 0x200,   // SO_REUSEPORT
+            18: 0x1004,  // SO_RCVLOWAT
+            19: 0x1003,  // SO_SNDLOWAT
+            20: 0x1006,  // SO_RCVTIMEO
+            21: 0x1005,  // SO_SNDTIMEO
+            30: 0x2,     // SO_ACCEPTCONN
+            _: -1
+        };
+        if (mname < 0) {
+            return -1;
+        }
+        return ((i64)MAC_SOL_SOCKET << 32) | mname;
+    }
+    if (level == 6) { // IPPROTO_TCP
+        i64 mname = match name {
+            1: 0x1,      // TCP_NODELAY
+            2: 0x2,      // TCP_MAXSEG
+            3: 0x4,      // TCP_CORK -> TCP_NOPUSH
+            4: 0x10,     // TCP_KEEPIDLE -> TCP_KEEPALIVE
+            5: 0x101,    // TCP_KEEPINTVL
+            6: 0x102,    // TCP_KEEPCNT
+            12: 0,       // TCP_QUICKACK: an ACK-timing hint; no Darwin knob
+            _: -1
+        };
+        if (mname <= 0) {
+            return mname;
+        }
+        return ((i64)6 << 32) | mname;
+    }
+    if (level == 0) { // IPPROTO_IP
+        i64 mname = match name {
+            1: 3,        // IP_TOS
+            2: 4,        // IP_TTL
+            33: 10,      // IP_MULTICAST_TTL
+            34: 11,      // IP_MULTICAST_LOOP
+            35: 12,      // IP_ADD_MEMBERSHIP
+            36: 13,      // IP_DROP_MEMBERSHIP
+            _: -1
+        };
+        if (mname < 0) {
+            return -1;
+        }
+        return mname;
+    }
+    if (level == 41) { // IPPROTO_IPV6
+        i64 mname = match name {
+            16: 4,       // IPV6_UNICAST_HOPS
+            19: 11,      // IPV6_MULTICAST_LOOP
+            20: 12,      // IPV6_JOIN_GROUP
+            21: 13,      // IPV6_LEAVE_GROUP
+            26: 27,      // IPV6_V6ONLY
+            _: -1
+        };
+        if (mname < 0) {
+            return -1;
+        }
+        return ((i64)41 << 32) | mname;
+    }
+    return -1;
+}
+
+/// Seam: setsockopt(2) with Linux level/option values. Linux and Darwin
+/// timevals are both 16 bytes with tv_usec at offset 8 (an i32 on Darwin),
+/// so timeouts pass through once tv_usec is range-checked (EDOM, as Linux).
+i64 sys_setsockopt(i64 fd, i64 level, i64 name, i64 value, i64 len) {
+    i64 opt = mac_sockopt(level, name);
+    if (opt == 0) {
+        return 0;
+    }
+    if (opt < 0) {
+        return -92; // ENOPROTOOPT
+    }
+    i32 mlevel = (i32)(opt >> 32);
+    i32 mname = (i32)(opt & 0xFFFFFFFF);
+    if (mlevel == MAC_SOL_SOCKET && (mname == MAC_SO_RCVTIMEO || mname == MAC_SO_SNDTIMEO)) {
+        if (len < 16) {
+            return -22;
+        }
+        i64* tv = (i64*)value;
+        if (tv[1] < 0 || tv[1] >= 1000000) {
+            return -33; // EDOM
+        }
+        i64 mtv[2];
+        mtv[0] = tv[0] < 0 ? (i64)0 : tv[0];
+        mtv[1] = tv[1];
+        if (tv[0] < 0) {
+            mtv[1] = 1; // Linux times out at once; Darwin's 0 means never
+        }
+        return mac_ret((i64)mac_setsockopt((i32)fd, mlevel, mname, (u8*)&mtv[0], 16));
+    }
+    return mac_ret((i64)mac_setsockopt((i32)fd, mlevel, mname, (u8*)value, (u32)len));
+}
+
+/// Seam: getsockopt(2) with Linux level/option values. SO_ERROR reports a
+/// Linux errno; timeouts report a Linux timeval.
+i64 sys_getsockopt(i64 fd, i64 level, i64 name, i64 value, i64 len_ptr) {
+    i64 opt = mac_sockopt(level, name);
+    u32* lenp = (u32*)len_ptr;
+    if (opt == 0) {
+        // Accepted no-op options read back as off.
+        if (lenp[0] >= (u32)4) {
+            *(i32*)value = 0;
+            lenp[0] = (u32)4;
+        }
+        return 0;
+    }
+    if (opt < 0) {
+        return -92; // ENOPROTOOPT
+    }
+    i32 mlevel = (i32)(opt >> 32);
+    i32 mname = (i32)(opt & 0xFFFFFFFF);
+    i64 r = mac_ret((i64)mac_getsockopt((i32)fd, mlevel, mname, (u8*)value, lenp));
+    if (r < 0) {
+        return r;
+    }
+    if (mlevel == MAC_SOL_SOCKET && mname == MAC_SO_ERROR) {
+        i32* err = (i32*)value;
+        if (err[0] != 0) {
+            err[0] = (i32)mac_errno_to_linux((i64)err[0]);
+        }
+    } else if (mlevel == MAC_SOL_SOCKET && (mname == MAC_SO_RCVTIMEO || mname == MAC_SO_SNDTIMEO)
+        && lenp[0] >= (u32)16) {
+        // Darwin's tv_usec is an i32 followed by padding.
+        i64* tv = (i64*)value;
+        tv[1] = (i64)*(i32*)&tv[1];
+    }
+    return 0;
+}
+
+/// Seam: getsockname(2); the result is a Linux sockaddr.
+i64 sys_getsockname(i64 fd, i64 addr, i64 len_ptr) {
+    i64 r = mac_ret((i64)mac_getsockname((i32)fd, (u8*)addr, (u32*)len_ptr));
+    if (r == 0) {
+        mac_sockaddr_result(addr, (u32*)len_ptr);
+    }
+    return r;
+}
+
+/// Seam: getpeername(2); the result is a Linux sockaddr.
+i64 sys_getpeername(i64 fd, i64 addr, i64 len_ptr) {
+    i64 r = mac_ret((i64)mac_getpeername((i32)fd, (u8*)addr, (u32*)len_ptr));
+    if (r == 0) {
+        mac_sockaddr_result(addr, (u32*)len_ptr);
+    }
+    return r;
+}
+
+/// Seam: sendto(2) with Linux flags and sockaddr; a null `addr` sends on
+/// the connected peer. Returns the count or -errno.
+i64 sys_sendto(i64 fd, i64 buf, i64 len, i64 flags, i64 addr, i64 addr_len) {
+    if (addr == 0) {
+        return mac_ret(mac_sendto((i32)fd, buf, len, mac_msg_flags(flags), (u8*)0, (u32)0));
+    }
+    u8 sa[128];
+    i64 n = mac_sockaddr_from_linux(addr, addr_len, &sa[0]);
+    if (n < 0) {
+        return n;
+    }
+    return mac_ret(mac_sendto((i32)fd, buf, len, mac_msg_flags(flags), &sa[0], (u32)n));
+}
+
+/// Seam: recvfrom(2) with Linux flags; a filled address is a Linux
+/// sockaddr. Returns the count (0 = stream peer closed) or -errno.
+i64 sys_recvfrom(i64 fd, i64 buf, i64 len, i64 flags, i64 addr, i64 len_ptr) {
+    if (addr == 0 || len_ptr == 0) {
+        return mac_ret(mac_recvfrom((i32)fd, buf, len, mac_msg_flags(flags), (u8*)0, (u32*)0));
+    }
+    i64 r = mac_ret(mac_recvfrom((i32)fd, buf, len, mac_msg_flags(flags), (u8*)addr, (u32*)len_ptr));
+    if (r >= 0) {
+        mac_sockaddr_result(addr, (u32*)len_ptr);
+    }
+    return r;
+}
+
+/// Seam: writev(2). Darwin's iovec matches Linux's (pointer, size_t).
+i64 sys_writev(i64 fd, i64 iov, i64 count) {
+    return mac_ret(mac_writev((i32)fd, iov, (i32)count));
+}
+
+/// Seam: readv(2).
+i64 sys_readv(i64 fd, i64 iov, i64 count) {
+    return mac_ret(mac_readv((i32)fd, iov, (i32)count));
+}
+
+/// Bounce-buffer size for `sys_sendfile`.
+const i64 MAC_SENDFILE_CHUNK = 65536;
+
+/// Seam: sendfile(2) between any two descriptors. Darwin's sendfile only
+/// sends a file to a socket, so this copies through a userspace buffer.
+/// With a non-null `offset_ptr` the copy reads at `*offset_ptr` (updated
+/// afterwards) and leaves the file position alone; otherwise it reads at
+/// the position and leaves it after the last byte written, so unsent bytes
+/// are resent next time. Returns the bytes written or -errno.
+i64 sys_sendfile(i64 out_fd, i64 in_fd, i64 offset_ptr, i64 count) {
+    u8 chunk[65536];
+    i64* offp = (i64*)offset_ptr;
+    i64 done = 0;
+    while (done < count) {
+        i64 want = count - done;
+        if (want > MAC_SENDFILE_CHUNK) {
+            want = MAC_SENDFILE_CHUNK;
+        }
+        i64 got = 0;
+        if (offset_ptr != 0) {
+            got = mac_ret(mac_pread((i32)in_fd, (i64)&chunk[0], want, offp[0] + done));
+        } else {
+            got = mac_ret(mac_read((i32)in_fd, (i64)&chunk[0], want));
+        }
+        if (got <= 0) {
+            if (done == 0 && got < 0) {
+                return got;
+            }
+            break;
+        }
+        i64 sent = 0;
+        i64 write_err = 0;
+        while (sent < got) {
+            i64 w = mac_ret(mac_write((i32)out_fd, (i64)&chunk[sent], got - sent));
+            if (w <= 0) {
+                write_err = w;
+                break;
+            }
+            sent += w;
+        }
+        done += sent;
+        if (sent < got) {
+            if (offset_ptr == 0) {
+                mac_lseek((i32)in_fd, sent - got, 1); // SEEK_CUR: give back the unsent tail
+            }
+            if (done == 0 && write_err < 0) {
+                return write_err;
+            }
+            break;
+        }
+        if (got < want) {
+            break;
+        }
+    }
+    if (offset_ptr != 0) {
+        offp[0] = offp[0] + done;
+    }
+    return done;
+}
+
+// ---------------------------------------------------------------------------
+// ioctl: Linux requests std issues, translated to Darwin's. Terminal state
+// travels as the Linux termios layout of std/term/raw.ag (flag words @0,
+// @4, @8, @12; c_line @16; c_cc[32] @17; speeds @52/@56). Unknown requests
+// fail with ENOTTY, as Linux reports for a descriptor without the driver.
+// ---------------------------------------------------------------------------
+
+/// Linux ioctl requests with Darwin counterparts.
+const i64 LINUX_TCGETS = 0x5401;
+const i64 LINUX_TCSETS = 0x5402;
+const i64 LINUX_TCSETSW = 0x5403;
+const i64 LINUX_TCSETSF = 0x5404;
+const i64 LINUX_TIOCSCTTY = 0x540E;
+const i64 LINUX_TIOCGPGRP = 0x540F;
+const i64 LINUX_TIOCSPGRP = 0x5410;
+const i64 LINUX_TIOCOUTQ = 0x5411;
+const i64 LINUX_TIOCGWINSZ = 0x5413;
+const i64 LINUX_TIOCSWINSZ = 0x5414;
+const i64 LINUX_FIONREAD = 0x541B;
+const i64 LINUX_FIONBIO = 0x5421;
+const i64 LINUX_TIOCNOTTY = 0x5422;
+const i64 LINUX_FIONCLEX = 0x5450;
+const i64 LINUX_FIOCLEX = 0x5451;
+const i64 LINUX_TIOCGPTN = 0x80045430;
+const i64 LINUX_TIOCSPTLCK = 0x40045431;
+
+/// Darwin ioctl requests.
+const u64 MAC_TIOCGETA = 0x40487413;
+const u64 MAC_TIOCSETA = 0x80487414;
+const u64 MAC_TIOCSETAW = 0x80487415;
+const u64 MAC_TIOCSETAF = 0x80487416;
+const u64 MAC_TIOCSCTTY = 0x20007461;
+const u64 MAC_TIOCGPGRP = 0x40047477;
+const u64 MAC_TIOCSPGRP = 0x80047476;
+const u64 MAC_TIOCOUTQ = 0x40047473;
+const u64 MAC_TIOCGWINSZ = 0x40087468;
+const u64 MAC_TIOCSWINSZ = 0x80087467;
+const u64 MAC_FIONREAD = 0x4004667F;
+const u64 MAC_FIONBIO = 0x8004667E;
+const u64 MAC_TIOCNOTTY = 0x20007471;
+const u64 MAC_FIOCLEX = 0x20006601;
+const u64 MAC_FIONCLEX = 0x20006602;
+const u64 MAC_TIOCPTYGRANT = 0x20007454;
+const u64 MAC_TIOCPTYUNLK = 0x20007452;
+const u64 MAC_TIOCPTYGNAME = 0x40807453;
+
+/// Byte size of Darwin's `struct termios` (u64 flag words, c_cc[20], u64
+/// speeds).
+const i64 MAC_TERMIOS_SIZE = 72;
+/// Byte offset of Darwin's `c_cc`.
+const i64 MAC_TERMIOS_CC = 32;
+/// Byte offset of the Linux layout's `c_cc`.
+const i64 LINUX_TERMIOS_CC = 17;
+/// Number of Linux control characters with a meaning (VINTR..VEOL2).
+const i64 LINUX_NCCS_USED = 17;
+
+/// Bit pairs (Linux, Darwin) per termios flag word; flags absent on either
+/// side are left alone. Packed as linux << 32 | darwin.
+u64 g_mac_iflag_map[14] = {
+    0x0000000100000001, 0x0000000200000002, 0x0000000400000004, 0x0000000800000008,
+    0x0000001000000010, 0x0000002000000020, 0x0000004000000040, 0x0000008000000080,
+    0x0000010000000100, 0x0000040000000200, 0x0000080000000800, 0x0000100000000400,
+    0x0000200000002000, 0x0000400000004000
+};
+u64 g_mac_oflag_map[5] = {
+    0x0000000100000001, 0x0000000400000002, 0x0000000800000010, 0x0000001000000020,
+    0x0000002000000040
+};
+u64 g_mac_cflag_map[9] = {
+    0x0000001000000100, 0x0000002000000200, 0x0000004000000400, 0x0000008000000800,
+    0x0000010000001000, 0x0000020000002000, 0x0000040000004000, 0x0000080000008000,
+    0x8000000000030000
+};
+u64 g_mac_lflag_map[14] = {
+    0x0000000100000080, 0x0000000200000100, 0x0000000800000008, 0x0000001000000002,
+    0x0000002000000004, 0x0000004000000010, 0x0000008080000000, 0x0000010000400000,
+    0x0000020000000040, 0x0000040000000020, 0x0000080000000001, 0x0000100000800000,
+    0x0000400020000000, 0x0000800000000400
+};
+/// Darwin `c_cc` index for each Linux index 0..16 (VSWTC has none: -1).
+i64 g_mac_cc_map[17] = { 8, 9, 3, 5, 0, 17, 16, -1, 12, 13, 10, 1, 6, 15, 4, 14, 2 };
+
+/// Translates the flag word `value` through `map` (`count` pairs). With
+/// `to_darwin`, Linux bits become Darwin bits; otherwise the reverse.
+u64 mac_map_flags(u64 value, u64* map, i64 count, bool to_darwin) {
+    u64 out = (u64)0;
+    i64 i = 0;
+    while (i < count) {
+        u64 linux_bit = map[i] >> (u64)32;
+        u64 darwin_bit = map[i] & (u64)0xFFFFFFFF;
+        u64 from = to_darwin ? linux_bit : darwin_bit;
+        u64 to = to_darwin ? darwin_bit : linux_bit;
+        if (from != (u64)0 && (value & from) == from) {
+            out = out | to;
+        }
+        i += 1;
+    }
+    return out;
+}
+
+/// Union of the Darwin bits `map` translates (the bits a Linux termios
+/// controls).
+u64 mac_map_mask(u64* map, i64 count) {
+    u64 out = (u64)0;
+    i64 i = 0;
+    while (i < count) {
+        out = out | (map[i] & (u64)0xFFFFFFFF);
+        i += 1;
+    }
+    return out;
+}
+
+/// Fills the Linux termios at `lin` from the Darwin termios at `mac`.
+void mac_termios_to_linux(u8* mac, u8* lin) {
+    u64* mq = (u64*)mac;
+    u32* lw = (u32*)lin;
+    @memset(lin, 0, 60);
+    lw[0] = (u32)mac_map_flags(mq[0], &g_mac_iflag_map[0], 14, false);
+    lw[1] = (u32)mac_map_flags(mq[1], &g_mac_oflag_map[0], 5, false);
+    lw[2] = (u32)mac_map_flags(mq[2], &g_mac_cflag_map[0], 9, false);
+    lw[3] = (u32)mac_map_flags(mq[3], &g_mac_lflag_map[0], 14, false);
+    i64 i = 0;
+    while (i < LINUX_NCCS_USED) {
+        i64 m = g_mac_cc_map[i];
+        if (m >= 0) {
+            lin[LINUX_TERMIOS_CC + i] = mac[MAC_TERMIOS_CC + m];
+        }
+        i += 1;
+    }
+    // Linux keeps the baud rate as a code; report the Darwin rate as-is.
+    lw[13] = (u32)mq[7];
+    lw[14] = (u32)mq[8];
+}
+
+/// Rewrites the Darwin termios at `mac` (the terminal's current state) with
+/// the settings of the Linux termios at `lin`. Darwin-only bits and the
+/// speeds keep their current values, so a saved Linux termios restores the
+/// terminal exactly.
+void mac_termios_from_linux(u8* lin, u8* mac) {
+    u64* mq = (u64*)mac;
+    u32* lw = (u32*)lin;
+    mq[0] = (mq[0] & ~mac_map_mask(&g_mac_iflag_map[0], 14))
+        | mac_map_flags((u64)lw[0], &g_mac_iflag_map[0], 14, true);
+    mq[1] = (mq[1] & ~mac_map_mask(&g_mac_oflag_map[0], 5))
+        | mac_map_flags((u64)lw[1], &g_mac_oflag_map[0], 5, true);
+    mq[2] = (mq[2] & ~mac_map_mask(&g_mac_cflag_map[0], 9))
+        | mac_map_flags((u64)lw[2], &g_mac_cflag_map[0], 9, true);
+    mq[3] = (mq[3] & ~mac_map_mask(&g_mac_lflag_map[0], 14))
+        | mac_map_flags((u64)lw[3], &g_mac_lflag_map[0], 14, true);
+    i64 i = 0;
+    while (i < LINUX_NCCS_USED) {
+        i64 m = g_mac_cc_map[i];
+        if (m >= 0) {
+            mac[MAC_TERMIOS_CC + m] = lin[LINUX_TERMIOS_CC + i];
+        }
+        i += 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// pty masters. A Darwin master answers terminal ioctls only while its slave
+// is open, and closing the last slave resets the terminal and discards
+// output the master has not read yet. Linux has neither behavior, so the
+// seam holds the slave open (close-on-exec, never a controlling terminal)
+// from the moment the master is unlocked until the master closes. When a
+// session leader that owns the terminal exits, Darwin revokes the slave,
+// the held fd included, so the master still reads EOF after the child's
+// output; Linux reports EIO there, Darwin 0.
+// ---------------------------------------------------------------------------
+
+/// Most pty masters with a held slave at once.
+const i64 MAC_PTY_MAX = 64;
+/// Master fd + 1 per slot (0 = free; the bias lets descriptor 0 be a master).
+i64 g_mac_pty_masters[64];
+/// Slave fd held for the master in the same slot.
+i64 g_mac_pty_slaves[64];
+/// Number of held slaves; close skips the lookup while 0.
+i64 g_mac_pty_live;
+
+/// Unlocks pty master `fd` (grantpt + unlockpt) and holds its slave open.
+/// Returns 0, or -errno (ENOTTY when `fd` is not a pty master).
+i64 mac_pty_hold(i64 fd) {
+    if (mac_pty_slot(fd) >= 0) {
+        return 0;
+    }
+    u8 name[128];
+    i64 r = mac_ioctl_ptr(fd, MAC_TIOCPTYGNAME, (i64)&name[0]);
+    if (r != 0) {
+        return r;
+    }
+    r = mac_ioctl_ptr(fd, MAC_TIOCPTYGRANT, 0);
+    if (r == 0) {
+        r = mac_ioctl_ptr(fd, MAC_TIOCPTYUNLK, 0);
+    }
+    if (r != 0) {
+        return r;
+    }
+    i64 slave = mac_ret((i64)mac_openat(MAC_AT_FDCWD, (i64)&name[0],
+        2 | MAC_O_NOCTTY | MAC_O_CLOEXEC | MAC_O_NONBLOCK, 0)); // O_RDWR
+    if (slave < 0) {
+        return slave;
+    }
+    i64 i = 0;
+    while (i < MAC_PTY_MAX) {
+        if (__atomic_cmpxchg_i64(&g_mac_pty_masters[i], 0, fd + 1, ATOMIC_SEQ_CST, ATOMIC_ACQUIRE)) {
+            g_mac_pty_slaves[i] = slave;
+            __atomic_fetch_add_i64(&g_mac_pty_live, 1, ATOMIC_ACQ_REL);
+            return 0;
+        }
+        i += 1;
+    }
+    mac_close((i32)slave);
+    return -24; // EMFILE
+}
+
+/// The slot holding master `fd`'s slave, or -1.
+i64 mac_pty_slot(i64 fd) {
+    if (__atomic_load_i64(&g_mac_pty_live, ATOMIC_ACQUIRE) == 0 || fd < 0) {
+        return -1;
+    }
+    i64 i = 0;
+    while (i < MAC_PTY_MAX) {
+        if (__atomic_load_i64(&g_mac_pty_masters[i], ATOMIC_ACQUIRE) == fd + 1) {
+            return i;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+/// Releases the slave held for master `fd`, if any.
+void mac_pty_release(i64 fd) {
+    i64 slot = mac_pty_slot(fd);
+    if (slot >= 0) {
+        mac_close((i32)g_mac_pty_slaves[slot]);
+        g_mac_pty_slaves[slot] = 0;
+        __atomic_store_i64(&g_mac_pty_masters[slot], 0, ATOMIC_RELEASE);
+        __atomic_fetch_sub_i64(&g_mac_pty_live, 1, ATOMIC_ACQ_REL);
+    }
+}
+
+/// A terminal ioctl that a Linux pty master answers at any time: on ENOTTY
+/// from a Darwin master, the slave is unlocked and held, then the request
+/// is retried.
+i64 mac_tty_ioctl(i64 fd, u64 request, i64 arg) {
+    i64 r = mac_ioctl_ptr(fd, request, arg);
+    if (r == -25 && mac_pty_slot(fd) < 0 && mac_pty_hold(fd) == 0) {
+        r = mac_ioctl_ptr(fd, request, arg);
+    }
+    return r;
+}
+
+/// ioctl with a pointer argument; -errno on failure.
+i64 mac_ioctl_ptr(i64 fd, u64 request, i64 arg) {
+    return mac_ret((i64)mac_ioctl((i32)fd, request, arg));
+}
+
+/// Seam: ioctl(2) with a Linux request number and argument layout.
+i64 sys_ioctl(i64 fd, i64 request, i64 arg) {
+    if (request == LINUX_TCGETS) {
+        u8 mac[72];
+        i64 r = mac_tty_ioctl(fd, MAC_TIOCGETA, (i64)&mac[0]);
+        if (r == 0) {
+            mac_termios_to_linux(&mac[0], (u8*)arg);
+        }
+        return r;
+    }
+    if (request == LINUX_TCSETS || request == LINUX_TCSETSW || request == LINUX_TCSETSF) {
+        u8 mac[72];
+        i64 r = mac_tty_ioctl(fd, MAC_TIOCGETA, (i64)&mac[0]);
+        if (r != 0) {
+            return r;
+        }
+        mac_termios_from_linux((u8*)arg, &mac[0]);
+        u64 set = request == LINUX_TCSETS ? MAC_TIOCSETA
+            : (request == LINUX_TCSETSW ? MAC_TIOCSETAW : MAC_TIOCSETAF);
+        return mac_ioctl_ptr(fd, set, (i64)&mac[0]);
+    }
+    if (request == LINUX_TIOCGWINSZ) { return mac_tty_ioctl(fd, MAC_TIOCGWINSZ, arg); }
+    if (request == LINUX_TIOCSWINSZ) { return mac_tty_ioctl(fd, MAC_TIOCSWINSZ, arg); }
+    if (request == LINUX_TIOCSCTTY) { return mac_ioctl_ptr(fd, MAC_TIOCSCTTY, 0); }
+    if (request == LINUX_TIOCNOTTY) { return mac_ioctl_ptr(fd, MAC_TIOCNOTTY, 0); }
+    if (request == LINUX_TIOCGPGRP) { return mac_ioctl_ptr(fd, MAC_TIOCGPGRP, arg); }
+    if (request == LINUX_TIOCSPGRP) { return mac_ioctl_ptr(fd, MAC_TIOCSPGRP, arg); }
+    if (request == LINUX_TIOCOUTQ) { return mac_ioctl_ptr(fd, MAC_TIOCOUTQ, arg); }
+    if (request == LINUX_FIONREAD) { return mac_ioctl_ptr(fd, MAC_FIONREAD, arg); }
+    if (request == LINUX_FIONBIO) { return mac_ioctl_ptr(fd, MAC_FIONBIO, arg); }
+    if (request == LINUX_FIOCLEX) { return mac_ioctl_ptr(fd, MAC_FIOCLEX, 0); }
+    if (request == LINUX_FIONCLEX) { return mac_ioctl_ptr(fd, MAC_FIONCLEX, 0); }
+    if (request == LINUX_TIOCSPTLCK) {
+        // Unlocking the slave is grantpt + unlockpt on Darwin; locking it
+        // again has no Darwin request and is accepted as a no-op.
+        if (*(i32*)arg != 0) {
+            return 0;
+        }
+        return mac_pty_hold(fd);
+    }
+    if (request == LINUX_TIOCGPTN) {
+        // The slave number is the digits ending the slave's name
+        // (/dev/ttys004 is 4).
+        u8 name[128];
+        i64 r = mac_ioctl_ptr(fd, MAC_TIOCPTYGNAME, (i64)&name[0]);
+        if (r != 0) {
+            return r;
+        }
+        i64 end = (i64)strlen((str)&name[0]);
+        i64 start = end;
+        while (start > 0 && name[start - 1] >= (u8)48 && name[start - 1] <= (u8)57) {
+            start -= 1;
+        }
+        u32 num = (u32)0;
+        while (start < end) {
+            num = num * (u32)10 + (u32)(name[start] - (u8)48);
+            start += 1;
+        }
+        *(u32*)arg = num;
+        return 0;
+    }
+    if (mac_fd_is_open(fd)) {
+        return -25; // ENOTTY: no driver here understands the request
+    }
+    return -9; // EBADF
+}
+
+/// True when `fd` is an open descriptor.
+bool mac_fd_is_open(i64 fd) {
+    return mac_fcntl((i32)fd, 1) != -1; // F_GETFD
+}
+
+/// Writes the NUL-terminated path of the pty slave for `master` into `buf`
+/// (`cap` >= 128 bytes). Returns 0 or -errno.
+i64 sys_ptsname(i64 master, u8* buf, i64 cap) {
+    if (cap < 128) {
+        return -34; // ERANGE
+    }
+    return mac_ioctl_ptr(master, MAC_TIOCPTYGNAME, (i64)buf);
+}
+
+// ---------------------------------------------------------------------------
+// Console seam: window size, raw mode, tty test, readable-wait.
+// ---------------------------------------------------------------------------
+
+/// Writes the terminal window size of `fd` ({rows, cols} as i64) through
+/// `rows_ptr` / `cols_ptr`. 0 on success, negative errno otherwise.
+i64 sys_console_size(i64 fd, i64 rows_ptr, i64 cols_ptr) {
+    u16 w[4];
+    i64 r = mac_tty_ioctl(fd, MAC_TIOCGWINSZ, (i64)&w[0]);
+    if (r != 0) {
+        return r;
+    }
+    *(i64*)rows_ptr = (i64)w[0];
+    *(i64*)cols_ptr = (i64)w[1];
+    return 0;
+}
+
+/// True (1) when `fd` is a terminal, 0 otherwise.
+i64 sys_is_tty(i64 fd) {
+    return mac_isatty((i32)fd) != 0 ? (i64)1 : (i64)0;
+}
+
+/// Puts `fd` into raw (cfmakeraw-equivalent) mode, saving the previous
+/// Linux-layout termios into `saved` (`len` must be >= 60). 0 on success,
+/// negative errno otherwise.
+i64 sys_raw_enable(i64 fd, u8* saved, i64 len) {
+    if (saved == (u8*)0 || len < 60) {
+        return -22;
+    }
+    i64 r = sys_ioctl(fd, LINUX_TCGETS, (i64)saved);
+    if (r != 0) {
+        return r;
+    }
+    u8 raw[60];
+    @memcpy(&raw[0], saved, 60);
+    u32* w = (u32*)&raw[0];
+    // cfmakeraw, in the Linux bit values sys_ioctl translates.
+    w[0] = w[0] & ~(u32)0x532;  // BRKINT ICRNL INPCK ISTRIP IXON
+    w[1] = w[1] & ~(u32)0x1;    // OPOST
+    w[2] = w[2] | (u32)0x30;    // CS8
+    w[3] = w[3] & ~(u32)0x800B; // ECHO ICANON IEXTEN ISIG
+    raw[LINUX_TERMIOS_CC + 6] = (u8)1; // VMIN
+    raw[LINUX_TERMIOS_CC + 5] = (u8)0; // VTIME
+    return sys_ioctl(fd, LINUX_TCSETSF, (i64)&raw[0]);
+}
+
+/// Restores a termios saved by `sys_raw_enable`. 0 on success, negative
+/// errno otherwise.
+i64 sys_raw_restore(i64 fd, u8* saved) {
+    if (saved == (u8*)0) {
+        return -22;
+    }
+    return sys_ioctl(fd, LINUX_TCSETSW, (i64)saved);
+}
+
+/// Blocks up to `timeout_ms` (negative waits forever) for `fd` to become
+/// readable. Returns 1 when readable, 0 on timeout, negative errno.
+i64 sys_wait_readable(i64 fd, i64 timeout_ms) {
+    i32 pfd[2];
+    pfd[0] = (i32)fd;
+    pfd[1] = 1; // events = POLLIN, revents = 0
+    i64 r = sys_poll((i64)&pfd[0], 1, timeout_ms);
+    if (r < 0) {
+        return r;
+    }
+    return r == 0 ? (i64)0 : (i64)1;
+}
+
+// ---------------------------------------------------------------------------
+// epoll over kqueue. The epoll fd is a kqueue; registrations become
+// EVFILT_READ / EVFILT_WRITE filters whose udata is the epoll data word.
+// Linux `struct epoll_event` is 16 bytes here (aarch64): events u32 @0,
+// data u64 @8. EPOLLONESHOT registers both filters with EV_DISPATCH (each
+// disables itself after one event) and disables the other filter when one
+// fires, so the whole registration stays off until EPOLL_CTL_MOD re-enables
+// it. Limits: EPOLL_CTL_ADD on a registered fd updates it instead of failing
+// with EEXIST, and EPOLLEXCLUSIVE / EPOLLWAKEUP are ignored.
+// ---------------------------------------------------------------------------
+
+/// Darwin kevent filters and flags.
+const i16 MAC_EVFILT_READ = -1;
+const i16 MAC_EVFILT_WRITE = -2;
+const u16 MAC_EV_ADD = 0x1;
+const u16 MAC_EV_DELETE = 0x2;
+const u16 MAC_EV_ENABLE = 0x4;
+const u16 MAC_EV_DISABLE = 0x8;
+const u16 MAC_EV_DISPATCH = 0x80;
+const u16 MAC_EV_CLEAR = 0x20;
+const u16 MAC_EV_RECEIPT = 0x40;
+const u16 MAC_EV_ERROR = 0x4000;
+const u16 MAC_EV_EOF = 0x8000;
+/// Byte size of Darwin's `struct kevent`: ident u64 @0, filter i16 @8,
+/// flags u16 @10, fflags u32 @12, data i64 @16, udata u64 @24.
+const i64 MAC_KEVENT_SIZE = 32;
+/// Events read from the kqueue per epoll_wait call.
+const i64 MAC_EPOLL_BATCH = 64;
+
+/// Linux epoll values.
+const i64 LINUX_EPOLL_CTL_ADD = 1;
+const i64 LINUX_EPOLL_CTL_DEL = 2;
+const i64 LINUX_EPOLL_CTL_MOD = 3;
+const u32 LINUX_EPOLLIN = 0x1;
+const u32 LINUX_EPOLLPRI = 0x2;
+const u32 LINUX_EPOLLOUT = 0x4;
+const u32 LINUX_EPOLLERR = 0x8;
+const u32 LINUX_EPOLLHUP = 0x10;
+const u32 LINUX_EPOLLRDHUP = 0x2000;
+const u32 LINUX_EPOLLONESHOT = 0x40000000;
+const u32 LINUX_EPOLLET = 0x80000000;
+
+/// Fills the kevent at `kev`.
+void mac_kevent_set(u8* kev, i64 ident, i16 filter, u16 flags, u64 udata) {
+    @memset(kev, 0, MAC_KEVENT_SIZE);
+    *(i64*)kev = ident;
+    *(i16*)(kev + 8) = filter;
+    *(u16*)(kev + 10) = flags;
+    *(u64*)(kev + 24) = udata;
+}
+
+/// Seam: epoll_create1(2). EPOLL_CLOEXEC is implied: kqueues are never
+/// inherited by a child process.
+i64 sys_epoll_create1(i64 flags) {
+    return mac_ret((i64)mac_kqueue());
+}
+
+/// Seam: epoll_create(2).
+i64 sys_epoll_create(i64 size) {
+    if (size <= 0) {
+        return -22;
+    }
+    return sys_epoll_create1(0);
+}
+
+/// Seam: epoll_ctl(2) on a kqueue-backed epoll fd.
+i64 sys_epoll_ctl(i64 epfd, i64 op, i64 fd, i64 event) {
+    if (epfd == fd) {
+        return -22;
+    }
+    u8 changes[64];
+    u8 results[64];
+    if (op == LINUX_EPOLL_CTL_DEL) {
+        mac_kevent_set(&changes[0], fd, MAC_EVFILT_READ, MAC_EV_DELETE | MAC_EV_RECEIPT, (u64)0);
+        mac_kevent_set(&changes[32], fd, MAC_EVFILT_WRITE, MAC_EV_DELETE | MAC_EV_RECEIPT, (u64)0);
+        i64 n = mac_ret((i64)mac_kevent((i32)epfd, &changes[0], 2, &results[0], 2, (i64*)0));
+        if (n < 0) {
+            return n;
+        }
+        // ENOENT for one filter is expected; both missing means fd was
+        // never registered.
+        i64 missing = 0;
+        i64 i = 0;
+        while (i < n) {
+            i64 err = *(i64*)&results[i * 32 + 16];
+            if (err == 2) {
+                missing += 1;
+            } else if (err != 0) {
+                return -mac_errno_to_linux(err);
+            }
+            i += 1;
+        }
+        return missing == 2 ? (i64)-2 : (i64)0;
+    }
+    if (op != LINUX_EPOLL_CTL_ADD && op != LINUX_EPOLL_CTL_MOD) {
+        return -22;
+    }
+    if (event == 0) {
+        return -14; // EFAULT
+    }
+    u32 events = *(u32*)event;
+    u64 data = *(u64*)(event + 8);
+    u16 extra = (u16)0;
+    if ((events & LINUX_EPOLLET) != (u32)0) { extra = extra | MAC_EV_CLEAR; }
+    if ((events & LINUX_EPOLLONESHOT) != (u32)0) { extra = extra | MAC_EV_DISPATCH; }
+    bool want_read = (events & (LINUX_EPOLLIN | LINUX_EPOLLPRI | LINUX_EPOLLRDHUP)) != (u32)0
+        || (events & LINUX_EPOLLOUT) == (u32)0;
+    bool want_write = (events & LINUX_EPOLLOUT) != (u32)0;
+    // EV_ENABLE re-arms a filter a one-shot event disabled (EPOLL_CTL_MOD).
+    u16 read_flags = want_read ? (MAC_EV_ADD | MAC_EV_ENABLE | extra) : MAC_EV_DELETE;
+    u16 write_flags = want_write ? (MAC_EV_ADD | MAC_EV_ENABLE | extra) : MAC_EV_DELETE;
+    mac_kevent_set(&changes[0], fd, MAC_EVFILT_READ, read_flags | MAC_EV_RECEIPT, data);
+    mac_kevent_set(&changes[32], fd, MAC_EVFILT_WRITE, write_flags | MAC_EV_RECEIPT, data);
+    i64 n = mac_ret((i64)mac_kevent((i32)epfd, &changes[0], 2, &results[0], 2, (i64*)0));
+    if (n < 0) {
+        return n;
+    }
+    i64 i = 0;
+    while (i < n) {
+        i16 filter = *(i16*)&results[i * 32 + 8];
+        i64 err = *(i64*)&results[i * 32 + 16];
+        bool deleting = (filter == MAC_EVFILT_READ && !want_read)
+            || (filter == MAC_EVFILT_WRITE && !want_write);
+        if (err != 0 && !(deleting && err == 2)) {
+            // ENOENT from deleting an unregistered filter is not a failure.
+            return -mac_errno_to_linux(err);
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+/// Seam: epoll_wait(2) on a kqueue-backed epoll fd. Read and write readiness
+/// of one fd merge into one event, as epoll reports it.
+i64 sys_epoll_wait(i64 epfd, i64 events, i64 maxevents, i64 timeout_ms) {
+    if (maxevents <= 0) {
+        return -22;
+    }
+    i64 cap = maxevents < MAC_EPOLL_BATCH ? maxevents : MAC_EPOLL_BATCH;
+    u8 kevs[2048];
+    i64 ts[2];
+    i64* tsp = (i64*)0;
+    if (timeout_ms >= 0) {
+        ts[0] = timeout_ms / 1000;
+        ts[1] = (timeout_ms % 1000) * 1000000;
+        tsp = &ts[0];
+    }
+    i64 n = mac_ret((i64)mac_kevent((i32)epfd, (u8*)0, 0, &kevs[0], (i32)cap, tsp));
+    if (n <= 0) {
+        return n;
+    }
+    i64 fds[64];
+    u8* out = (u8*)events;
+    i64 count = 0;
+    i64 i = 0;
+    while (i < n) {
+        u8* kev = &kevs[i * MAC_KEVENT_SIZE];
+        i64 fd = *(i64*)kev;
+        i16 filter = *(i16*)(kev + 8);
+        u16 flags = *(u16*)(kev + 10);
+        u32 fflags = *(u32*)(kev + 12);
+        u64 udata = *(u64*)(kev + 24);
+        if ((flags & MAC_EV_DISPATCH) != (u16)0) {
+            // One-shot: this filter disabled itself; disable the fd's other
+            // filter too (ENOENT when it is not registered is fine).
+            u8 change[32];
+            u8 result[32];
+            i16 other = filter == MAC_EVFILT_READ ? MAC_EVFILT_WRITE : MAC_EVFILT_READ;
+            mac_kevent_set(&change[0], fd, other, MAC_EV_DISABLE | MAC_EV_RECEIPT, (u64)0);
+            mac_kevent((i32)epfd, &change[0], 1, &result[0], 1, (i64*)0);
+        }
+        u32 mask = (u32)0;
+        if ((flags & MAC_EV_ERROR) != (u16)0) {
+            mask = LINUX_EPOLLERR;
+        } else if (filter == MAC_EVFILT_READ) {
+            mask = LINUX_EPOLLIN;
+            if ((flags & MAC_EV_EOF) != (u16)0) {
+                // A socket peer that shut down writing is RDHUP; a pipe or
+                // pty whose other end closed is a full hang-up.
+                mask = mask | LINUX_EPOLLRDHUP;
+                if (!mac_fd_is_socket(fd)) {
+                    mask = mask | LINUX_EPOLLHUP;
+                }
+                if (fflags != (u32)0) {
+                    mask = mask | LINUX_EPOLLERR;
+                }
+            }
+        } else if (filter == MAC_EVFILT_WRITE) {
+            mask = LINUX_EPOLLOUT;
+            if ((flags & MAC_EV_EOF) != (u16)0) {
+                mask = mask | LINUX_EPOLLHUP;
+                if (fflags != (u32)0) {
+                    mask = mask | LINUX_EPOLLERR;
+                }
+            }
+        }
+        i64 slot = 0;
+        while (slot < count && fds[slot] != fd) {
+            slot += 1;
+        }
+        if (slot == count) {
+            fds[count] = fd;
+            *(u32*)&out[count * 16] = mask;
+            *(u32*)&out[count * 16 + 4] = (u32)0;
+            *(u64*)&out[count * 16 + 8] = udata;
+            count += 1;
+        } else {
+            u32* prev = (u32*)&out[slot * 16];
+            prev[0] = prev[0] | mask;
+        }
+        i += 1;
+    }
+    return count;
+}
+
+/// Seam: epoll_pwait(2); the signal mask is not supported (must be 0).
+i64 sys_epoll_pwait(i64 epfd, i64 events, i64 maxevents, i64 timeout_ms, i64 sigmask) {
+    if (sigmask != 0) {
+        return -22;
+    }
+    return sys_epoll_wait(epfd, events, maxevents, timeout_ms);
+}
+
+/// True when `fd` is a socket.
+bool mac_fd_is_socket(i64 fd) {
+    u8 st[144];
+    if (mac_fstat((i32)fd, &st[0]) != 0) {
+        return false;
+    }
+    return ((u32)*(u16*)&st[4] & (u32)0xF000) == (u32)0xC000; // S_IFSOCK
+}
+
+// ---------------------------------------------------------------------------
+// eventfd over a pipe. The eventfd is the pipe's read end, so it polls
+// readable exactly when the counter is nonzero; the seam's read, write, and
+// close route eventfds to the counter. The counter lives in MAP_SHARED
+// memory, so a forked child and its parent share it as they share the pipe,
+// and every duplicate of the descriptor (dup, dup2, dup3, F_DUPFD) maps to
+// the same state. An exec'd program sees a plain pipe: the table does not
+// survive exec.
+// ---------------------------------------------------------------------------
+
+/// Linux eventfd flags.
+const i64 LINUX_EFD_SEMAPHORE = 1;
+/// Largest eventfd counter value (Linux: 0xfffffffffffffffe).
+const u64 MAC_EVENTFD_COUNTER_MAX = 0xFFFFFFFFFFFFFFFE;
+/// os_sync flag: the address is in memory shared between processes.
+const u32 MAC_OS_SYNC_SHARED = 1;
+/// Most eventfd descriptors (duplicates included) alive at once.
+const i64 MAC_EVENTFD_MAX = 64;
+
+/// State one eventfd's descriptors share, in MAP_SHARED memory: the 64-bit
+/// counter, the pipe's write end (the same number in every process that
+/// inherits it), and the Linux flags.
+struct MacEventState {
+    u64 counter;
+    i64 write_fd;
+    i64 flags;
+}
+
+/// One eventfd descriptor: its slot key (fd + 1; 0 = free, -1 = being
+/// filled, so descriptor 0 can be an eventfd), the descriptor (a read end of
+/// the pipe), and the shared state.
+struct MacEventFd {
+    i64 key;
+    i64 fd;
+    MacEventState* state;
+}
+
+/// Emulated eventfd descriptor table.
+MacEventFd g_mac_eventfds[64];
+/// Number of live eventfd descriptors; read/write skip the lookup while 0.
+i64 g_mac_eventfd_live;
+/// Serializes adding and removing eventfd descriptors, so exactly one
+/// close of a shared state sees itself as the last and frees it.
+i64 g_mac_eventfd_lock;
+
+/// Takes the eventfd table lock (a short spin; table changes are brief).
+void mac_eventfd_lock() {
+    while (!__atomic_cmpxchg_i64(&g_mac_eventfd_lock, 0, 1, ATOMIC_ACQUIRE, ATOMIC_RELAXED)) {
+        mac_sched_yield();
+    }
+}
+
+/// Releases the eventfd table lock.
+void mac_eventfd_unlock() {
+    __atomic_store_i64(&g_mac_eventfd_lock, 0, ATOMIC_RELEASE);
+}
+
+/// The table entry for `fd`, or null when `fd` is not an eventfd.
+MacEventFd* mac_eventfd_find(i64 fd) {
+    if (__atomic_load_i64(&g_mac_eventfd_live, ATOMIC_ACQUIRE) == 0 || fd < 0) {
+        return (MacEventFd*)0;
+    }
+    i64 i = 0;
+    while (i < MAC_EVENTFD_MAX) {
+        if (__atomic_load_i64(&g_mac_eventfds[i].key, ATOMIC_ACQUIRE) == fd + 1) {
+            return &g_mac_eventfds[i];
+        }
+        i += 1;
+    }
+    return (MacEventFd*)0;
+}
+
+/// Records `fd` as a descriptor of the eventfd with `state`. Returns false
+/// when the table is full.
+bool mac_eventfd_add(i64 fd, MacEventState* state) {
+    mac_eventfd_lock();
+    i64 i = 0;
+    while (i < MAC_EVENTFD_MAX) {
+        if (__atomic_load_i64(&g_mac_eventfds[i].key, ATOMIC_ACQUIRE) == 0) {
+            MacEventFd* e = &g_mac_eventfds[i];
+            e.fd = fd;
+            e.state = state;
+            __atomic_fetch_add_i64(&g_mac_eventfd_live, 1, ATOMIC_ACQ_REL);
+            __atomic_store_i64(&e.key, fd + 1, ATOMIC_RELEASE);
+            mac_eventfd_unlock();
+            return true;
+        }
+        i += 1;
+    }
+    mac_eventfd_unlock();
+    return false;
+}
+
+/// Seam: eventfd2(2). EFD_CLOEXEC, EFD_NONBLOCK, and EFD_SEMAPHORE match
+/// Linux's behavior.
+i64 sys_eventfd2(i64 initval, i64 flags) {
+    i64 shared = sys_mmap(0, @size(MacEventState), PROT_READ | PROT_WRITE,
+        MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (shared < 0) {
+        return shared;
+    }
+    i32 fds[2];
+    i64 r = sys_pipe2((i64)&fds[0], O_CLOEXEC);
+    if (r < 0) {
+        sys_munmap(shared, @size(MacEventState));
+        return r;
+    }
+    // Both ends stay non-blocking inside; EFD_NONBLOCK is enforced here.
+    mac_apply_fd_flags((i64)fds[0], O_NONBLOCK);
+    mac_apply_fd_flags((i64)fds[1], O_NONBLOCK);
+    if ((flags & O_CLOEXEC) == 0) {
+        mac_fcntl(fds[0], 2, 0); // F_SETFD: inheritable, as requested
+    }
+    MacEventState* state = (MacEventState*)shared;
+    state.counter = (u64)initval;
+    state.write_fd = (i64)fds[1];
+    state.flags = flags;
+    if (initval != 0) {
+        u8 one = (u8)1;
+        mac_write(fds[1], (i64)&one, 1);
+    }
+    if (!mac_eventfd_add((i64)fds[0], state)) {
+        mac_close(fds[0]);
+        mac_close(fds[1]);
+        sys_munmap(shared, @size(MacEventState));
+        return -24; // EMFILE
+    }
+    return (i64)fds[0];
+}
+
+/// Seam: eventfd(2), the flagless form.
+i64 sys_eventfd(i64 initval) {
+    return sys_eventfd2(initval, 0);
+}
+
+/// eventfd read: takes the counter (or 1 with EFD_SEMAPHORE), blocking
+/// while it is zero unless EFD_NONBLOCK.
+i64 mac_eventfd_read(MacEventFd* e, i64 buf, i64 len) {
+    if (len < 8) {
+        return -22;
+    }
+    MacEventState* state = e.state;
+    i64* counter = (i64*)&state.counter;
+    while (true) {
+        u64 c = (u64)__atomic_load_i64(counter, ATOMIC_ACQUIRE);
+        if (c == (u64)0) {
+            if ((state.flags & O_NONBLOCK) != 0) {
+                return -11; // EAGAIN
+            }
+            sys_wait_readable(e.fd, -1);
+            continue;
+        }
+        u64 taken = (state.flags & LINUX_EFD_SEMAPHORE) != 0 ? (u64)1 : c;
+        if (__atomic_cmpxchg_i64(counter, (i64)c, (i64)(c - taken), ATOMIC_SEQ_CST, ATOMIC_ACQUIRE)) {
+            if (c == taken) {
+                // Counter is zero: drain the wakeup byte(s) so polls block.
+                u8 sink[16];
+                mac_read((i32)e.fd, (i64)&sink[0], 16);
+                if (__atomic_load_i64(counter, ATOMIC_ACQUIRE) != 0) {
+                    // A writer raced the drain: keep the fd readable.
+                    u8 one = (u8)1;
+                    mac_write((i32)state.write_fd, (i64)&one, 1);
+                }
+            }
+            // Room opened: wake writers blocked on a full counter.
+            mac_os_sync_wake_by_address_all((u8*)counter, 8, MAC_OS_SYNC_SHARED);
+            *(u64*)buf = taken;
+            return 8;
+        }
+    }
+    return -5;
+}
+
+/// eventfd write: adds the 8-byte value to the counter. As on Linux, a sum
+/// past 0xfffffffffffffffe never wraps: the write fails with EAGAIN under
+/// EFD_NONBLOCK and otherwise waits until a read makes room.
+i64 mac_eventfd_write(MacEventFd* e, i64 buf, i64 len) {
+    if (len < 8) {
+        return -22;
+    }
+    u64 add = *(u64*)buf;
+    if (add == (u64)0xFFFFFFFFFFFFFFFF) {
+        return -22;
+    }
+    MacEventState* state = e.state;
+    i64* counter = (i64*)&state.counter;
+    while (true) {
+        u64 c = (u64)__atomic_load_i64(counter, ATOMIC_ACQUIRE);
+        if (MAC_EVENTFD_COUNTER_MAX - c < add) {
+            if ((state.flags & O_NONBLOCK) != 0) {
+                return -11; // EAGAIN
+            }
+            // Sleeps until a read changes the counter (or it already has).
+            mac_os_sync_wait_on_address((u8*)counter, c, 8, MAC_OS_SYNC_SHARED);
+            continue;
+        }
+        if (__atomic_cmpxchg_i64(counter, (i64)c, (i64)(c + add), ATOMIC_SEQ_CST, ATOMIC_ACQUIRE)) {
+            if (c == (u64)0 && add != (u64)0) {
+                u8 one = (u8)1;
+                mac_write((i32)state.write_fd, (i64)&one, 1);
+            }
+            return 8;
+        }
+    }
+    return -5;
+}
+
+/// Frees `e`'s slot; when it was this process's last descriptor of the
+/// eventfd, also closes the write end and unmaps the shared state. The
+/// descriptor itself stays open.
+void mac_eventfd_forget(MacEventFd* e) {
+    // Removing the entry and checking for other users is one step under the
+    // lock: two threads closing duplicates cannot both decide they are last
+    // and free the state twice.
+    mac_eventfd_lock();
+    MacEventState* state = e.state;
+    __atomic_store_i64(&e.key, 0, ATOMIC_RELEASE);
+    __atomic_fetch_sub_i64(&g_mac_eventfd_live, 1, ATOMIC_ACQ_REL);
+    bool last = true;
+    i64 i = 0;
+    while (i < MAC_EVENTFD_MAX) {
+        if (__atomic_load_i64(&g_mac_eventfds[i].key, ATOMIC_ACQUIRE) > 0
+            && g_mac_eventfds[i].state == state) {
+            last = false; // another descriptor still uses the state
+            break;
+        }
+        i += 1;
+    }
+    mac_eventfd_unlock();
+    if (last) {
+        mac_close((i32)state.write_fd);
+        sys_munmap((i64)state, @size(MacEventState));
+    }
+}
+
+/// Closes an eventfd descriptor.
+i64 mac_eventfd_close(MacEventFd* e) {
+    i64 fd = e.fd;
+    mac_eventfd_forget(e);
+    return mac_ret((i64)mac_close((i32)fd));
+}
+
+/// After `new_fd` became a duplicate of `old_fd`, makes it the same eventfd
+/// when `old_fd` is one. Returns `new_fd`, or -EMFILE (closing `new_fd`)
+/// when the table is full.
+i64 mac_eventfd_dup(i64 old_fd, i64 new_fd) {
+    if (new_fd < 0 || old_fd == new_fd) {
+        return new_fd;
+    }
+    MacEventFd* e = mac_eventfd_find(old_fd);
+    if (e == (MacEventFd*)0) {
+        return new_fd;
+    }
+    if (!mac_eventfd_add(new_fd, e.state)) {
+        mac_close((i32)new_fd);
+        return -24;
+    }
+    return new_fd;
+}
+
+// ---------------------------------------------------------------------------
+// memfd: an anonymous file is an unlinked temporary file.
+// ---------------------------------------------------------------------------
+
+/// Linux `MFD_CLOEXEC`.
+const i64 LINUX_MFD_CLOEXEC = 1;
+/// Distinguishes memfds created by one process.
+i64 g_mac_memfd_serial;
+
+/// Seam: memfd_create(2): a file descriptor for anonymous memory-backed
+/// storage. Darwin has none, so this opens a fresh file in /tmp and unlinks
+/// it at once; the fd behaves like a memfd (read, write, ftruncate, mmap,
+/// lseek). `name` is only a label, as on Linux. Sealing is unsupported.
+i64 sys_memfd_create(i64 name, i64 flags) {
+    u8 path[96];
+    i64 tries = 0;
+    while (tries < 16) {
+        u64 rnd = (u64)0;
+        sys_getrandom((i64)&rnd, 8, 0);
+        i64 serial = __atomic_fetch_add_i64(&g_mac_memfd_serial, 1, ATOMIC_ACQ_REL);
+        i64 n = mac_format_memfd_path(&path[0], sys_getpid(), serial, rnd);
+        path[n] = (u8)0;
+        i64 oflags = O_RDWR | O_CREAT | O_EXCL;
+        if ((flags & LINUX_MFD_CLOEXEC) != 0) {
+            oflags = oflags | O_CLOEXEC;
+        }
+        i64 fd = sys_open((i64)&path[0], oflags | LINUX_O_NOFOLLOW, 384); // 0600
+        if (fd >= 0) {
+            sys_unlink((i64)&path[0]);
+            return fd;
+        }
+        if (fd != -17) { // EEXIST: try another name
+            return fd;
+        }
+        tries += 1;
+    }
+    return -17;
+}
+
+/// Writes "/tmp/.silver-memfd-<pid>-<serial>-<hex>" to `out`; returns the
+/// length.
+i64 mac_format_memfd_path(u8* out, i64 pid, i64 serial, u64 rnd) {
+    str prefix = "/tmp/.silver-memfd-";
+    i64 n = (i64)strlen(prefix);
+    @memcpy(out, (u8*)prefix, n);
+    n = mac_append_dec(out, n, pid);
+    out[n] = (u8)45; // '-'
+    n = mac_append_dec(out, n + 1, serial);
+    out[n] = (u8)45;
+    n += 1;
+    i64 i = 0;
+    while (i < 16) {
+        u64 nib = (rnd >> (u64)(60 - i * 4)) & (u64)15;
+        out[n] = nib < (u64)10 ? (u8)(48 + (i64)nib) : (u8)(87 + (i64)nib);
+        n += 1;
+        i += 1;
+    }
+    return n;
+}
+
+/// Appends `value` (>= 0) in decimal at `out[n]`; returns the new length.
+i64 mac_append_dec(u8* out, i64 n, i64 value) {
+    u8 digits[20];
+    i64 count = 0;
+    while (true) {
+        digits[count] = (u8)(48 + value % 10);
+        count += 1;
+        value = value / 10;
+        if (value == 0) {
+            break;
+        }
+    }
+    while (count > 0) {
+        count -= 1;
+        out[n] = digits[count];
+        n += 1;
+    }
+    return n;
+}
+
+// ---------------------------------------------------------------------------
+// io_uring, emulated in userspace. The ring fd is a kqueue (a real, closable
+// descriptor); mmap on it at IORING_OFF_SQ_RING / CQ_RING / SQES hands out
+// the ring memory this seam allocated, laid out as Linux describes it in
+// `io_uring_params`. io_uring_enter consumes submissions: an operation whose
+// descriptor is ready (or a regular file) completes at once through the
+// seam, so results are Linux values; one that would block stays pending and
+// is polled until ready. Unlike the kernel, pending operations progress only
+// inside io_uring_enter (std's `submit` / `submit_and_wait`), and SQPOLL,
+// IOPOLL, registered buffers and files, and linked timeouts are rejected.
+// ---------------------------------------------------------------------------
+
+/// io_uring opcodes the emulation runs (Linux values).
+const i64 URING_NOP = 0;
+const i64 URING_READV = 1;
+const i64 URING_WRITEV = 2;
+const i64 URING_FSYNC = 3;
+const i64 URING_POLL_ADD = 6;
+const i64 URING_ACCEPT = 13;
+const i64 URING_CONNECT = 16;
+const i64 URING_OPENAT = 18;
+const i64 URING_CLOSE = 19;
+const i64 URING_READ = 22;
+const i64 URING_WRITE = 23;
+const i64 URING_SEND = 26;
+const i64 URING_RECV = 27;
+const i64 URING_SHUTDOWN = 34;
+const i64 URING_SOCKET = 45;
+/// io_uring_setup flags the emulation accepts: CQSIZE and CLAMP.
+const u32 URING_SETUP_CQSIZE = 8;
+const u32 URING_SETUP_CLAMP = 16;
+/// Features reported: SINGLE_MMAP, NODROP, SUBMIT_STABLE, RW_CUR_POS.
+const u32 URING_FEATURES = 15;
+/// io_uring_enter flag: wait for `min_complete` completions.
+const i64 URING_ENTER_GETEVENTS = 1;
+/// Linux ring-mapping offsets.
+const i64 URING_OFF_SQ_RING = 0;
+const i64 URING_OFF_CQ_RING = 0x8000000;
+const i64 URING_OFF_SQES = 0x10000000;
+/// Largest SQ ring Linux allows.
+const i64 URING_MAX_ENTRIES = 32768;
+/// Ring layout inside the shared region: SQ header at 0 (head, tail,
+/// mask, entries, flags, dropped), SQ index array at 64; the CQ header
+/// (head, tail, mask, entries, overflow, flags) on the next 64-byte boundary
+/// after the array, and the 16-byte CQEs 64 bytes after that.
+const i64 URING_SQ_ARRAY = 64;
+const i64 URING_CQ_CQES = 64;
+/// An operation that cannot complete yet. CQE results are 32-bit (a count
+/// or -errno), so this value can never be a real result; 1 was a one-byte
+/// read or send.
+const i64 URING_PENDING = 0x4000000000000000;
+/// A connect that started and is still in progress (also outside the result
+/// range). Its pending copy is marked at URING_SQE_CONNECTING.
+const i64 URING_CONNECTING = 0x4000000000000001;
+/// Byte of a pending SQE copy (in the SQE's padding) set while its connect
+/// is in progress.
+const i64 URING_SQE_CONNECTING = 56;
+/// Most rings alive at once.
+const i64 MAC_URING_MAX = 16;
+
+/// One emulated ring.
+struct MacUring {
+    i64 key;            // ring fd + 1; 0 = free slot, -1 = being filled
+    i64 fd;             // ring fd
+    u8* ring;           // SQ and CQ rings (one region)
+    i64 ring_size;
+    u8* sqes;           // submission entries
+    i64 sqes_size;
+    u8* pending;        // copies of SQEs waiting for readiness
+    i64 pending_count;
+    u8* pollfds;        // one pollfd per pending operation, for waits
+    i64 sq_entries;
+    i64 cq_entries;
+    i64 cq_off;         // byte offset of the CQ header in `ring`
+    bool ring_mapped;   // the caller owns the mapping once it maps it
+    bool sqes_mapped;
+}
+
+/// Emulated ring table.
+MacUring g_mac_urings[16];
+/// Number of live rings; mmap and close skip the lookup while 0.
+i64 g_mac_uring_live;
+
+/// The ring whose fd is `fd`, or null.
+MacUring* mac_uring_find(i64 fd) {
+    if (__atomic_load_i64(&g_mac_uring_live, ATOMIC_ACQUIRE) == 0 || fd < 0) {
+        return (MacUring*)0;
+    }
+    i64 i = 0;
+    while (i < MAC_URING_MAX) {
+        if (__atomic_load_i64(&g_mac_urings[i].key, ATOMIC_ACQUIRE) == fd + 1) {
+            return &g_mac_urings[i];
+        }
+        i += 1;
+    }
+    return (MacUring*)0;
+}
+
+/// Rounds `n` (>= 1) up to a power of two.
+i64 mac_pow2(i64 n) {
+    i64 p = 1;
+    while (p < n) {
+        p = p * 2;
+    }
+    return p;
+}
+
+/// Rounds `n` up to whole 16 KiB pages (the arm64 macOS page size).
+i64 mac_page_round(i64 n) {
+    return (n + 16383) & ~(i64)16383;
+}
+
+/// Seam: io_uring_setup(2). Fills the Linux `io_uring_params` at `params`
+/// and returns the ring fd.
+i64 sys_io_uring_setup(i64 entries, i64 params) {
+    if (params == 0) {
+        return -14;
+    }
+    u32* pw = (u32*)params;
+    u32 flags = pw[2];
+    if ((flags & ~(URING_SETUP_CQSIZE | URING_SETUP_CLAMP)) != (u32)0) {
+        return -22; // SQPOLL, IOPOLL, and the rest need the kernel
+    }
+    if (entries <= 0) {
+        return -22;
+    }
+    if (entries > URING_MAX_ENTRIES) {
+        if ((flags & URING_SETUP_CLAMP) == (u32)0) {
+            return -22;
+        }
+        entries = URING_MAX_ENTRIES;
+    }
+    i64 sq = mac_pow2(entries);
+    i64 cq = sq * 2;
+    if ((flags & URING_SETUP_CQSIZE) != (u32)0) {
+        i64 want = (i64)pw[1];
+        if (want < sq) {
+            return -22;
+        }
+        cq = mac_pow2(want);
+    }
+    i64 cq_off = (URING_SQ_ARRAY + sq * 4 + 63) & ~(i64)63;
+    i64 ring_size = mac_page_round(cq_off + URING_CQ_CQES + cq * 16);
+    i64 sqes_size = mac_page_round(sq * 64);
+    i64 pending_size = mac_page_round(cq * 64);
+    i64 pollfds_size = mac_page_round(cq * 8);
+    i64 ring = sys_mmap(0, ring_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    i64 sqes = sys_mmap(0, sqes_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    i64 pending = sys_mmap(0, pending_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    i64 pollfds = sys_mmap(0, pollfds_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    i64 fd = mac_ret((i64)mac_kqueue());
+    if (ring < 0 || sqes < 0 || pending < 0 || pollfds < 0 || fd < 0) {
+        if (ring > 0) { sys_munmap(ring, ring_size); }
+        if (sqes > 0) { sys_munmap(sqes, sqes_size); }
+        if (pending > 0) { sys_munmap(pending, pending_size); }
+        if (pollfds > 0) { sys_munmap(pollfds, pollfds_size); }
+        if (fd >= 0) { mac_close((i32)fd); }
+        return -12; // ENOMEM
+    }
+    u32* sqh = (u32*)ring;
+    sqh[2] = (u32)(sq - 1);
+    sqh[3] = (u32)sq;
+    u32* cqh = (u32*)(ring + cq_off);
+    cqh[2] = (u32)(cq - 1);
+    cqh[3] = (u32)cq;
+
+    i64 i = 0;
+    while (i < MAC_URING_MAX) {
+        if (__atomic_cmpxchg_i64(&g_mac_urings[i].key, 0, -1, ATOMIC_SEQ_CST, ATOMIC_ACQUIRE)) {
+            MacUring* u = &g_mac_urings[i];
+            u.fd = fd;
+            u.ring = (u8*)ring;
+            u.ring_size = ring_size;
+            u.sqes = (u8*)sqes;
+            u.sqes_size = sqes_size;
+            u.pending = (u8*)pending;
+            u.pending_count = 0;
+            u.pollfds = (u8*)pollfds;
+            u.sq_entries = sq;
+            u.cq_entries = cq;
+            u.cq_off = cq_off;
+            u.ring_mapped = false;
+            u.sqes_mapped = false;
+            __atomic_fetch_add_i64(&g_mac_uring_live, 1, ATOMIC_ACQ_REL);
+            __atomic_store_i64(&u.key, fd + 1, ATOMIC_RELEASE);
+            break;
+        }
+        i += 1;
+    }
+    if (i == MAC_URING_MAX) {
+        sys_munmap(ring, ring_size);
+        sys_munmap(sqes, sqes_size);
+        sys_munmap(pending, pending_size);
+        sys_munmap(pollfds, pollfds_size);
+        mac_close((i32)fd);
+        return -24; // EMFILE
+    }
+    // Linux io_uring_params: sq_entries, cq_entries, flags, ..., features
+    // @20; sq_off @40 (head, tail, ring_mask, ring_entries, flags, dropped,
+    // array); cq_off @80 (head, tail, ring_mask, ring_entries, overflow,
+    // cqes, flags).
+    pw[0] = (u32)sq;
+    pw[1] = (u32)cq;
+    pw[5] = URING_FEATURES;
+    u32* so = (u32*)(params + 40);
+    so[0] = (u32)0;
+    so[1] = (u32)4;
+    so[2] = (u32)8;
+    so[3] = (u32)12;
+    so[4] = (u32)16;
+    so[5] = (u32)20;
+    so[6] = (u32)URING_SQ_ARRAY;
+    u32* co = (u32*)(params + 80);
+    co[0] = (u32)cq_off;
+    co[1] = (u32)(cq_off + 4);
+    co[2] = (u32)(cq_off + 8);
+    co[3] = (u32)(cq_off + 12);
+    co[4] = (u32)(cq_off + 16);
+    co[5] = (u32)(cq_off + URING_CQ_CQES);
+    co[6] = (u32)(cq_off + 20);
+    return fd;
+}
+
+/// mmap of a ring fd: the ring region for the SQ/CQ offsets, the SQE array
+/// for IORING_OFF_SQES. The caller then owns the mapping (munmap frees it).
+i64 mac_uring_map(MacUring* u, i64 len, i64 off) {
+    if (off == URING_OFF_SQ_RING || off == URING_OFF_CQ_RING) {
+        if (len > u.ring_size) {
+            return -22;
+        }
+        u.ring_mapped = true;
+        return (i64)u.ring;
+    }
+    if (off == URING_OFF_SQES) {
+        if (len > u.sqes_size) {
+            return -22;
+        }
+        u.sqes_mapped = true;
+        return (i64)u.sqes;
+    }
+    return -22;
+}
+
+/// Frees a ring's slot on close. Regions the caller mapped stay with the
+/// caller's mapping, as kernel rings outlive their fd while mapped.
+void mac_uring_release(MacUring* u) {
+    if (!u.ring_mapped) {
+        sys_munmap((i64)u.ring, u.ring_size);
+    }
+    if (!u.sqes_mapped) {
+        sys_munmap((i64)u.sqes, u.sqes_size);
+    }
+    sys_munmap((i64)u.pending, mac_page_round(u.cq_entries * 64));
+    sys_munmap((i64)u.pollfds, mac_page_round(u.cq_entries * 8));
+    __atomic_store_i64(&u.key, 0, ATOMIC_RELEASE);
+    __atomic_fetch_sub_i64(&g_mac_uring_live, 1, ATOMIC_ACQ_REL);
+}
+
+/// Completions posted and not yet consumed.
+i64 mac_uring_cq_ready(MacUring* u) {
+    u32* cqh = (u32*)(u.ring + u.cq_off);
+    u32 head = (u32)__atomic_load_i32((i32*)&cqh[0], ATOMIC_ACQUIRE);
+    u32 tail = cqh[1];
+    return (i64)(tail - head);
+}
+
+/// Posts one completion. Returns false when the CQ ring is full.
+bool mac_uring_post(MacUring* u, u64 user_data, i64 res) {
+    u32* cqh = (u32*)(u.ring + u.cq_off);
+    if (mac_uring_cq_ready(u) >= u.cq_entries) {
+        cqh[4] = cqh[4] + (u32)1; // overflow
+        return false;
+    }
+    u32 tail = cqh[1];
+    u8* cqe = u.ring + u.cq_off + URING_CQ_CQES + (i64)(tail & cqh[2]) * 16;
+    *(u64*)cqe = user_data;
+    *(i32*)(cqe + 8) = (i32)res;
+    *(u32*)(cqe + 12) = (u32)0;
+    __atomic_store_i32((i32*)&cqh[1], (i32)(tail + (u32)1), ATOMIC_RELEASE);
+    return true;
+}
+
+/// Poll events an operation waits for before it can run without blocking,
+/// or 0 when it never waits.
+i64 mac_uring_wait_events(u8* sqe) {
+    i64 op = (i64)sqe[0];
+    if (op == URING_READ || op == URING_READV || op == URING_RECV || op == URING_ACCEPT) {
+        return 1; // POLLIN
+    }
+    if (op == URING_WRITE || op == URING_WRITEV || op == URING_SEND) {
+        return 4; // POLLOUT
+    }
+    if (op == URING_POLL_ADD) {
+        return (i64)(*(u32*)(sqe + 28) & (u32)0xFFFF);
+    }
+    if (op == URING_CONNECT && sqe[URING_SQE_CONNECTING] != (u8)0) {
+        return 4; // POLLOUT: the connection finished or failed
+    }
+    return 0;
+}
+
+/// Runs an io_uring connect without blocking the caller. The first attempt
+/// is non-blocking (a blocking socket is switched for the call only, so
+/// another thread using the socket meanwhile sees O_NONBLOCK); a connect
+/// still in progress returns URING_CONNECTING and completes, once the
+/// socket is writable, with its SO_ERROR, as the kernel reports it.
+i64 mac_uring_connect(u8* sqe, i64 fd, i64 addr, i64 addr_len) {
+    if (sqe[URING_SQE_CONNECTING] != (u8)0) {
+        i32 err = 0;
+        u32 err_len = (u32)4;
+        i64 r = sys_getsockopt(fd, 1, 4, (i64)&err, (i64)&err_len); // SOL_SOCKET, SO_ERROR
+        return r < 0 ? r : -(i64)err;
+    }
+    i64 status = sys_fcntl(fd, F_GETFL, 0);
+    if (status < 0) {
+        return status;
+    }
+    bool blocking = (status & O_NONBLOCK) == 0;
+    if (blocking) {
+        sys_fcntl(fd, F_SETFL, status | O_NONBLOCK);
+    }
+    i64 r = sys_connect(fd, addr, addr_len);
+    if (blocking) {
+        sys_fcntl(fd, F_SETFL, status);
+    }
+    return r == -115 ? URING_CONNECTING : r; // EINPROGRESS
+}
+
+/// Polls `fd` for `events` without waiting. Returns the revents.
+i64 mac_uring_ready(i64 fd, i64 events, i64 timeout_ms) {
+    i32 pfd[2];
+    pfd[0] = (i32)fd;
+    pfd[1] = (i32)events;
+    i64 r = sys_poll((i64)&pfd[0], 1, timeout_ms);
+    if (r <= 0) {
+        return 0;
+    }
+    return (i64)(u32)(pfd[1] >> 16) & 0xFFFF;
+}
+
+/// Read or write at `off` (u64 -1 = the file position); a non-seekable
+/// descriptor ignores the offset, as with the kernel.
+i64 mac_uring_rw(i64 fd, i64 buf, i64 len, i64 off, bool write) {
+    if (off != -1) {
+        i64 r = write ? mac_ret(mac_pwrite((i32)fd, buf, len, off))
+            : mac_ret(mac_pread((i32)fd, buf, len, off));
+        if (r != -29) { // ESPIPE: a pipe, socket, or tty
+            return r;
+        }
+    }
+    return write ? sys_write(fd, buf, len) : sys_read(fd, buf, len);
+}
+
+/// Vectored form of `mac_uring_rw`.
+i64 mac_uring_rwv(i64 fd, i64 iov, i64 count, i64 off, bool write) {
+    if (off != -1) {
+        i64 r = write ? mac_ret(mac_pwritev((i32)fd, iov, (i32)count, off))
+            : mac_ret(mac_preadv((i32)fd, iov, (i32)count, off));
+        if (r != -29) {
+            return r;
+        }
+    }
+    return write ? sys_writev(fd, iov, count) : sys_readv(fd, iov, count);
+}
+
+/// Runs one SQE (Linux layout: opcode @0, fd @4, off @8, addr @16, len @24,
+/// op flags @28, user_data @32). Returns the CQE result, URING_PENDING when
+/// `may_wait` is false and the descriptor is not ready yet, or
+/// URING_CONNECTING for a connect in progress.
+i64 mac_uring_run(u8* sqe, bool may_wait) {
+    i64 op = (i64)sqe[0];
+    i64 fd = (i64)*(i32*)(sqe + 4);
+    i64 off = *(i64*)(sqe + 8);
+    i64 addr = *(i64*)(sqe + 16);
+    i64 len = (i64)*(u32*)(sqe + 24);
+    i64 opflags = (i64)*(u32*)(sqe + 28);
+    i64 events = mac_uring_wait_events(sqe);
+    i64 revents = 0;
+    if (events != 0) {
+        revents = mac_uring_ready(fd, events | 0x38, 0); // + ERR HUP NVAL
+        if (revents == 0) {
+            if (!may_wait) {
+                return URING_PENDING;
+            }
+        }
+        if ((revents & 0x20) != 0) {
+            return -9; // POLLNVAL: EBADF
+        }
+    }
+    if (op == URING_NOP) { return 0; }
+    if (op == URING_POLL_ADD) { return revents & (events | 0x18); }
+    if (op == URING_READ) { return mac_uring_rw(fd, addr, len, off, false); }
+    if (op == URING_WRITE) { return mac_uring_rw(fd, addr, len, off, true); }
+    if (op == URING_READV) { return mac_uring_rwv(fd, addr, len, off, false); }
+    if (op == URING_WRITEV) { return mac_uring_rwv(fd, addr, len, off, true); }
+    if (op == URING_RECV) { return sys_recvfrom(fd, addr, len, opflags, 0, 0); }
+    if (op == URING_SEND) { return sys_sendto(fd, addr, len, opflags, 0, 0); }
+    if (op == URING_ACCEPT) { return sys_accept4(fd, addr, off, opflags); }
+    if (op == URING_CONNECT) { return mac_uring_connect(sqe, fd, addr, off); }
+    if (op == URING_FSYNC) { return sys_fsync(fd); }
+    if (op == URING_OPENAT) { return sys_openat(fd, addr, opflags, len); }
+    if (op == URING_CLOSE) { return sys_close(fd); }
+    if (op == URING_SHUTDOWN) { return sys_shutdown(fd, len); }
+    if (op == URING_SOCKET) { return sys_socket(fd, off, len); }
+    return -22; // EINVAL: opcode not supported here
+}
+
+/// Runs pending operations that became ready, waiting up to `timeout_ms`
+/// for the first (0 = just check). Returns how many completed.
+i64 mac_uring_service(MacUring* u, i64 timeout_ms) {
+    if (u.pending_count == 0) {
+        return 0;
+    }
+    if (timeout_ms != 0) {
+        // Wait until any pending descriptor is ready; every pending operation
+        // is watched, so readiness on any of them ends the wait.
+        i32* pfds = (i32*)u.pollfds;
+        i64 i = 0;
+        while (i < u.pending_count) {
+            u8* sqe = u.pending + i * 64;
+            pfds[i * 2] = *(i32*)(sqe + 4);
+            pfds[i * 2 + 1] = (i32)(mac_uring_wait_events(sqe) | 0x38);
+            i += 1;
+        }
+        sys_poll((i64)pfds, u.pending_count, timeout_ms);
+    }
+    i64 done = 0;
+    i64 i = 0;
+    while (i < u.pending_count) {
+        u8* sqe = u.pending + i * 64;
+        i64 res = mac_uring_run(sqe, false);
+        if (res == URING_PENDING || res == URING_CONNECTING) {
+            i += 1;
+            continue;
+        }
+        mac_uring_post(u, *(u64*)(sqe + 32), res);
+        done += 1;
+        // Keep submission order: shift the rest down.
+        i64 rest = (u.pending_count - i - 1) * 64;
+        if (rest > 0) {
+            @memmove(sqe, sqe + 64, rest);
+        }
+        u.pending_count -= 1;
+    }
+    return done;
+}
+
+/// Seam: io_uring_enter(2): consumes up to `to_submit` SQEs and, with
+/// IORING_ENTER_GETEVENTS, waits until `min_complete` completions are
+/// posted. Returns the number of SQEs consumed.
+i64 sys_io_uring_enter6(i64 fd, i64 to_submit, i64 min_complete, i64 flags, i64 arg, i64 argsz) {
+    MacUring* u = mac_uring_find(fd);
+    if (u == (MacUring*)0) {
+        return mac_fd_is_open(fd) ? (i64)-95 : (i64)-9; // EOPNOTSUPP / EBADF
+    }
+    u32* sqh = (u32*)u.ring;
+    u32* array = (u32*)(u.ring + URING_SQ_ARRAY);
+    u32 head = sqh[0];
+    u32 tail = (u32)__atomic_load_i32((i32*)&sqh[1], ATOMIC_ACQUIRE);
+    i64 submitted = 0;
+    while (submitted < to_submit && head != tail) {
+        // Room for every in-flight completion (NODROP).
+        if (mac_uring_cq_ready(u) + u.pending_count >= u.cq_entries) {
+            break;
+        }
+        u32 index = array[head & sqh[2]];
+        if ((i64)index >= u.sq_entries) {
+            sqh[5] = sqh[5] + (u32)1; // dropped: invalid index
+        } else {
+            u8* sqe = u.sqes + (i64)index * 64;
+            i64 res = mac_uring_run(sqe, false);
+            if (res == URING_PENDING || res == URING_CONNECTING) {
+                u8* copy = u.pending + u.pending_count * 64;
+                @memcpy(copy, sqe, 64);
+                copy[URING_SQE_CONNECTING] = res == URING_CONNECTING ? (u8)1 : (u8)0;
+                u.pending_count += 1;
+            } else {
+                mac_uring_post(u, *(u64*)(sqe + 32), res);
+            }
+        }
+        head += (u32)1;
+        submitted += 1;
+    }
+    __atomic_store_i32((i32*)&sqh[0], (i32)head, ATOMIC_RELEASE);
+    mac_uring_service(u, 0);
+    if ((flags & URING_ENTER_GETEVENTS) != 0) {
+        while (mac_uring_cq_ready(u) < min_complete && u.pending_count > 0) {
+            mac_uring_service(u, -1);
+        }
+    }
+    return submitted;
+}
+
+/// Seam: io_uring_enter(2) without the extended argument.
+i64 sys_io_uring_enter(i64 fd, i64 to_submit, i64 min_complete, i64 flags) {
+    return sys_io_uring_enter6(fd, to_submit, min_complete, flags, 0, 0);
+}
+
+/// Seam: io_uring_register(2). Registered buffers, files, and eventfds need
+/// the kernel ring; every opcode reports EINVAL.
+i64 sys_io_uring_register(i64 fd, i64 opcode, i64 arg) {
+    if (mac_uring_find(fd) == (MacUring*)0) {
+        return mac_fd_is_open(fd) ? (i64)-95 : (i64)-9;
+    }
+    return -22;
+}
+
+// ---------------------------------------------------------------------------
+// Process introspection: executable path and resident memory.
+// ---------------------------------------------------------------------------
+
+/// Darwin `PATH_MAX`.
+const i64 MAC_PATH_MAX = 1024;
+
+/// Seam: the absolute path of the running executable with symlinks
+/// resolved (what Linux reads from /proc/self/exe), written to `buf`
+/// without a NUL. Returns the length or -errno (ERANGE when `cap` is short).
+i64 sys_executable_path(u8* buf, i64 cap) {
+    u8 raw[1024];
+    u32 size = (u32)1024;
+    if (mac_NSGetExecutablePath(&raw[0], &size) != 0) {
+        return -36; // ENAMETOOLONG
+    }
+    u8 resolved[1024];
+    if (mac_realpath(&raw[0], &resolved[0]) == (u8*)0) {
+        return mac_neg_errno();
+    }
+    i64 length = (i64)strlen((str)&resolved[0]);
+    if (length > cap) {
+        return -34;
+    }
+    @memcpy(buf, &resolved[0], length);
+    return length;
+}
+
+/// `MACH_TASK_BASIC_INFO` flavor and its size in 32-bit words.
+const i32 MAC_TASK_BASIC_INFO = 20;
+const u32 MAC_TASK_BASIC_INFO_COUNT = 12;
+
+/// Resident set size of the process in KiB (Linux's VmRSS), or 0 when
+/// unavailable.
+i64 mac_resident_kb() {
+    u64 info[6];
+    u32 count = MAC_TASK_BASIC_INFO_COUNT;
+    if (mac_task_info(mach_task_self_, MAC_TASK_BASIC_INFO, (u8*)&info[0], &count) != 0) {
+        return 0;
+    }
+    return (i64)(info[1] / (u64)1024); // resident_size
+}

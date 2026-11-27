@@ -164,11 +164,13 @@ void dns_init() {
         // 1-2. The system's configured DNS servers.
         dns_scan_system();
     } else {
-        // 1. systemd-resolved
-        ip = inet_addr("127.0.0.53");
-        if (ip != 0 && g_ns_count < DNS_MAX_NS) { g_ns_ips[g_ns_count] = (i32)ip; g_ns_count += 1; }
+        // 1. systemd-resolved (Linux only; macOS has no stub resolver there)
+        if (@cfg(os.linux)) {
+            ip = inet_addr("127.0.0.53");
+            if (ip != 0 && g_ns_count < DNS_MAX_NS) { g_ns_ips[g_ns_count] = (i32)ip; g_ns_count += 1; }
+        }
 
-        // 2. /etc/resolv.conf
+        // 2. /etc/resolv.conf (macOS generates it from the system settings)
         dns_scan_resolv();
     }
 

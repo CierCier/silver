@@ -133,7 +133,7 @@ bool import_conflicts(Document* active, Document* added, PendingMessage* pending
             }
             i += 1;
         }
-        CfgSet cfg = linux_defaults();
+        CfgSet cfg = host_defaults();
         ImportOverloadSafety safety = check_import_overload_safety(
             &active.analysis.tree, &baseline, &candidate, &callable_overlaps, &cfg);
         if (safety != ImportOverloadSafety.Safe) { return true; }

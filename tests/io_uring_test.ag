@@ -11,7 +11,9 @@ import std.sys.io_uring;
 import std.sys.raw.fs;
 import std.sys.raw.socket;
 import std.sys.result;
+import std.sys.socket;
 import std.test;
+import std.time;
 
 // io_uring is kernel-dependent (5.1+). gVisor and older kernels return
 // ENOSYS from io_uring_setup; probe once so the kernel-dependent cases
@@ -198,6 +200,113 @@ void test_io_uring_socket_io() {
     }
 
     assert_true(memcmp((void*)&recv_buf[0], (void*)msg, 27) == 0, "socket message match");
+
+    // A one-byte transfer completes once, with result 1.
+    IoUringSqe* one_send = ring.get_sqe();
+    ring.prep_send(one_send, client.sock.fd, (void*)"z", 1, 0, 0x3333);
+    u8 one_byte[4];
+    memset((void*)&one_byte[0], (u8)0, 4);
+    IoUringSqe* one_recv = ring.get_sqe();
+    ring.prep_recv(one_recv, server.sock.fd, (void*)&one_byte[0], 4, 0, 0x4444);
+    Result<i64, Error> one_sub = ring.submit_and_wait(2);
+    assert_true(one_sub.is_ok(), "submitted one-byte batch");
+    i64 one_results = 0;
+    IoUringCqe one_cqe;
+    while (ring.peek_cqe(&one_cqe)) {
+        assert_true(one_cqe.res == 1, "one-byte transfer completes with 1");
+        ring.cqe_seen(&one_cqe);
+        one_results += 1;
+    }
+    assert_true(one_results == 2, "one-byte send and recv each complete once");
+    assert_true(one_byte[0] == (u8)'z', "one-byte payload arrives");
+}
+
+/// Sleeps briefly, then writes one byte to `fd`, so the byte arrives while
+/// the ring is already waiting.
+void late_write(i64 fd) {
+    sleep_ms(50);
+    sys_write(fd, (i64)"w", 1);
+}
+
+void test_io_uring_many_pending() {
+    test_start("io_uring wait wakes on any of many pending reads");
+
+    if (!io_uring_available()) {
+        @println("  [SKIP] io_uring_setup unavailable on this kernel (ENOSYS)");
+        return;
+    }
+
+    // More pending reads than one fixed-size wait batch holds; data arrives
+    // only on the last one, after the wait has begun.
+    i64 count = 65;
+    i32 fds[130];
+    for (i64 i = 0; i < count; i = i + 1) {
+        @assert(sys_pipe2((i64)&fds[i * 2], 0) == 0);
+    }
+    Result<IoUring, Error> ring_res = IoUring.new(128);
+    @assert(ring_res.is_ok());
+    IoUring ring = ring_res.unwrap();
+    u8 bufs[65];
+    for (i64 i = 0; i < count; i = i + 1) {
+        IoUringSqe* sqe = ring.get_sqe();
+        assert_true(sqe != (IoUringSqe*)0, "got pending read sqe");
+        ring.prep_read(sqe, fds[i * 2], (void*)&bufs[i], 1, (u64)0, (u64)i);
+    }
+    Result<i64, Error> queued = ring.submit();
+    assert_true(queued.is_ok(), "queued every read");
+
+    Task<void> writer = launch late_write((i64)fds[(count - 1) * 2 + 1]);
+    Result<i64, Error> waited = ring.submit_and_wait(1);
+    wait writer;
+    assert_true(waited.is_ok(), "wait returned");
+
+    IoUringCqe cqe;
+    assert_true(ring.peek_cqe(&cqe), "the late read completed");
+    assert_true(cqe.user_data == (u64)(count - 1) && cqe.res == 1, "completion is the last read");
+    ring.cqe_seen(&cqe);
+    ring.close();
+    for (i64 i = 0; i < count * 2; i = i + 1) {
+        sys_close((i64)fds[i]);
+    }
+}
+
+void test_io_uring_connect() {
+    test_start("io_uring connect completes once connected");
+
+    if (!io_uring_available()) {
+        @println("  [SKIP] io_uring_setup unavailable on this kernel (ENOSYS)");
+        return;
+    }
+
+    SocketAddr addr = SocketAddr.v4("127.0.0.1", (u16)0).unwrap();
+    TcpListener listener = TcpListener.bind(&addr, 4);
+    SockAddrIn sa;
+    u32 slen = 16;
+    try_getsockname(listener.raw_fd(), (void*)&sa, &slen);
+    Result<IoUring, Error> ring_res = IoUring.new(4);
+    @assert(ring_res.is_ok());
+    IoUring ring = ring_res.unwrap();
+
+    // A blocking socket, then a non-blocking one: both complete with the
+    // connect's final result, not with EINPROGRESS.
+    for (i64 nonblocking = 0; nonblocking < 2; nonblocking = nonblocking + 1) {
+        i64 flags = nonblocking == 1 ? SOCK_NONBLOCK : (i64)0;
+        i64 fd = sys_socket((i64)AddressFamily.INET, (i64)SocketType.STREAM | flags, 0);
+        assert_true(fd >= 0, "created connect socket");
+        IoUringSqe* sqe = ring.get_sqe();
+        ring.prep_connect(sqe, (i32)fd, (void*)&sa, 16, (u64)(0x5550 + nonblocking));
+        Result<i64, Error> sub = ring.submit_and_wait(1);
+        assert_true(sub.is_ok(), "submitted connect");
+        IoUringCqe cqe;
+        assert_true(ring.peek_cqe(&cqe), "connect completed");
+        assert_true(cqe.user_data == (u64)(0x5550 + nonblocking) && cqe.res == 0, "connect result is 0");
+        ring.cqe_seen(&cqe);
+        Result<i64, Error> accepted = listener.accept();
+        assert_true(accepted.is_ok(), "listener sees the connection");
+        sys_close(accepted.value());
+        sys_close(fd);
+    }
+    ring.close();
 }
 
 i32 main() {
@@ -205,5 +314,7 @@ i32 main() {
     test_io_uring_nop();
     test_io_uring_file_io();
     test_io_uring_socket_io();
+    test_io_uring_many_pending();
+    test_io_uring_connect();
     return done();
 }

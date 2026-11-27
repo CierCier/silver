@@ -239,7 +239,24 @@ void llvm_emit_entry_point(LLVMOpaqueContext* ctx, LLVMOpaqueModule* module, LLV
     if (LLVMGetNamedFunction(module, "_start") != (LLVMOpaqueValue*)0) {
         return;
     }
-    if (LLVMGetNamedFunction(module, "main") == (LLVMOpaqueValue*)0) {
+    LLVMOpaqueValue* main_fn = LLVMGetNamedFunction(module, "main");
+    if (main_fn == (LLVMOpaqueValue*)0) {
+        return;
+    }
+    if (@cfg(os.macos)) {
+        // dyld calls the LC_MAIN entry like C `main` and passes its i32
+        // result to `exit`; no stack or syscall setup is needed.
+        LLVMOpaqueType* i32_ty = LLVMInt32TypeInContext(ctx);
+        LLVMOpaqueType* entry_ty = LLVMFunctionType(i32_ty, (LLVMOpaqueType**)0, 0, 0);
+        LLVMOpaqueValue* entry_fn = LLVMAddFunction(module, "_start", entry_ty);
+        LLVMPositionBuilderAtEnd(builder, LLVMAppendBasicBlockInContext(ctx, entry_fn, "entry"));
+        LLVMOpaqueType* main_ty = LLVMGlobalGetValueType(main_fn);
+        LLVMOpaqueValue* rc = LLVMBuildCall2(builder, main_ty, main_fn, (LLVMOpaqueValue**)0, 0, "");
+        if (LLVMGetTypeKind(LLVMGetReturnType(main_ty)) == (u32)8) { // integer result
+            LLVMBuildRet(builder, LLVMBuildIntCast(builder, rc, i32_ty, "rc"));
+        } else {
+            LLVMBuildRet(builder, LLVMConstInt(i32_ty, (u64)0, 0));
+        }
         return;
     }
     LLVMOpaqueType* void_ty = LLVMVoidTypeInContext(ctx);
@@ -959,7 +976,11 @@ void llvm_bt_set_frame_pointer(LLVMOpaqueContext* ctx, LLVMOpaqueValue* function
 LLVMOpaqueValue* llvm_bt_read_frame_pointer(LLVMOpaqueContext* ctx, LLVMOpaqueBuilder* builder) {
     LLVMOpaqueType* i64_type = LLVMInt64TypeInContext(ctx);
     LLVMOpaqueType* fn_type = LLVMFunctionType(i64_type, (LLVMOpaqueType**)0, 0, 0);
+    // The host's frame-pointer register (stage1 builds only for its host).
     str asm_text = "movq %rbp, $0";
+    if (@cfg(arch.aarch64)) {
+        asm_text = "mov $0, x29";
+    }
     str constraints = "=r";
     LLVMOpaqueValue* inline_asm = LLVMGetInlineAsm(
         fn_type, (i8*)asm_text, (u64)strlen(asm_text),
@@ -1265,7 +1286,10 @@ void llvm_bt_emit_tables(LLVMOpaqueContext* ctx, LLVMOpaqueModule* module,
             record_type, function_records.data, (u64)function_records.len());
         LLVMOpaqueValue* data_global = LLVMAddGlobal(module, array_type, "__silver_bt_data");
         LLVMSetInitializer(data_global, array_value);
-        LLVMSetGlobalConstant(data_global, 1);
+        // std.rt.backtrace sorts this table in place on first use. A constant
+        // global lands in Mach-O's read-only __DATA_CONST and faults before
+        // abort can raise SIGABRT.
+        LLVMSetGlobalConstant(data_global, 0);
         LLVMSetLinkage(data_global, LLVMLinkage.LLVMPrivateLinkage);
         if (entries_global == (LLVMOpaqueValue*)0) {
             entries_global = LLVMAddGlobal(module, ptr_type, "__silver_bt_entries");
@@ -1343,13 +1367,19 @@ impl LlvmGenerator {
         llvm_initialize_targets();
 
         str triple = LLVMGetDefaultTargetTriple();
+        // LLVM's default carries the build machine's OS version; macOS
+        // objects declare Silver's minimum (14.4, for os_sync waits) instead.
+        str effective = triple;
+        if (@cfg(os.macos)) {
+            effective = "arm64-apple-macosx14.4.0";
+        }
         LLVMTarget* target = (LLVMTarget*)0;
         i8* target_error = (i8*)0;
         LLVMOpaqueTargetMachine* target_machine = (LLVMOpaqueTargetMachine*)0;
         LLVMTargetDataRef* target_data = (LLVMTargetDataRef*)0;
-        if (LLVMGetTargetFromTriple(triple, &target, &target_error) == 0) {
+        if (LLVMGetTargetFromTriple(effective, &target, &target_error) == 0) {
             target_machine = LLVMCreateTargetMachine(
-                target, triple, "generic", "",
+                target, effective, "generic", "",
                 llvm_codegen_optimization(optimization),
                 LLVMRelocMode.LLVMRelocPIC,
                 LLVMCodeModel.LLVMCodeModelDefault
@@ -1367,7 +1397,7 @@ impl LlvmGenerator {
         LLVMOpaqueBuilder* builder = LLVMCreateBuilderInContext(ctx);
         if (target_data != (LLVMTargetDataRef*)0) {
             i8* data_layout = LLVMCopyStringRepOfTargetData(target_data);
-            LLVMSetTarget(module, triple);
+            LLVMSetTarget(module, effective);
             LLVMSetDataLayout(module, data_layout);
             LLVMDisposeMessage(data_layout);
         }

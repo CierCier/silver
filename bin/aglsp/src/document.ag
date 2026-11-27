@@ -24,11 +24,71 @@ bool inside_literal(Document* doc, i64 offset) {
     return false;
 }
 
+/// The working directory as the client spells it: a workspace root, or an
+/// ancestor of one, that names the same directory as the process's. getcwd reports the resolved
+/// path, which differs when a parent is a symlink (macOS /tmp is
+/// /private/tmp), and paths sent back must match the client's URIs.
+u8 g_client_cwd[4096];
+/// Length of `g_client_cwd`; 0 when no workspace root names the cwd.
+i64 g_client_cwd_len;
+
+/// True when `a` and `b` name the same directory (same device and inode,
+/// read from the seam's Linux `struct stat` layout: st_dev @0, st_ino @8).
+bool same_directory(str a, str b) {
+    i64 sa[18];
+    i64 sb[18];
+    if (sys_stat((i64)a, (i64)&sa[0]) != 0 || sys_stat((i64)b, (i64)&sb[0]) != 0) { return false; }
+    return sa[0] == sb[0] && sa[1] == sb[1];
+}
+
+/// Records the client's spelling of the working directory: workspace root
+/// `root` or the nearest ancestor of it that names the same directory.
+/// Paths already made absolute against the physical directory (relative
+/// sysroot entries in `dirs`) are re-spelled to match.
+void note_client_cwd(str root, Vec<String>* dirs) {
+    if (g_client_cwd_len > 0) { return; }
+    String physical = current_dir();
+    String dir = String.from_str(root);
+    while (dir.len() > 0) {
+        if (same_directory(dir.to_str(), ".")) {
+            if (dir.len() < 4096) {
+                @memcpy(&g_client_cwd[0], dir.data, dir.len());
+                g_client_cwd[dir.len()] = (u8)0;
+                g_client_cwd_len = dir.len();
+                respell_prefix(dirs, physical.to_str(), dir.to_str());
+            }
+            break;
+        }
+        String parent = path_dirname(dir.to_str());
+        if (parent.equals(dir.to_str())) { break; }
+        dir = move parent;
+    }
+}
+
+/// Rewrites entries of `paths` equal to or under `from` to start with `to`.
+void respell_prefix(Vec<String>* paths, str from, str to) {
+    i64 from_len = strlen(from);
+    if (from_len == 0 || strcmp(from, to) == 0) { return; }
+    i64 i = 0;
+    while (i < paths.len()) {
+        String* path = paths.get_ptr(i);
+        bool under = path.starts_with(from)
+            && (path.len() == from_len || path.data[from_len] == (u8)'/');
+        if (under) {
+            String spelled = String.from_str(to);
+            spelled.push_bytes(path.data + from_len, path.len() - from_len);
+            paths.set(i, move spelled);
+        }
+        i += 1;
+    }
+}
+
 /// Returns `source` made absolute against the current directory.
 String absolute_document_path(str source) {
     String path = String.from_str(source);
     if (!path.starts_with("/")) {
-        String cwd = current_dir(); path = path_join(cwd.to_str(), path.to_str());
+        String cwd = g_client_cwd_len > 0 ? String.from_str((str)&g_client_cwd[0]) : current_dir();
+        path = path_join(cwd.to_str(), path.to_str());
     }
     return path_normalize(path.to_str());
 }

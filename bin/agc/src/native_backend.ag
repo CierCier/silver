@@ -1,4 +1,5 @@
-// Stage1-owned Linux build/run backend. Unsupported programs fail closed.
+// Stage1-owned build/run backend for x86_64 Linux and arm64 macOS hosts.
+// Unsupported programs fail closed.
 import std.env;
 import std.error;
 import std.fmt;
@@ -1201,8 +1202,9 @@ bool native_validate_target(CliMatches* cli) {
     String host_triple = String.from_str(host_triple_raw);
     LLVMDisposeMessage(host_triple_raw);
 
-    bool supported_host = host_triple.starts_with("x86_64-")
-        && host_triple.contains("-linux-");
+    bool supported_host = (host_triple.starts_with("x86_64-") && host_triple.contains("-linux-"))
+        || ((host_triple.starts_with("arm64-") || host_triple.starts_with("aarch64-"))
+            && host_triple.contains("-apple-darwin"));
     Optional<String> requested_target = cli.value("target");
     bool supported_target = true;
     if (requested_target.is_some()) {
@@ -1212,7 +1214,7 @@ bool native_validate_target(CliMatches* cli) {
     }
 
     if (!supported_host) {
-        STDERR.write_str("agc: error: stage1 native backend requires an x86_64 Linux host\n");
+        STDERR.write_str("agc: error: stage1 native backend requires an x86_64 Linux or arm64 macOS host\n");
     } else if (!supported_target) {
         STDERR.write_str("agc: error: stage1 native backend supports only the host target triple (");
         STDERR.write_str(host_triple.to_str());
@@ -1749,7 +1751,7 @@ void native_append_expanded_item(SyntaxNode* root, SyntaxNode* item, CfgSet* cfg
     if (item == (SyntaxNode*)0) { return; }
     if (item.kind == NodeKind.CfgBlock) {
         native_append_expanded_cfg(root, item.first_child, cfg, pool);
-    } else {
+    } else if (cfg_item_enabled(item, cfg, (DiagnosticBag*)0)) {
         append_child(root, item);
     }
 }
@@ -2853,7 +2855,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     }
     profiler_end_phase("serialize");
 
-    CfgSet cfg = linux_defaults();
+    CfgSet cfg = host_defaults();
     if (optimization != LlvmOptimization.Unspecified
         && optimization != LlvmOptimization.O0) { cfg.set_release(); }
     Optional<String> requested_target = cli.value("target");
@@ -3252,7 +3254,12 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
 
     String linker = String.new();
     bool direct_linker = false;
-    Optional<String> linker_override = var("SILVER_LINKER");
+    // macOS: `cc` drives ld64 and the SDK; std's `_start` is the LC_MAIN
+    // entry, and every program links libSystem (no static executables).
+    bool darwin = false;
+    if (@cfg(os.macos)) { darwin = true; }
+    Optional<String> linker_override = Optional<String>.none();
+    if (!darwin) { linker_override = var("SILVER_LINKER"); }
     if (linker_override.is_some()) {
         String configured = linker_override.unwrap();
         if (configured.len() > 0) {
@@ -3261,7 +3268,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         }
         configured.drop();
     }
-    if (!direct_linker) {
+    if (!direct_linker && !darwin) {
         Optional<String> mold = var("SILVER_USE_MOLD");
         bool prefer_mold = false;
         if (mold.is_some()) {
@@ -3311,6 +3318,11 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     if (direct_linker) {
         cc_command.arg("-o");
         cc_command.arg(output.to_str());
+    } else if (darwin) {
+        cc_command.arg("-o");
+        cc_command.arg(output.to_str());
+        cc_command.arg("-Wl,-e,__start");
+        cc_command.arg("-mmacosx-version-min=14.4");
     } else {
         cc_command.arg("-o");
         cc_command.arg(output.to_str());
@@ -3328,7 +3340,9 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         object_index += 1;
     }
     link_objects.drop();
-    if (static_link) {
+    if (darwin) {
+        // ld64 has no static executables or undefined-shlib switch.
+    } else if (static_link) {
         cc_command.arg("-static");
     } else if (direct_linker) {
         cc_command.arg("--allow-shlib-undefined");
@@ -3336,7 +3350,8 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         cc_command.arg("-Wl,--allow-shlib-undefined");
     }
 
-    Optional<String> dynamic_linker = var("SILVER_DYNAMIC_LINKER");
+    Optional<String> dynamic_linker = Optional<String>.none();
+    if (!darwin) { dynamic_linker = var("SILVER_DYNAMIC_LINKER"); }
     if (!static_link && has_dynamic_link_inputs && (direct_linker || dynamic_linker.is_some())) {
         String dl = String.new();
         if (dynamic_linker.is_some()) {
@@ -3477,6 +3492,10 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         String* lib = link_libs.get_ptr(li);
         if (lib.starts_with("/")) {
             cc_command.arg(lib.to_str());
+        } else if (darwin && (lib.equals("c") || lib.equals("m") || lib.equals("pthread")
+            || lib.equals("dl") || lib.equals("rt"))) {
+            // libSystem holds libc, libm, libpthread, libdl, and librt.
+            cc_command.arg("-lSystem");
         } else {
             String larg = String.from_str("-l");
             larg.push_str(lib.to_str());

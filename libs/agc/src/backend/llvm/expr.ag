@@ -253,9 +253,8 @@ LLVMOpaqueValue* llvm_emit_asm(LlvmContext* ctx, u32 expr_id) {
     LLVMOpaqueType* fn_type = LLVMFunctionType(i64_ty, param_types.data, args_count, 0);
     param_types.drop();
 
-    // Constraints arrive complete from lowering (lower_asm builds the fixed
-    // x86_64 register model: =rax output, rax/rdi/rsi/rdx/r10/r8/r9 inputs,
-    // rcx/r11 plus caller clobbers). Pass through verbatim: prepending
+    // Constraints arrive complete from lowering (lower_asm builds the host's
+    // fixed register model plus caller clobbers). Pass through verbatim: prepending
     // another copy duplicates outputs and crashes LLVM's constraint parser.
     if (args_count > 7) {
         ctx.note_unresolved("asm-args", code);

@@ -12,6 +12,7 @@ import std.mem.memory;
 import std.net.inet;
 import std.net.socket;
 import std.net.tcp;
+import std.process;
 import std.sys.epoll;
 import std.sys.eventfd;
 import std.sys.io_vec;
@@ -201,11 +202,136 @@ void test_zero_copy_sendfile() {
     sys_unlink((i64)path);
 }
 
+/// An EPOLLONESHOT registration for both directions reports one event, then
+/// stays silent until EPOLL_CTL_MOD re-arms it.
+void test_epoll_oneshot_both_directions() {
+    Epoll ep = Epoll.new().unwrap();
+    i32 pair[2];
+    @assert(sys_socketpair((i64)AddressFamily.UNIX, (i64)SocketType.STREAM, 0, (i64)&pair[0]) == 0);
+    @assert(ep.add(pair[0], EPOLLIN | EPOLLOUT | EPOLLONESHOT, 0x51));
+    EpollEvent events[4];
+    // An idle connected socket is writable: the first event is EPOLLOUT.
+    @assert(ep.poll(&events[0], 4, 100) == 1);
+    @assert((events[0].events & EPOLLOUT) != 0);
+    // Readable data must not fire the disabled registration.
+    @assert(sys_write((i64)pair[1], (i64)"r", 1) == 1);
+    @assert(ep.poll(&events[0], 4, 0) == 0);
+    @assert(ep.modify(pair[0], EPOLLIN | EPOLLONESHOT, 0x52));
+    @assert(ep.poll(&events[0], 4, 100) == 1);
+    @assert(events[0].data == 0x52 && (events[0].events & EPOLLIN) != 0);
+    @assert(ep.poll(&events[0], 4, 0) == 0);
+    @assert(ep.delete(pair[0]));
+    sys_close((i64)pair[0]);
+    sys_close((i64)pair[1]);
+}
+
+/// A duplicated eventfd descriptor and a forked child's writes reach the
+/// same counter.
+void test_eventfd_dup_and_fork() {
+    Result<EventFd, Error> efd_res = EventFd.new(0, true);
+    @assert(efd_res.is_ok());
+    EventFd efd = efd_res.unwrap();
+
+    i64 dup_fd = sys_dup((i64)efd.fd);
+    @assert(dup_fd >= 0);
+    u64 two = 2;
+    @assert(sys_write(dup_fd, (i64)&two, 8) == 8);
+    Result<u64, Error> via_dup = efd.read_val();
+    @assert(via_dup.is_ok());
+    @assert(via_dup.unwrap() == 2);
+
+    i64 pid = sys_fork();
+    @assert(pid >= 0);
+    if (pid == 0) {
+        u64 five = 5;
+        sys_exit_group(sys_write((i64)efd.fd, (i64)&five, 8) == 8 ? (i64)0 : (i64)1);
+    }
+    Child child;
+    child.pid = pid;
+    child.handle = 0;
+    ExitStatus status = child.wait_status();
+    @assert(status.success());
+    Result<u64, Error> via_child = efd.read_val();
+    @assert(via_child.is_ok());
+    @assert(via_child.unwrap() == 5);
+
+    sys_close(dup_fd);
+    efd.close();
+}
+
+/// Closes `fd`; a task body for the concurrent-close check.
+void close_descriptor(i64 fd) {
+    sys_close(fd);
+}
+
+/// Threads closing duplicates of one eventfd at the same time release its
+/// shared state exactly once.
+void test_eventfd_concurrent_dup_close() {
+    // Enough rounds that two closers regularly race for the last reference.
+    for (i64 round = 0; round < 20000; round = round + 1) {
+        EventFd efd = EventFd.new(0, true).unwrap();
+        i64 dups[16];
+        for (i64 i = 0; i < 16; i = i + 1) {
+            dups[i] = sys_dup((i64)efd.fd);
+            @assert(dups[i] >= 0);
+        }
+        efd.close();
+        Task<void> closers[16];
+        for (i64 i = 0; i < 16; i = i + 1) {
+            closers[i] = launch close_descriptor(dups[i]);
+        }
+        for (i64 i = 0; i < 16; i = i + 1) {
+            wait closers[i];
+        }
+    }
+    // Every descriptor came back: a new eventfd still works.
+    EventFd after = EventFd.new(0, true).unwrap();
+    @assert(after.notify(1));
+    @assert(after.read_val().unwrap() == 1);
+    after.close();
+}
+
+/// A write that would pass the counter's maximum fails with EAGAIN on a
+/// non-blocking eventfd instead of wrapping.
+void test_eventfd_counter_limit() {
+    Result<EventFd, Error> efd_res = EventFd.new(0, true);
+    @assert(efd_res.is_ok());
+    EventFd efd = efd_res.unwrap();
+    u64 near_max = (u64)0xFFFFFFFFFFFFFFFE;
+    @assert(sys_write((i64)efd.fd, (i64)&near_max, 8) == 8);
+    u64 two = 2;
+    @assert(sys_write((i64)efd.fd, (i64)&two, 8) == -EAGAIN);
+    Result<u64, Error> r = efd.read_val();
+    @assert(r.is_ok());
+    @assert(r.unwrap() == near_max);
+    efd.close();
+}
+
+/// An eventfd that lands on descriptor 0 (stdin closed) still behaves as an
+/// eventfd. Runs last: it leaves stdin closed.
+void test_eventfd_on_descriptor_zero() {
+    try_close(0);
+    Result<EventFd, Error> efd_res = EventFd.new(0, true);
+    @assert(efd_res.is_ok());
+    EventFd efd = efd_res.unwrap();
+    @assert(efd.fd == 0);
+    @assert(efd.notify(3));
+    Result<u64, Error> r = efd.read_val();
+    @assert(r.is_ok());
+    @assert(r.unwrap() == 3);
+    efd.close();
+}
+
 i32 main() {
     test_packed_epoll_event();
     test_epoll_and_eventfd();
     test_vectorized_io();
     test_socket_tuning_and_reuseport();
     test_zero_copy_sendfile();
+    test_epoll_oneshot_both_directions();
+    test_eventfd_dup_and_fork();
+    test_eventfd_counter_limit();
+    test_eventfd_concurrent_dup_close();
+    test_eventfd_on_descriptor_zero();
     return 0;
 }

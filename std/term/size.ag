@@ -47,7 +47,7 @@ Result<TermSize, Error> term_get_size(i32 fd) {
     return Ok(TermSize_new(rows, cols));
 }
 
-if (@cfg(os.linux)) {
+if (@cfg(os.linux) || @cfg(os.macos)) {
     /// Sets the window size of the terminal on `fd` (typically a pty master),
     /// which sends SIGWINCH to the foreground process group. Values above 65535
     /// are truncated. Returns 0 on success.

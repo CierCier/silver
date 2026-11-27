@@ -108,6 +108,12 @@ i64 sys_readlink(i64 path, i64 buf, i64 len) {
     return sys_readlinkat(AT_FDCWD, path, buf, len);
 }
 
+/// The absolute path of the running executable (/proc/self/exe), written
+/// to `buf` without a NUL. Returns the length or -errno.
+i64 sys_executable_path(u8* buf, i64 cap) {
+    return sys_readlink((i64)"/proc/self/exe", (i64)buf, cap);
+}
+
 /// pipe(2): writes the read and write fds as two i32 at `fds`.
 i64 sys_pipe(i64 fds) {
     return sys_pipe2(fds, 0);

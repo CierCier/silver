@@ -91,11 +91,7 @@ impl ModuleLoader {
 
     fn effective_target(&self) -> String {
         self.target.clone().unwrap_or_else(|| {
-            inkwell::targets::TargetMachine::get_default_triple()
-                .as_str()
-                .to_str()
-                .unwrap_or("default")
-                .to_string()
+            crate::codegen::abi::host_target_triple()
         })
     }
 
@@ -595,6 +591,12 @@ fn add_dir_unique(dirs: &mut Vec<PathBuf>, path: PathBuf) {
 }
 
 fn add_sysroot_candidates(dirs: &mut Vec<PathBuf>, root: &Path) {
+    // A source checkout keeps std at <root>/std (the dev shell points
+    // SILVER_SYSROOT there); an installation keeps it under include/.
+    // Stage1's module_add_sysroot_candidates accepts both the same way.
+    if root.join("std").is_dir() {
+        add_dir_unique(dirs, root.to_path_buf());
+    }
     let inc = root.join("include");
     let inc_silver = inc.join("silver");
     if inc_silver.is_dir() {

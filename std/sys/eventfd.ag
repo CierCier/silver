@@ -9,7 +9,7 @@ import std.sys.raw.fs;
 import std.sys.raw.poll;
 import std.sys.result;
 
-if (@cfg(os.linux)) {
+if (@cfg(os.linux) || @cfg(os.macos)) {
 /// eventfd flag: each read decrements the counter by 1 instead of resetting it.
 const i64 EFD_SEMAPHORE = 1;
 /// eventfd flag: close the descriptor on exec.

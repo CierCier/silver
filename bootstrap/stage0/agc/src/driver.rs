@@ -928,6 +928,8 @@ fn module_binary_output_path(manifest_path: &Path, shared: bool, target: Option<
             "wasm"
         } else if crate::codegen::abi::target_is_windows(target) {
             "dll"
+        } else if crate::codegen::abi::target_is_macos(target) {
+            "dylib"
         } else {
             "so"
         }
@@ -945,11 +947,7 @@ fn module_binary_output_path(manifest_path: &Path, shared: bool, target: Option<
 
 fn artifact_compatibility_error(module: &ModuleArtifact, plan: &CompilePlan) -> Option<String> {
     let expected_target = plan.target.clone().unwrap_or_else(|| {
-        TargetMachine::get_default_triple()
-            .as_str()
-            .to_str()
-            .unwrap_or("<unknown>")
-            .to_string()
+        crate::codegen::abi::host_target_triple()
     });
 
     if module.target_triple != "unknown" && module.target_triple != expected_target {
@@ -2204,11 +2202,7 @@ pub fn run(cli: Cli) {
 
                 if matches!(plan.emit, EmitKind::Module) {
                     let target_triple = plan.target.clone().unwrap_or_else(|| {
-                        TargetMachine::get_default_triple()
-                            .as_str()
-                            .to_str()
-                            .unwrap_or("<unknown>")
-                            .to_string()
+                        crate::codegen::abi::host_target_triple()
                     });
                     let artifact = ModuleArtifact::from_program(
                         module_name_from_path(input),

@@ -27,15 +27,21 @@ i32 collect_bytes(void* userdata, const RustFfiSlice* chunk) {
 
 #[cfg(os.linux)]
 str ffi_test_shell_prog() { return "/bin/sh"; }
+#[cfg(os.macos)]
+str ffi_test_shell_prog() { return "/bin/sh"; }
 #[cfg(os.windows)]
 str ffi_test_shell_prog() { return "cmd.exe"; }
 
 #[cfg(os.linux)]
 str ffi_test_shell_plain_prog() { return "sh"; }
+#[cfg(os.macos)]
+str ffi_test_shell_plain_prog() { return "sh"; }
 #[cfg(os.windows)]
 str ffi_test_shell_plain_prog() { return "cmd.exe"; }
 
 #[cfg(os.linux)]
+str ffi_test_shell_flag() { return "-c"; }
+#[cfg(os.macos)]
 str ffi_test_shell_flag() { return "-c"; }
 #[cfg(os.windows)]
 str ffi_test_shell_flag() { return "/c"; }

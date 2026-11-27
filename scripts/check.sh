@@ -6,8 +6,8 @@
 # Steps, in order:
 #   1. build the bootstrap workspace (stage0 agc, agsm, Rust FFI)
 #   2. Rust tests for the workspace
-#   3. stdlib suite with stage0, natively and for the other Linux
-#      architecture under qemu user mode
+#   3. stdlib suite with stage0, natively and (on Linux hosts) for the other
+#      Linux architecture under qemu user mode
 #   4. build stage1 with stage0, then the stdlib suite with stage1
 #   5. build the native language server, then the LSP protocol suite
 #
@@ -79,7 +79,11 @@ case "$(uname -m)" in
   *) cross_target="" ;;
 esac
 cross_qemu="qemu-${cross_target%%-*}"
-if [[ -z "$cross_target" ]]; then
+if [[ "$(uname -s)" != "Linux" ]]; then
+  # qemu user mode runs foreign Linux binaries on a Linux kernel only.
+  printf '\n==> stdlib suite (cross, qemu) (not applicable: needs a Linux host)\n'
+  results+=("n/a   stdlib suite (cross, qemu) (needs a Linux host)")
+elif [[ -z "$cross_target" ]]; then
   skip "stdlib suite (cross, qemu)" "no cross target for $(uname -m)"
 elif ! command -v "$cross_qemu" > /dev/null; then
   skip "stdlib suite ($cross_target)" "$cross_qemu not found"

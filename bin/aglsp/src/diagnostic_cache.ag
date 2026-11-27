@@ -49,7 +49,11 @@ void push_closure_hashes(Document* doc, Vec<Document*>* visited, String* key) {
 
 /// Empty when the server cannot identify its own executable, which disables caching.
 String diagnostic_cache_key(Document* doc, bool related_information) {
-    Result<Metadata, Error> executable = metadata("/proc/self/exe");
+    u8 exe_path[4097];
+    i64 exe_len = sys_executable_path(&exe_path[0], 4096);
+    if (exe_len <= 0) { return String.new(); }
+    exe_path[exe_len] = (u8)0;
+    Result<Metadata, Error> executable = metadata((str)&exe_path[0]);
     if (executable.is_err() || doc.path.len() == 0) { return String.new(); }
     Metadata stamp = executable.unwrap();
     String key = String.new();

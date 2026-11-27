@@ -99,10 +99,10 @@ i32 main() {
     assert_true(refused.failed(), "connect refused returns error");
     Error refused_err = refused.get_error();
     // Test C: Unix domain socket TCP stream/listener. The abstract namespace
-    // is Linux-only; Windows AF_UNIX binds filesystem paths.
+    // is Linux-only; Windows and macOS AF_UNIX bind filesystem paths.
     test_start("unix domain socket echo");
     str u_path = "@test_silver_tcp_sock";
-    if (@cfg(os.windows)) {
+    if (@cfg(os.windows) || @cfg(os.macos)) {
         u_path = "test_silver_tcp.sock";
         remove_file(u_path);
     }
@@ -128,7 +128,7 @@ i32 main() {
     u_msg[ur.value()] = (u8)0;
     assert_eq_str("ping", (str)u_msg, "unix echo message matches");
     free(u_msg);
-    if (@cfg(os.windows)) {
+    if (@cfg(os.windows) || @cfg(os.macos)) {
         assert_true(remove_file(u_path), "unix socket path removed");
     }
 

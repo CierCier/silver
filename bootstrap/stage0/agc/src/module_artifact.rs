@@ -555,6 +555,8 @@ impl ModuleArtifact {
         if shared {
             if crate::codegen::abi::target_is_windows(target) {
                 "dll"
+            } else if crate::codegen::abi::target_is_macos(target) {
+                "dylib"
             } else {
                 "so"
             }
@@ -573,6 +575,7 @@ impl ModuleArtifact {
             (false, "obj") => "o",
             (true, "so") => "dll",
             (true, "dll") => "so",
+            (true, "dylib") => "so",
             _ => "o",
         }
     }

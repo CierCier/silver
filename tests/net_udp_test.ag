@@ -5,8 +5,7 @@
 import std.net.socket;
 import std.net.inet;
 import std.sys.socket;
-import std.sys.raw.socket;
-import std.sys.os_linux;
+import std.sys.os;
 import std.test;
 
 i32 main() {

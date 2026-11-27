@@ -8,7 +8,7 @@ import std.mem.drop;
 import std.sys.raw.poll;
 import std.sys.result;
 
-if (@cfg(os.linux)) {
+if (@cfg(os.linux) || @cfg(os.macos)) {
 // Epoll control operations (epoll_ctl op)
 /// epoll_ctl op: register a descriptor.
 const i32 EPOLL_CTL_ADD = 1;

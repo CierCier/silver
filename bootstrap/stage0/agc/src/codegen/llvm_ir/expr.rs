@@ -40,6 +40,31 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .map_err(|e| CodegenError::new(format!("failed to allocate local `{name}`: {e}")))
     }
 
+    /// `create_entry_alloca`, zero-filled in the entry block, so the slot
+    /// reads as zero on paths that never reach its declaration.
+    pub(crate) fn create_zeroed_entry_alloca(
+        &self,
+        function: FunctionValue<'ctx>,
+        name: &str,
+        ty: BasicTypeEnum<'ctx>,
+    ) -> CodegenResult<PointerValue<'ctx>> {
+        let slot = self.create_entry_alloca(function, name, ty)?;
+        let builder = self.context.create_builder();
+        let alloca = slot
+            .as_instruction()
+            .ok_or_else(|| CodegenError::new(format!("local `{name}` is not an alloca")))?;
+        match alloca.get_next_instruction() {
+            Some(next) => builder.position_before(&next),
+            None => builder.position_at_end(
+                alloca.get_parent().ok_or_else(|| CodegenError::new("alloca has no block"))?,
+            ),
+        }
+        builder
+            .build_store(slot, ty.const_zero())
+            .map_err(|e| CodegenError::new(format!("failed to zero local `{name}`: {e}")))?;
+        Ok(slot)
+    }
+
     pub(crate) fn intern_string_literal(
         &mut self,
         value: &str,
@@ -3035,7 +3060,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 if phi_ty.is_int_type() && value.get_type().is_int_type() {
                     let target_ty = phi_ty.into_int_type();
                     let int_val = value.into_int_value();
-                    self.builder.position_at_end(*bb);
+                    // The incoming block already ends in its branch to
+                    // `cont_bb`; the coercion must precede that terminator.
+                    match bb.get_terminator() {
+                        Some(terminator) => self.builder.position_before(&terminator),
+                        None => self.builder.position_at_end(*bb),
+                    }
                     let casted = if int_val.get_type().get_bit_width() > target_ty.get_bit_width() {
                         self.builder
                             .build_int_truncate(int_val, target_ty, "if.trunc")

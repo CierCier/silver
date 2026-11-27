@@ -168,7 +168,7 @@ CheckResult run_check(&mut SignatureCache cache, &CfgSet cfg, &CheckJob job) {
 /// borrow of the service. Reads only the job it owns and its private cache.
 void check_worker(&CheckService shared) {
     CheckService* service = shared;
-    CfgSet cfg = linux_defaults();
+    CfgSet cfg = host_defaults();
     SignatureCache cache = SignatureCache.new(SIGNATURE_CACHE_BYTES);
     while (true) {
         Optional<CheckJob> next = service.jobs.recv();

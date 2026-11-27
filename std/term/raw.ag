@@ -69,7 +69,7 @@ struct Termios {
     u32 c_ospeed;
 }
 
-if (@cfg(os.linux)) {
+if (@cfg(os.linux) || @cfg(os.macos)) {
 /// Reads the termios settings of terminal `fd` into `*out`.
 Result<i64, Error> try_tcgetattr(i32 fd, Termios* out) {
     i64 r = sys_ioctl((i64)fd, TCGETS, (i64)out);
@@ -105,7 +105,7 @@ void termios_make_raw(Termios* t) {
     t.c_cc[VTIME] = (u8)0;
 }
 
-if (@cfg(os.linux)) {
+if (@cfg(os.linux) || @cfg(os.macos)) {
 /// A guard that holds a terminal in raw mode. Dropping it restores the saved
 /// termios settings, so keep it alive for as long as raw mode is needed.
 struct RawMode {

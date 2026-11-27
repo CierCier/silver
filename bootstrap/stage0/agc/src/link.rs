@@ -9,7 +9,10 @@ use crate::driver::CompilePlan;
 
 /// How to invoke the linker for a given target.
 ///
-/// - `GnuLd`: GNU ld / ld.lld / mold via GNU flags (ELF, Mach-O).
+/// - `GnuLd`: GNU ld / ld.lld / mold via GNU flags (ELF).
+/// - `Darwin`: Apple ld64 through `cc` (Mach-O). macOS has no supported
+///   static or libc-free executables, so every program links libSystem and
+///   std's `_start` is the `LC_MAIN` entry dyld calls.
 /// - `LldLink`: COFF linking with MSVC-style flags — `lld-link`, or the MSVC
 ///   toolchain `link.exe` located via vswhere as a drop-in replacement.
 /// - `WasmLd`: wasm-ld linking a standalone WebAssembly module from wasm
@@ -21,6 +24,7 @@ use crate::driver::CompilePlan;
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub(crate) enum LinkFlavor {
     GnuLd,
+    Darwin,
     LldLink,
     WasmLd,
     UnsupportedMinGW,
@@ -33,6 +37,9 @@ impl LinkFlavor {
     fn for_target(target: Option<&str>) -> Self {
         if crate::codegen::abi::target_is_wasm(target) {
             return Self::WasmLd;
+        }
+        if crate::codegen::abi::target_is_macos(target) {
+            return Self::Darwin;
         }
         let is_windows = crate::codegen::abi::target_is_windows(target);
         let is_mingw = target
@@ -469,6 +476,7 @@ pub(crate) fn link_exe(
             link_exe_with_lld_link(plan, object_paths, dependency_paths, native_libs)
         }
         LinkFlavor::WasmLd => link_exe_with_wasm_ld(plan, object_paths, dependency_paths),
+        LinkFlavor::Darwin => link_exe_darwin(plan, object_paths, dependency_paths, native_libs),
         LinkFlavor::UnsupportedMinGW => Err(MINGW_UNSUPPORTED_ERR.to_string()),
         LinkFlavor::GnuLd => link_exe_with_ld_lld(
             plan,
@@ -598,6 +606,72 @@ pub(crate) fn link_exe_with_lld_link(
     }
 
     run_tool(link, tool_name)
+}
+
+/// Arguments shared by Darwin executables and dylibs: inputs, search dirs
+/// with matching rpaths (so dylib dependencies load from where they were
+/// found), and native libraries.
+fn add_darwin_link_inputs(
+    link: &mut Command,
+    plan: &CompilePlan,
+    object_paths: &[PathBuf],
+    dependency_paths: &[PathBuf],
+    native_libs: &[String],
+) {
+    link.args(object_paths);
+    link.args(dependency_paths);
+    if let Some(sysroot) = &plan.sysroot {
+        link.arg("-isysroot").arg(sysroot);
+    }
+    for dir in plan.lib_dirs.iter().cloned().chain(dependency_library_dirs(dependency_paths)) {
+        link.arg("-L").arg(&dir);
+        link.arg(format!("-Wl,-rpath,{}", dir.display()));
+    }
+    for lib in native_libs {
+        add_native_library(link, &darwin_library_name(lib));
+    }
+}
+
+/// The `-target` for a Darwin link: the requested triple, else the host's
+/// (which carries Silver's minimum macOS version).
+fn darwin_link_target(plan: &CompilePlan) -> String {
+    plan.target
+        .clone()
+        .unwrap_or_else(crate::codegen::abi::host_target_triple)
+}
+
+/// libSystem already holds libc, libm, libpthread, libdl, and librt; macOS
+/// ships no separate libraries under those names, so `#[link]`s written for
+/// Linux resolve to it.
+fn darwin_library_name(library: &str) -> String {
+    match library {
+        "c" | "m" | "pthread" | "dl" | "rt" => "System".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Mach-O executable link through `cc`, which finds ld64 and the SDK.
+///
+/// ld64 cannot produce static executables, so `--static` still links
+/// libSystem dynamically; the Silver code itself is static either way.
+pub(crate) fn link_exe_darwin(
+    plan: &CompilePlan,
+    object_paths: &[PathBuf],
+    dependency_paths: &[PathBuf],
+    native_libs: &[String],
+) -> Result<(), String> {
+    let mut link = Command::new("cc");
+    link.arg("-o").arg(&plan.output);
+    // The triple also sets the minimum macOS version the image declares.
+    link.arg("-target").arg(darwin_link_target(plan));
+    // std's `_start` (Mach-O `__start`) is the LC_MAIN entry: dyld calls it
+    // like C `main(argc, argv, envp, apple)` once libSystem is initialized.
+    link.arg("-Wl,-e,__start");
+    if plan.debug_info {
+        link.arg("-g");
+    }
+    add_darwin_link_inputs(&mut link, plan, object_paths, dependency_paths, native_libs);
+    run_tool(link, "Mach-O linker")
 }
 
 pub(crate) fn should_force_non_pie(target: Option<&str>) -> bool {
@@ -802,6 +876,22 @@ pub(crate) fn link_shared_module(
         return Err(
             "shared modules (--shared) are not yet supported for WebAssembly targets; build modules without --shared".to_string(),
         );
+    }
+    if flavor == LinkFlavor::Darwin {
+        let mut link = Command::new("cc");
+        link.arg("-dynamiclib").arg("-o").arg(output_path);
+        link.arg("-target").arg(darwin_link_target(plan));
+        // Like an ELF shared object, a module may leave symbols for the
+        // executable that loads it (std runtime entry points) to provide.
+        link.arg("-Wl,-undefined,dynamic_lookup");
+        add_darwin_link_inputs(
+            &mut link,
+            plan,
+            &[object_path.to_path_buf()],
+            dependency_paths,
+            native_libs,
+        );
+        return run_tool(link, "Mach-O dylib linker");
     }
     if flavor == LinkFlavor::LldLink {
         let mut link = find_lld_link()?;

@@ -67,7 +67,9 @@ extern "C" {
     BtFnArgs* __silver_bt_args;
 }
 
-if (@cfg(os.linux)) {
+// Apple arm64 always keeps frame pointers, with the same [fp] = caller fp,
+// [fp + 8] = return address records as Linux, so both walk one chain.
+if (@cfg(os.linux) || @cfg(os.macos)) {
 /// Return the caller's frame pointer so it remains valid after this helper returns.
 i64 bt_read_rbp() {
     if (@cfg(arch.aarch64)) {
@@ -471,7 +473,7 @@ void bt_print_args(i64 fd, i64 callee_rbp, i64 fn_addr) {
     }
 }
 
-if (@cfg(os.linux)) {
+if (@cfg(os.linux) || @cfg(os.macos)) {
 /// Print a named stack trace to stderr: on Linux the SysV `[rbp]` chain is
 /// walked directly; on Windows the frame pointers are REBASED by LLVM
 /// (`push rbp; push rsi; ...; mov rbp, rsp; sub N; lea rbp=rsp+K`), so the

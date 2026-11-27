@@ -129,15 +129,15 @@ i32 main() {
         assert_eq_i64(-2, rm.unwrap_err(), "missing program reports -ENOENT");
     }
 
-    if (@cfg(os.linux)) {
-        if (linux_process_checks() != 0) { return 1; }
+    if (@cfg(os.linux) || @cfg(os.macos)) {
+        if (posix_process_checks() != 0) { return 1; }
     }
     return done();
 }
 
-/// Linux-only coverage: /usr/bin/env children and fork-based abort checks.
-#[cfg(os.linux)]
-i32 linux_process_checks() {
+if (@cfg(os.linux) || @cfg(os.macos)) {
+/// POSIX coverage: /usr/bin/env children and fork-based abort checks.
+i32 posix_process_checks() {
     // 2. Command spawn and wait: success case
     Command cmd_true = Command.new("/usr/bin/env");
     cmd_true.arg("sh");
@@ -237,4 +237,5 @@ i32 linux_process_checks() {
         if (status.termsig() != 6) { return 1; }
     }
     return 0;
+}
 }

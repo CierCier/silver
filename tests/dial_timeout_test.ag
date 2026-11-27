@@ -3,7 +3,8 @@
 // (A) A refused connection fails fast with ECONNREFUSED, never a timeout.
 // (B) Loopback connects succeed with a deadline and with timeout 0 (blocking).
 // (C) A black-holed peer trips the deadline (ETIMEDOUT) instead of hanging.
-//     On networks that fast-reject the blackhole (ENETUNREACH/EHOSTUNREACH)
+//     On networks that fast-reject the blackhole (ENETUNREACH/EHOSTUNREACH,
+//     or ECONNREFUSED from a LAN gateway that answers for all of 10.0.0.0/8)
 //     the deadline cannot be exercised, so the test passes those through.
 
 import std.error;
@@ -52,9 +53,10 @@ i32 main() {
     i64 elapsed = now().elapsed_ns(t0);
     assert_true(blackhole_result.failed(), "blackhole connect fails");
     Error blackhole_err = blackhole_result.get_error();
-    if (blackhole_err.code == ENETUNREACH || blackhole_err.code == EHOSTUNREACH) {
-        // No route to the blackhole: the kernel rejects the connect
-        // immediately, so the deadline path is not exercisable here.
+    if (blackhole_err.code == ENETUNREACH || blackhole_err.code == EHOSTUNREACH
+        || blackhole_err.code == ECONNREFUSED) {
+        // No route to the blackhole, or a gateway that answers for it: the
+        // connect fails immediately, so the deadline path is not exercisable.
         return done();
     }
     assert_eq_i64(ETIMEDOUT, blackhole_err.code, "blackhole errno is ETIMEDOUT");

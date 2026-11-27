@@ -225,7 +225,7 @@ Vec<String> module_sysroot_include_dirs() {
     if (sysroot.len() > 0) { module_add_sysroot_candidates(&dirs, sysroot.to_str(), true); }
     // Executable-relative prefix, e.g. <prefix>/bin/agc -> <prefix>.
     u8 executable[4096];
-    i64 length = sys_readlink((i64)"/proc/self/exe", (i64)&executable[0], 4096);
+    i64 length = sys_executable_path(&executable[0], 4096);
     if (length > 0 && length < 4096) {
         String path = String.new();
         path.push_bytes(&executable[0], length);

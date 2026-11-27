@@ -26,13 +26,21 @@ let
 
   # Crates emit -lffi, -lz and -lstdc++ before our own link args, so the shared
   # objects would win. This directory holds only archives, and it is searched
-  # first.
-  staticLibs = runCommand "silver-static-libs" { } ''
-    mkdir -p $out/lib
-    ln -s ${staticLibffi}/lib/libffi.a ${zlib.static}/lib/libz.a ${stdenv.cc.cc}/lib/libstdc++.a $out/lib/
-  '';
+  # first. macOS links the system libc++ dynamically (it ships with the OS and
+  # there is no static libgcc), so only libffi and zlib are archived there.
+  staticLibs = runCommand "silver-static-libs" { } (
+    ''
+      mkdir -p $out/lib
+      ln -s ${staticLibffi}/lib/libffi.a ${zlib.static}/lib/libz.a $out/lib/
+    ''
+    + lib.optionalString stdenv.hostPlatform.isLinux ''
+      ln -s ${stdenv.cc.cc}/lib/libstdc++.a $out/lib/
+    ''
+  );
 
-  rustflags = "-L native=${staticLibs}/lib -C link-arg=-static-libgcc";
+  rustflags =
+    "-L native=${staticLibs}/lib"
+    + lib.optionalString stdenv.hostPlatform.isLinux " -C link-arg=-static-libgcc";
 in
 rustPlatform.buildRustPackage {
   pname = "silver";
@@ -71,8 +79,8 @@ rustPlatform.buildRustPackage {
     llvmPackages_22.llvm.dev
     llvmPackages_22.lld
     makeWrapper
-    patchelf
-  ];
+  ]
+  ++ lib.optional stdenv.hostPlatform.isLinux patchelf;
 
   buildInputs = [
     llvmPackages_22.llvm
@@ -109,11 +117,13 @@ rustPlatform.buildRustPackage {
   # in the dev shell, so the Nix build skips them until that is fixed.
   doCheck = false;
 
-  postInstall = ''
-    # Drop the build-time RUNPATH so the loader uses the runtime glibc, not the
-    # store path that built the binary.
-    patchelf --remove-rpath $out/bin/agc $out/bin/agsm
-
+  postInstall =
+    lib.optionalString stdenv.hostPlatform.isLinux ''
+      # Drop the build-time RUNPATH so the loader uses the runtime glibc, not the
+      # store path that built the binary.
+      patchelf --remove-rpath $out/bin/agc $out/bin/agsm
+    ''
+    + ''
     $out/bin/agc build silver.toml --bin aglsp --no-cache -O2 -o $out/bin/aglsp
 
     # Install standard library and vendor headers
@@ -145,6 +155,10 @@ rustPlatform.buildRustPackage {
     homepage = "https://github.com/CierCier/silver";
     license = lib.licenses.mit;
     mainProgram = "agc";
-    platforms = [ "x86_64-linux" ];
+    platforms = [
+      "x86_64-linux"
+      "aarch64-linux"
+      "aarch64-darwin"
+    ];
   };
 }

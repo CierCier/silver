@@ -9,6 +9,7 @@ bool add_workspace_root(DocumentStore* store, str uri) {
     String path = document_path(uri); if (path.len() == 0) { return false; } i64 i = 0;
     while (i < store.roots.len()) { if (store.roots.get_ptr(i).equals(path.to_str())) { return false; } i += 1; }
     store.include_dirs.push(path.clone());
+    note_client_cwd(path.to_str(), &store.include_dirs);
     store.roots.push(move path);
     store.discover_open_projects = false;
     return true;
