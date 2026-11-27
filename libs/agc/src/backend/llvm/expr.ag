@@ -2770,7 +2770,14 @@ LLVMOpaqueValue* llvm_emit_struct_lit(LlvmContext* ctx, AstExpr* expr) {
     u32 named_id = TYPE_UNKNOWN;
     str struct_name = "";
     if (expr.inner0 == 0) {
-        named_id = ctx.types.resolve_subst(ctx.expected_type_id);
+        // A brace initializer in a return or argument carries the type its
+        // target gave it in type checking; a nested one takes its field's.
+        u32 target_id = expr.inferred_type;
+        if (target_id == TYPE_UNKNOWN || target_id == 0
+            || ctx.types.get(ctx.types.resolve_subst(target_id)).kind != TypeKind.Named) {
+            target_id = ctx.expected_type_id;
+        }
+        named_id = ctx.types.resolve_subst(target_id);
         TypeEntry* expected = ctx.types.get(named_id);
         if (expected.kind == TypeKind.Named) {
             struct_name = ctx.types.names.get(expected.name_id);
@@ -2795,12 +2802,20 @@ LLVMOpaqueValue* llvm_emit_struct_lit(LlvmContext* ctx, AstExpr* expr) {
         ctx.note_unresolved("struct-lit", struct_name);
         return (LLVMOpaqueValue*)0;
     }
-    LLVMOpaqueValue* slot = LLVMBuildAlloca(ctx.builder, def.llvm_type, "struct.lit");
-    LLVMBuildStore(ctx.builder, LLVMConstNull(def.llvm_type), slot);
+    // The target's own lowering gives a generic instance (`Cell<i32>`) its
+    // concrete layout; the shared definition only supplies the field order.
+    mono_ensure_type_layout(ctx, named_id, &ctx.generic_layout_ids);
+    LLVMOpaqueType* lit_type = llvm_lower_type(ctx.ctx, ctx.types, named_id);
+    LLVMOpaqueValue* slot = LLVMBuildAlloca(ctx.builder, lit_type, "struct.lit");
+    LLVMBuildStore(ctx.builder, LLVMConstNull(lit_type), slot);
     i64 fi = 0;
     while (fi < (i64)expr.aux) {
         u32 field_name_id = ctx.pool.args.get((i64)expr.inner1 + fi * 2);
         u32 val_id = ctx.pool.args.get((i64)expr.inner1 + fi * 2 + 1);
+        // An untyped positional entry has no name until its target is known.
+        if (field_name_id == 0 && fi < def.fields.len()) {
+            field_name_id = def.fields.get_ptr(fi).name_id;
+        }
         i32 field_idx = ctx.find_field_index(def, field_name_id);
         if (field_idx < 0) {
             ctx.note_unresolved("struct-lit-field", ctx.names.get(field_name_id));
@@ -2817,7 +2832,7 @@ LLVMOpaqueValue* llvm_emit_struct_lit(LlvmContext* ctx, AstExpr* expr) {
             return (LLVMOpaqueValue*)0;
         }
         val = llvm_compat_value(ctx, val, llvm_expr_type(ctx, val_id), field_type);
-        LLVMOpaqueValue* field_ptr = LLVMBuildStructGEP2(ctx.builder, def.llvm_type, slot, (u32)field_idx, "struct.lit.field");
+        LLVMOpaqueValue* field_ptr = LLVMBuildStructGEP2(ctx.builder, lit_type, slot, (u32)field_idx, "struct.lit.field");
         LLVMOpaqueValue* store = LLVMBuildStore(ctx.builder, val, field_ptr);
         if (def.packed) { LLVMSetAlignment(store, 1); }
         fi += 1;
@@ -2830,7 +2845,7 @@ LLVMOpaqueValue* llvm_emit_struct_lit(LlvmContext* ctx, AstExpr* expr) {
         llvm_clear_copy_source(ctx, cleared_val_id);
         cleared_index += 1;
     }
-    return LLVMBuildLoad2(ctx.builder, def.llvm_type, slot, "struct.lit.val");
+    return LLVMBuildLoad2(ctx.builder, lit_type, slot, "struct.lit.val");
 }
 
 /// Converts integer slice bound `value` to i64, sign- or zero-extending by

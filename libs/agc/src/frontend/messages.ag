@@ -308,6 +308,18 @@ String designated_array_initializer_unsupported() {
     return String.from_str("stage1 supports designated array initializers (`[index] = value`) only in a global or non-static local array declaration");
 }
 
+/// Diagnostic text: "a brace initializer cannot initialize {}: it needs a
+/// struct type". Returns an owned string.
+String initializer_target_not_struct(str type_name) {
+    return @format("a brace initializer cannot initialize {}: it needs a struct type", type_name);
+}
+
+/// Diagnostic text: "too many initializer entries for {}". Returns an owned
+/// string.
+String initializer_too_many_entries(str type_name) {
+    return @format("too many initializer entries for {}", type_name);
+}
+
 /// Diagnostic text: "array initializer index must be a constant integer".
 /// Returns static text.
 str array_designator_not_constant() {
