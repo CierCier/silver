@@ -220,8 +220,9 @@ fn fold_const_binary(
             Op::Greater => l > r,
             Op::LessEqual => l <= r,
             Op::GreaterEqual => l >= r,
-            Op::LogicalAnd => l != 0 && r != 0,
-            _ => l != 0 || r != 0,
+            // Each operand is truthy in its own type, before any narrowing.
+            Op::LogicalAnd => lhs.value != 0 && rhs.value != 0,
+            _ => lhs.value != 0 || rhs.value != 0,
         };
         return Some(ConstOperand::typed(i128::from(truth), ConstIntShape::BOOL));
     }
@@ -238,7 +239,8 @@ fn fold_const_binary(
         Op::BitwiseOr => l | r,
         Op::BitwiseXor => l ^ r,
         Op::LeftShift | Op::RightShift => {
-            let amount = u32::try_from(r).ok().filter(|n| *n < shape.bits)?;
+            // Range-check the count as written, before any narrowing.
+            let amount = u32::try_from(rhs.value).ok().filter(|n| *n < shape.bits)?;
             match operator {
                 Op::LeftShift => l.wrapping_shl(amount),
                 _ if shape.unsigned => (ul >> amount) as i128,

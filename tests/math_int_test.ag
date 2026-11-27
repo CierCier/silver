@@ -25,6 +25,11 @@ const i32 MINUS_ONE = -1;
 const u32 PLUS_ONE = 1;
 const bool MIXED_SIGN_LESS = MINUS_ONE < PLUS_ONE;
 const bool MIXED_SIGN_GREATER = PLUS_ONE > MINUS_ONE;
+const u8 BYTE_ZERO = 0;
+const bool MIXED_SUM_NEGATIVE = (MINUS_ONE + BYTE_ZERO) < (i32)0;
+const u8 BYTE_MAX = 255;
+const i32 BYTE_COMPLEMENT = ~BYTE_MAX;
+const u8 HALF_OF_LITERAL = (u8)(256 / 2);
 
 i32 main() {
     STDOUT.write_str("=== Math Int Tests ===\n\n");
@@ -50,6 +55,11 @@ i32 main() {
                     "mixed-sign constant comparison matches runtime");
         assert_true(MIXED_SIGN_GREATER == (plus_one > minus_one),
                     "mixed-sign constant comparison matches runtime (reversed)");
+        u8 byte_zero = BYTE_ZERO;
+        assert_true(MIXED_SUM_NEGATIVE == ((minus_one + byte_zero) < (i32)0),
+                    "mixed-sign constant sum keeps its runtime type");
+        assert_eq_i32(0, BYTE_COMPLEMENT, "u8 complement happens before widening");
+        assert_eq_i64(128, (i64)HALF_OF_LITERAL, "literal division happens before the u8 cast");
     }
 
 

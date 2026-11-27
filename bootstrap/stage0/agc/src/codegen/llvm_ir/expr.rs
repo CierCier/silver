@@ -425,6 +425,23 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         target_type: &ast::Type,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
         let target = self.lower_basic_type(target_type)?;
+        // Integer unary operators and casts fold in their operand's own type
+        // (`~A` on a u8 `A` complements eight bits) before the conversion to
+        // the declared type; other operands keep the paths below.
+        if target.is_int_type()
+            && matches!(
+                expr.kind.as_ref(),
+                ast::ExpressionKind::Unary { .. } | ast::ExpressionKind::Cast { .. }
+            )
+            && let Some(shape) = self.const_int_shape(target_type)
+            && let Some(value) = fold_const_int(self, expr, shape)
+        {
+            return Ok(Self::const_int_with_shape(
+                target.into_int_type(),
+                value,
+                shape,
+            ));
+        }
         let value = match expr.kind.as_ref() {
             ast::ExpressionKind::Literal(ast::Literal::Integer(value)) => {
                 // Emit at the target width; const_int_from_string preserves the

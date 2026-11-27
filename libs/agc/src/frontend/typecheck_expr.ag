@@ -5077,6 +5077,8 @@ bool const_eval_parse_int(str text, i64* out) {
             }
             // A type suffix ends the digits.
             if (digit >= radix) { break; }
+            // Reject literals beyond u64 rather than keep their low bits.
+            if (value > (~(u64)0 - digit) / radix) { return false; }
             value = value * radix + digit;
             digits = true;
         }
@@ -5102,25 +5104,13 @@ bool const_eval_compares(u32 op) {
         || op == (u32)TokenKind.And || op == (u32)TokenKind.Or;
 }
 
-/// Type a binary operation on operands of types `a` and `b` folds in, like
-/// the runtime operation: the wider width, unsigned when either operand is
-/// unsigned, or the typed one beside a bare literal (TYPE_UNKNOWN).
+/// Result type of a binary operation on operands of types `a` and `b`, like
+/// the type checker gives it: the wider type, or the typed one beside a bare
+/// literal (TYPE_UNKNOWN).
 u32 const_eval_common_type(u32 a, u32 b) {
     if (a == TYPE_UNKNOWN) { return b; }
     if (b == TYPE_UNKNOWN) { return a; }
-    i64 a_bits = const_eval_bits(a);
-    i64 b_bits = const_eval_bits(b);
-    u32 wider = a_bits >= b_bits ? a : b;
-    if (type_is_unsigned_integer(wider)
-        || !(type_is_unsigned_integer(a) || type_is_unsigned_integer(b))) {
-        return wider;
-    }
-    i64 bits = const_eval_bits(wider);
-    if (bits == 8) { return TYPE_U8; }
-    if (bits == 16) { return TYPE_U16; }
-    if (bits == 32) { return TYPE_U32; }
-    if (bits == 64) { return TYPE_U64; }
-    return wider;
+    return common_numeric_type(a, b);
 }
 
 /// Folds `lhs op rhs` in the operands' type (`context` when both are bare
@@ -5134,8 +5124,17 @@ bool const_eval_binary(u32 op, ConstOperand lhs, ConstOperand rhs, u32 context,
     u32 type_id = typed != TYPE_UNKNOWN ? typed : (compares ? TYPE_UNKNOWN : context);
     i64 l = const_eval_wrap(lhs.value, type_id);
     i64 r = const_eval_wrap(rhs.value, type_id);
-    // Unsigned operands compare and divide by their bit patterns.
-    bool is_unsigned = type_id == TYPE_BOOL || type_is_unsigned_integer(type_id);
+    // Like the runtime operation, an unsigned operand on either side makes
+    // compares, division and right shifts unsigned, on the result width's
+    // bit patterns; the result keeps its own type.
+    bool is_unsigned = type_id == TYPE_BOOL || type_is_unsigned_integer(type_id)
+        || type_is_unsigned_integer(lhs.type_id) || type_is_unsigned_integer(rhs.type_id);
+    i64 width = const_eval_bits(type_id);
+    if (is_unsigned && width > 0 && width < 64) {
+        i64 mask = ((i64)1 << width) - 1;
+        l = l & mask;
+        r = r & mask;
+    }
     bool truth = false;
     i64 value = 0;
     if (op == (u32)TokenKind.Equal) {
@@ -5151,9 +5150,10 @@ bool const_eval_binary(u32 op, ConstOperand lhs, ConstOperand rhs, u32 context,
     } else if (op == (u32)TokenKind.GreaterEqual) {
         truth = is_unsigned ? (u64)l >= (u64)r : l >= r;
     } else if (op == (u32)TokenKind.And) {
-        truth = l != 0 && r != 0;
+        // Each operand is truthy in its own type, before any narrowing.
+        truth = lhs.value != 0 && rhs.value != 0;
     } else if (op == (u32)TokenKind.Or) {
-        truth = l != 0 || r != 0;
+        truth = lhs.value != 0 || rhs.value != 0;
     } else if (op == (u32)TokenKind.Plus) {
         value = (i64)((u64)l + (u64)r);
     } else if (op == (u32)TokenKind.Minus) {
@@ -5180,7 +5180,8 @@ bool const_eval_binary(u32 op, ConstOperand lhs, ConstOperand rhs, u32 context,
     } else if (op == (u32)TokenKind.LeftShift || op == (u32)TokenKind.RightShift) {
         i64 bits = const_eval_bits(type_id);
         if (bits == 0) { bits = 64; }
-        if (r < 0 || r >= bits) { return false; }
+        // Range-check the count as written, before any narrowing.
+        if (rhs.value < 0 || rhs.value >= bits) { return false; }
         if (op == (u32)TokenKind.LeftShift) {
             value = (i64)((u64)l << (u64)r);
         } else if (is_unsigned) {
@@ -5288,12 +5289,15 @@ impl ConstEval {
             if (strcmp(self.active.get(i), name) == 0) { return false; }
             i += 1;
         }
-        SyntaxNode* item = self.root.first_child;
-        while (item != (SyntaxNode*)0) {
-            SyntaxNode* id_node = item.kind == NodeKind.Global
-                ? item_identifier(item) : (SyntaxNode*)0;
-            if (id_node != (SyntaxNode*)0 && strcmp(id_node.text, name) == 0) { break; }
-            item = item.next_sibling;
+        // The last declaration of `name` is the one the backend emits (it
+        // does not apply cfg to globals yet), so folding reads that one too.
+        SyntaxNode* item = (SyntaxNode*)0;
+        SyntaxNode* scan = self.root.first_child;
+        while (scan != (SyntaxNode*)0) {
+            SyntaxNode* id_node = scan.kind == NodeKind.Global
+                ? item_identifier(scan) : (SyntaxNode*)0;
+            if (id_node != (SyntaxNode*)0 && strcmp(id_node.text, name) == 0) { item = scan; }
+            scan = scan.next_sibling;
         }
         if (item == (SyntaxNode*)0) { return false; }
         bool is_const = false;
@@ -5339,7 +5343,11 @@ impl ConstEval {
                 return true;
             }
             out.type_id = TYPE_UNKNOWN;
-            return type_is_integer(aux) && const_eval_parse_int(text, &out.value);
+            // A literal too wide for i64 folds only where a 64-bit or
+            // narrower type takes it; on its own it would lose its value.
+            bool wide = aux == TYPE_I128 || aux == TYPE_U128;
+            return type_is_integer(aux) && (!wide || const_eval_bits(context) > 0)
+                && const_eval_parse_int(text, &out.value);
         }
         if (kind == ExprKind.Var) {
             return self.fold_name(self.names.get(aux), out);
