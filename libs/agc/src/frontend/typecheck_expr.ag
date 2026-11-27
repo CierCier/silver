@@ -3719,6 +3719,8 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 TypeKind parameter_kind = parameter_entry.kind;
                 u32 arg_id = pool.args.get((i64)expr.inner1 + i);
                 u32 actual_type = infer_expr(pool, types, symbols, root, env, arg_id, diagnostics, ok);
+                actual_type = typecheck_adopt_literal_target(pool, types, symbols, root, arg_id,
+                    actual_type, parameter_type, diagnostics, ok);
                 typecheck_char_pointer_argument(types, parameter_type, actual_type,
                     pool.get_expr(arg_id).span, diagnostics, ok);
                 if (parameter_kind != TypeKind.Pointer
@@ -4455,7 +4457,11 @@ u32 typecheck_adopt_literal_target(AstPool* pool, TypeTable* types, SymbolTable*
             && find_enum_item(root, symbols.names.get(value_expr.inner0)) == (SyntaxNode*)0);
     if (!untyped_literal) { return value_type; }
     u32 resolved_target = types.resolve_subst(target_type);
-    if (types.get(resolved_target).kind != TypeKind.Named) {
+    // Enums are named types too, but a brace initializer only builds a struct.
+    bool enum_target = types.get(resolved_target).kind == TypeKind.Named
+        && find_enum_item(root, types.names.get(types.get(resolved_target).name_id))
+            != (SyntaxNode*)0;
+    if (types.get(resolved_target).kind != TypeKind.Named || enum_target) {
         if (value_expr.inner0 == 0 && resolved_target != TYPE_UNKNOWN) {
             diagnostics.error(value_expr.span,
                 initializer_target_not_struct(types.type_name(resolved_target)));
@@ -4464,7 +4470,65 @@ u32 typecheck_adopt_literal_target(AstPool* pool, TypeTable* types, SymbolTable*
         return value_type;
     }
     value_expr.inferred_type = resolved_target;
+    if (value_expr.inner0 == 0) {
+        typecheck_brace_initializer_fields(pool, types, symbols, root, value_id,
+                                           resolved_target, diagnostics, ok);
+    }
     return resolved_target;
+}
+
+/// Checks the entries of brace initializer `literal_id` against the fields of
+/// struct `target`: each designated name must exist, positional entries must
+/// not outnumber the fields, and each value must fit its field's type. A
+/// nested brace initializer adopts and checks its field's type in turn.
+void typecheck_brace_initializer_fields(AstPool* pool, TypeTable* types, SymbolTable* symbols,
+                                        SyntaxNode* root, u32 literal_id, u32 target,
+                                        DiagnosticBag* diagnostics, bool* ok) {
+    str target_name = types.names.get(types.get(target).name_id);
+    SyntaxNode* item = find_item_by_name(root, NodeKind.Struct, target_name);
+    if (item == (SyntaxNode*)0) { return; }
+    u32 fields_start = pool.get_expr(literal_id).inner1;
+    i64 field_count = (i64)pool.get_expr(literal_id).aux;
+    i64 index = 0;
+    while (index < field_count) {
+        u32 name_id = pool.args.get((i64)fields_start + index * 2);
+        u32 val_id = pool.args.get((i64)fields_start + index * 2 + 1);
+        Span value_span = pool.get_expr(val_id).span;
+        str field_name = (str)0;
+        if (name_id != 0) {
+            field_name = symbols.names.get(name_id);
+        } else {
+            SyntaxNode* positional = struct_field_name_at(item, index);
+            if (positional == (SyntaxNode*)0) {
+                diagnostics.error(value_span,
+                    initializer_too_many_entries(types.type_name(target)));
+                *ok = false;
+                return;
+            }
+            field_name = positional.text;
+        }
+        u32 field_type = struct_field_type_id(types, item, field_name);
+        if (field_type == TYPE_UNKNOWN) {
+            diagnostics.error(value_span, unknown_field(field_name, types.type_name(target)));
+            *ok = false;
+        } else {
+            field_type = types.resolve_subst(
+                resolve_generic_member_type(types, root, target, field_type));
+            u32 value_type = typecheck_adopt_literal_target(pool, types, symbols, root, val_id,
+                pool.get_expr(val_id).inferred_type, field_type, diagnostics, ok);
+            if (value_type != TYPE_UNKNOWN
+                && !typecheck_type_is_unresolved(types, field_type, 0)
+                && !types_match_value(types, field_type, value_type,
+                                      expr_is_literal(pool, val_id))
+                && !typecheck_tuple_literal_fits(pool, root, types, field_type, val_id)
+                && !typecheck_implicit_cast(root, types, value_type, field_type)) {
+                diagnostics.error(value_span, type_mismatch(types.type_name(field_type),
+                                                            types.type_name(value_type)));
+                *ok = false;
+            }
+        }
+        index += 1;
+    }
 }
 
 // Resolve local initializers with the same expression checker as function bodies.

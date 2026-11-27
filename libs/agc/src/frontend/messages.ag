@@ -298,6 +298,12 @@ String initializer_target_not_struct(str type_name) {
     return @format("a brace initializer cannot initialize {}: it needs a struct type", type_name);
 }
 
+/// Diagnostic text: "too many initializer entries for {}". Returns an owned
+/// string.
+String initializer_too_many_entries(str type_name) {
+    return @format("too many initializer entries for {}", type_name);
+}
+
 /// Diagnostic text: "array initializer index must be a constant integer".
 /// Returns static text.
 str array_designator_not_constant() {

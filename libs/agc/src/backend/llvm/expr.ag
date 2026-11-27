@@ -2804,6 +2804,7 @@ LLVMOpaqueValue* llvm_emit_struct_lit(LlvmContext* ctx, AstExpr* expr) {
     }
     // The target's own lowering gives a generic instance (`Cell<i32>`) its
     // concrete layout; the shared definition only supplies the field order.
+    mono_ensure_type_layout(ctx, named_id, &ctx.generic_layout_ids);
     LLVMOpaqueType* lit_type = llvm_lower_type(ctx.ctx, ctx.types, named_id);
     LLVMOpaqueValue* slot = LLVMBuildAlloca(ctx.builder, lit_type, "struct.lit");
     LLVMBuildStore(ctx.builder, LLVMConstNull(lit_type), slot);
