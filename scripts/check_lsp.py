@@ -932,6 +932,40 @@ class NativeLsp(unittest.TestCase):
                           (30, "cannot move 'leaf' out of 'Guard' because it implements Drop"),
                           (30, "cannot move 'leaf' out of 'Guard' because it implements Drop")])
 
+    def test_a_generic_body_is_move_checked_for_each_instantiation(self):
+        # A value of type `T` or `GW<T>` is owned only once `T` is bound, so
+        # each call is checked with its type arguments. A Copy instantiation of
+        # the same body, and a body whose own check already rejects it, report
+        # nothing new; a second call with the same owned type reports nothing again.
+        text = ("trait Drop { void drop(*self); }\n"
+                "struct Tok { i64 id; }\n"
+                "impl Drop for Tok { void drop(*self) { } }\n"
+                "struct GW<T> { T inner; }\n"
+                "struct Crate<T> { T* data; }\n"
+                "impl<T> Crate<T> { T __index_get(*self, i64 i) { return self.data[i]; } }\n"
+                "void dup<T>(T a) { T b = a; T c = a; }\n"
+                "void g<T>(GW<T> a) { GW<T> b = a; GW<T> c = a; }\n"
+                "void b4<T>(Crate<T> c) { GW<T> w = { .inner = c[0] }; }\n"
+                "void once<T>(T a) { T b = a; }\n"
+                "void both<T>(Tok t, T a) { Tok u = t; Tok v = t; }\n"
+                "Tok mk(i64 id) { Tok t; t.id = id; return move t; }\n"
+                "i32 main() {\n"
+                "    dup(mk(1)); dup(mk(2)); dup(3);\n"
+                "    GW<Tok> w = { .inner = mk(4) }; g(w);\n"
+                "    GW<i64> n = { .inner = 5 }; g(n);\n"
+                "    Crate<Tok> c; b4(c); Crate<i64> d; b4(d);\n"
+                "    once(mk(6)); both(mk(7), mk(8));\n"
+                "    return 0;\n"
+                "}\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
+                         [(10, "use of moved value 't'"),
+                          (6, "use of moved value 'a'"),
+                          (7, "use of moved value 'a'"),
+                          (8, "cannot move an element out of 'Crate<Tok>' by indexing: the container still owns it; "
+                              "use take, pop, swap_remove, or a reference")])
+
     def test_a_local_callable_is_checked_against_its_own_signature(self):
         # The parameter `f` shadows the function `f`, so its signature rules.
         text = ("void f(i64 a, i64 b) { }\n"

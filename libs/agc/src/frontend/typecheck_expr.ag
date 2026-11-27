@@ -4126,7 +4126,7 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 if (valid_arity && !variadic && generic_callee) {
                     typecheck_generic_call_drop_ownership(
                         pool, types, symbols, root, env, callee_fn,
-                        expr_id, diagnostics, ok);
+                        expr_id, &type_args, diagnostics, ok);
                 }
             } else if (overloaded) {
                 inferred = TYPE_UNKNOWN;
@@ -4804,6 +4804,10 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
             }
             if (!array_initializer && declared_type != TYPE_UNKNOWN && actual_type != TYPE_UNKNOWN
                 && !types_match_value(types, declared_type, actual_type, expr_is_literal(pool, init_id))
+                // Checking a generic body as one instantiation binds its `T`.
+                && !types_match_value(types, types.resolve_subst(declared_type),
+                                      types.resolve_subst(actual_type),
+                                      expr_is_literal(pool, init_id))
                 && !typecheck_tuple_literal_fits(pool, root, types, declared_type, init_id)
                 && !typecheck_implicit_cast(root, types, actual_type, declared_type)) {
                 String message = String.from_str("type mismatch: expected ");
@@ -4984,10 +4988,70 @@ bool typecheck_is_shared_value_error(str message) {
         || typecheck_str_contains(message, ", not shared: declare it `shared ");
 }
 
-/// Rechecks drop-ownership errors in generic call instantiations.
+/// True for a message of the move-flow check.
+bool typecheck_is_move_flow_error(str message) {
+    return typecheck_str_starts_with(message, "use of ")
+        || typecheck_str_starts_with(message, "cannot move an element out of '")
+        || strcmp(message, move_in_guarded_match_arm()) == 0;
+}
+
+/// True when `diagnostics` already holds an error with `span` and `message`.
+bool typecheck_has_error(DiagnosticBag* diagnostics, Span span, str message) {
+    i64 i = 0;
+    while (i < diagnostics.len()) {
+        Diagnostic* seen = diagnostics.get(i);
+        if (seen.severity == Severity.Error && seen.span.file == span.file
+            && seen.span.start == span.start && seen.span.end == span.end
+            && strcmp(seen.message.to_str(), message) == 0) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+/// Reports `moves`, the move-check errors of one concrete instantiation of
+/// generic `function`, checked with its type parameters bound to the call's
+/// type arguments. The generic body's own check cannot track a value of type
+/// `T`, or of `GW<T>`, since it does not know whether `T` is Copy. Reports
+/// only errors the generic body's own check does not, once per source
+/// location, as stage0 does for each instantiation.
+void typecheck_report_instance_moves(TypeTable* types, SymbolTable* symbols, SyntaxNode* root,
+                                     CfgSet* cfg, SyntaxNode* function, SyntaxNode* body,
+                                     DiagnosticBag* moves, DiagnosticBag* diagnostics,
+                                     bool* ok) {
+    // The generic body's own check reports what holds for every `T`.
+    AstPool generic_pool = AstPool.new();
+    DiagnosticBag generic = DiagnosticBag.new();
+    bool generic_ok = true;
+    typecheck_body(&generic_pool, types, symbols, root, binding_function_parameters(function),
+                   body, function_return_type_id(types, function), TYPE_UNKNOWN, cfg,
+                   &generic, &generic_ok, (bool*)0);
+    i64 i = 0;
+    while (i < moves.len()) {
+        Diagnostic* diagnostic = moves.get(i);
+        if (diagnostic.severity == Severity.Error
+            && !typecheck_has_error(&generic, diagnostic.span, diagnostic.message.to_str())
+            && !typecheck_has_error(diagnostics, diagnostic.span, diagnostic.message.to_str())) {
+            if (diagnostic.has_note) {
+                diagnostics.error_with_note(diagnostic.span, diagnostic.message.clone(),
+                                            diagnostic.note_span,
+                                            diagnostic.note_message.clone());
+            } else {
+                diagnostics.error(diagnostic.span, diagnostic.message.clone());
+            }
+            *ok = false;
+        }
+        i += 1;
+    }
+}
+
+/// Rechecks drop-ownership errors in generic call instantiations, and
+/// move-checks the instantiation with `type_args` bound, so a value whose
+/// type is a type parameter is tracked as the owned value it is here.
 void typecheck_generic_call_drop_ownership(
     AstPool* caller_pool, TypeTable* types, SymbolTable* symbols, SyntaxNode* root,
-    TypeEnv* caller_env, SyntaxNode* function, u32 call_id,
+    TypeEnv* caller_env, SyntaxNode* function, u32 call_id, CalleeTypeArgs* type_args,
     DiagnosticBag* diagnostics, bool* ok) {
     if (caller_env.expression_depth >= MAX_TYPE_CHECK_DEPTH) { return; }
     SyntaxNode* body = find_function_body(function);
@@ -5062,6 +5126,28 @@ void typecheck_generic_call_drop_ownership(
         return;
     }
 
+    // Parameters are the outermost locals; capture them before statements add more.
+    Vec<LocalVar> parameter_locals = Vec<LocalVar>.new();
+    i = 0;
+    while (i < callee_env.locals.len()) {
+        parameter_locals.push(callee_env.locals.get(i));
+        i += 1;
+    }
+    // The body is checked as this instantiation: its type parameters name
+    // the call's type arguments.
+    i64 pushed = 0;
+    i = 0;
+    while (i < type_args.params.len()) {
+        // A bound written in terms of an enclosing instance's `T` names its type.
+        u32 bound = types.resolve_subst(type_args.bound.get(i));
+        TypeKind bound_kind = types.get(bound).kind;
+        if (bound != TYPE_UNKNOWN && bound_kind != TypeKind.TypeParam
+            && bound_kind != TypeKind.Unknown) {
+            types.push_subst(type_args.params.get(i), bound);
+            pushed += 1;
+        }
+        i += 1;
+    }
     DiagnosticBag probe_diagnostics = DiagnosticBag.new();
     bool probe_ok = true;
     i = 0;
@@ -5071,6 +5157,16 @@ void typecheck_generic_call_drop_ownership(
                             &probe_ok);
         i += 1;
     }
+    DiagnosticBag moves = DiagnosticBag.new();
+    bool moves_ok = !probe_ok || pushed == 0
+        || move_flow_check(&probe_pool, types, symbols, root, &parameter_locals, &stmt_ids,
+                           &moves);
+    types.pop_subst(pushed);
+    if (!moves_ok) {
+        typecheck_report_instance_moves(types, symbols, root, caller_env.cfg, function, body,
+                                        &moves, diagnostics, ok);
+    }
+    parameter_locals.drop();
     stmt_ids.drop();
 
     i = 0;
@@ -5083,6 +5179,19 @@ void typecheck_generic_call_drop_ownership(
                 || typecheck_is_method_bound_error(diagnostic.message.to_str())
                 || typecheck_str_starts_with(diagnostic.message.to_str(), "pointer argument type mismatch:"))) {
             diagnostics.error(diagnostic.span, diagnostic.message.clone());
+            *ok = false;
+        } else if (diagnostic.severity == Severity.Error
+            && typecheck_is_move_flow_error(diagnostic.message.to_str())
+            && !typecheck_has_error(diagnostics, diagnostic.span, diagnostic.message.to_str())) {
+            // A generic call inside this instance, checked with its own
+            // type arguments bound.
+            if (diagnostic.has_note) {
+                diagnostics.error_with_note(diagnostic.span, diagnostic.message.clone(),
+                                            diagnostic.note_span,
+                                            diagnostic.note_message.clone());
+            } else {
+                diagnostics.error(diagnostic.span, diagnostic.message.clone());
+            }
             *ok = false;
         }
         i += 1;
@@ -5456,3 +5565,4 @@ bool typecheck_expressions(AstPool* pool, SymbolTable* symbols, SyntaxTree* tree
     tree.root.last_child = local_last;
     return ok;
 }
+
