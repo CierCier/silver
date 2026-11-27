@@ -135,6 +135,10 @@ pub fn build_artifact(
         let Some(name) = entity.get_name() else {
             continue;
         };
+        // Filter functions before conversion, so `deny` also skips signatures agsm cannot map.
+        if entity.get_kind() == EntityKind::FunctionDecl && !is_name_allowed(&name, config) {
+            continue;
+        }
         let mut extra_exports = Vec::new();
         let mut stub = None;
         let Some(export) = export_entity(
@@ -491,6 +495,18 @@ fn export_function(
     name: &str,
     stub: &mut Option<CStub>,
 ) -> Result<Option<ModuleExport>, ExtractError> {
+    let is_inline_or_static = entity.is_inline_function()
+        || entity
+            .get_linkage()
+            .is_some_and(|l| matches!(l, clang::Linkage::Internal | clang::Linkage::Automatic))
+        || (entity.is_definition() && entity.get_linkage() != Some(clang::Linkage::External));
+
+    // A stub cannot forward `...`, so variadic inline functions are not callable from Silver.
+    // Checked before type conversion so an unsupported parameter type cannot fail the build.
+    if is_inline_or_static && entity.is_variadic() {
+        return Ok(None);
+    }
+
     let function_type = entity
         .get_type()
         .ok_or_else(|| ExtractError::Unsupported(format!("function `{name}` has no type")))?;
@@ -510,17 +526,6 @@ fn export_function(
         .get_result_type()
         .ok_or_else(|| ExtractError::Unsupported(format!("function `{name}` has no result type")))
         .and_then(canonical_type)?;
-
-    let is_inline_or_static = entity.is_inline_function()
-        || entity
-            .get_linkage()
-            .is_some_and(|l| matches!(l, clang::Linkage::Internal | clang::Linkage::Automatic))
-        || (entity.is_definition() && entity.get_linkage() != Some(clang::Linkage::External));
-
-    // A stub cannot forward `...`, so variadic inline functions are not callable from Silver.
-    if is_inline_or_static && entity.is_variadic() {
-        return Ok(None);
-    }
 
     let link_name = if is_inline_or_static {
         let stub_name = format!("__silver_stub_{name}");
@@ -1474,8 +1479,13 @@ mod tests {
     use crate::config::SourcemapConfig;
 
     fn build_header(name: &str, header: &str, extra_config: &str) -> ModuleArtifact {
-        let dir = std::env::temp_dir().join(format!("agsm-{name}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("agsm-{name}-{}-{nanos}", std::process::id()));
+        // `create_dir` fails on an existing path, so a pre-planted directory is never reused.
+        std::fs::create_dir(&dir).unwrap();
         std::fs::write(dir.join(format!("{name}.h")), header).unwrap();
         let source = format!(
             "name = \"{name}\"\nincludes = [\"{name}.h\"]\ninclude_paths = [\".\"]\n{extra_config}"
@@ -1510,17 +1520,21 @@ mod tests {
 static inline int repro_add(int a, int b);
 static inline int repro_add(int a, int b) { return a + b; }
 static inline int repro_log(const char* fmt, ...) { (void)fmt; return 0; }
+static inline void repro_log_complex(double _Complex value, ...) { (void)value; }
+int repro_denied_complex(double _Complex value);
 static inline int repro_hidden(int (*f)(int)) { return f(0); }
 static inline void repro_free(void* p) { (void)p; }
 #define repro_free(p) (repro_free)((p), 0)
 "#,
-            "deny = [\"repro_hidden\"]\n",
+            "deny = [\"repro_hidden\", \"repro_denied_*\"]\n",
         );
         assert!(artifact.code_artifacts.has_static_library);
         assert_eq!(function_link_name(&artifact, "repro_add"), Some("__silver_stub_repro_add"));
         assert_eq!(function_link_name(&artifact, "repro_free"), Some("__silver_stub_repro_free"));
         assert_eq!(function_link_name(&artifact, "repro_log"), None);
         assert_eq!(function_link_name(&artifact, "repro_hidden"), None);
+        assert_eq!(function_link_name(&artifact, "repro_log_complex"), None);
+        assert_eq!(function_link_name(&artifact, "repro_denied_complex"), None);
     }
 
     #[test]
