@@ -3149,6 +3149,8 @@ impl MoveChecker {
                     }
                     // A `move` binding owns its payload within the arm.
                     arm_scopes.push(Vec::new());
+                    // Saved before any binding shadows an outer borrowed name.
+                    let saved_borrowed = self.borrowed_payloads.clone();
                     let owned = self.move_payload_bindings(&arm.pattern, scrutinee.as_ref());
                     for (binding, ty) in &owned {
                         self.record_owner(binding, ty, true);
@@ -3158,7 +3160,6 @@ impl MoveChecker {
                     // hides an outer local of its name until the arm ends,
                     // and keeps its payload type for nested matches.
                     let typed = self.payload_bindings(&arm.pattern, scrutinee.as_ref(), true);
-                    let saved_borrowed = self.borrowed_payloads.clone();
                     for binding in Self::payload_binding_names(&arm.pattern) {
                         if owned.iter().any(|(o, _)| o.name == binding.name) {
                             continue;
@@ -4111,6 +4112,17 @@ mod tests {
                      enum Parcel { Held(Twin); Empty; }\n";
         let shadowed = "Parcel c = Parcel.Held(Twin.Both(fresh(), fresh())); \
                         match c { Held(w): { if (true) { Twin w = Twin.Neither; } \
+                        match w { Both(move a, b): { eat(a); eat(b); }, Neither: {} }; }, \
+                        Empty: {} };";
+        let errors = errors_with_items(items, shadowed);
+        assert!(
+            errors.moves.contains(&crate::diagnostics::messages::cannot_move_out_of_borrowed_payload("w")),
+            "{shadowed}: {errors:?}"
+        );
+        // So does an inner arm's owned binding of the same name.
+        let shadowed = "Parcel c = Parcel.Held(Twin.Both(fresh(), fresh())); \
+                        Parcel q = Parcel.Held(Twin.Neither); \
+                        match c { Held(w): { match q { Held(move w): {}, Empty: {} }; \
                         match w { Both(move a, b): { eat(a); eat(b); }, Neither: {} }; }, \
                         Empty: {} };";
         let errors = errors_with_items(items, shadowed);
