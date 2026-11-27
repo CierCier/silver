@@ -146,6 +146,14 @@ pub struct LlvmIrGenerator<'ctx> {
     /// constant (e.g. `seq_cst`) into a literal, since LLVM atomic instructions
     /// require a compile-time ordering.
     pub(crate) global_const_values: HashMap<String, i128>,
+    /// Type and initializer of every immutable global in the program, so a
+    /// constant initializer can fold a reference to another constant
+    /// regardless of declaration order.
+    pub(crate) const_global_initializers: HashMap<String, (ast::Type, ast::Expression)>,
+    /// Constants being folded, to reject a cycle instead of recursing forever.
+    pub(crate) const_eval_stack: Vec<String>,
+    /// Folded values of integer and bool constants, by name.
+    pub(crate) const_int_cache: HashMap<String, i128>,
     pub(crate) struct_types: HashMap<String, StructType<'ctx>>,
     pub(crate) struct_fields: HashMap<String, Vec<(String, ast::Type)>>,
     pub(crate) union_types: HashSet<String>,
