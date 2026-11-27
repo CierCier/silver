@@ -15,6 +15,12 @@ String init_plan_unrepresentable(str type_name) {
     return @format("cannot represent owner initialization plan for '{}': unresolved inline layout or more than 65536 nodes / 256 projection levels", type_name);
 }
 
+/// Diagnostic text: "{} '{}' contains itself by value; use a pointer", where
+/// the kind is `struct` or `enum`. Returns an owned string.
+String type_contains_itself(str kind, str name) {
+    return @format("{} '{}' contains itself by value; use a pointer", kind, name);
+}
+
 /// Diagnostic text: "owner initialization update has no resolved inline
 /// place". Returns an owned string.
 String init_plan_unknown_place() {

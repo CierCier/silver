@@ -1568,6 +1568,15 @@ class NativeLsp(unittest.TestCase):
                   ' i64 both(&self, str s) { return 9; } }\n'
                   'impl Both<i64> for Counter { i64 both(&self, i64 x) { return x + 1; } }\n'
                   + valid.replace("c.bump(1)", 'i64 m = c.both(1) + c.both("s")'), []),
+                 # A struct stored inside itself has no finite size.
+                 ('struct Loop { i64 n; Loop inner; }\n' + valid,
+                  ["struct 'Loop' contains itself by value; use a pointer"]),
+                 # Pointers end the search, and a type parameter is not the
+                 # global type it shadows.
+                 ('struct Holder<T> { T* data; }\n'
+                  'struct Outer<T> { Holder<Holder<T>> value; }\n'
+                  'struct T { Wrap<i64> value; }\nstruct Wrap<T> { T value; }\n'
+                  'struct Ref<T> { Wrap<T*> field; }\n' + valid, []),
                  # Defaults come from the cfg-active trait of that name.
                  ('#[cfg(os.windows)]\ntrait Reset { void other(*self) { } }\n'
                   '#[cfg(os.linux)]\ntrait Reset { void reset(*self) { } }\n'
