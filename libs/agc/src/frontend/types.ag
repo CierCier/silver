@@ -167,6 +167,9 @@ struct TypeTable {
     Vec<u32> struct_type_params;
     Vec<u32> packed_structs;
     Vec<TypeMethodParam> method_params;
+    /// Name ids of the generic functions whose call instances the type
+    /// checker is checking right now, innermost last.
+    Vec<u32> probing;
 }
 /// Computes copy/drop properties of type `id`, recursing into fields and
 /// elements up to depth 256 (deeper types report neither).
@@ -264,6 +267,7 @@ impl TypeTable {
         table.struct_field_names = Vec<u32>.new();
         table.struct_type_params = Vec<u32>.new();
         table.packed_structs = Vec<u32>.new();
+        table.probing = Vec<u32>.new();
         table.method_params = Vec<TypeMethodParam>.new();
         // 0: Unknown
         table.add_prim(TypeKind.Unknown, "unknown");
@@ -312,6 +316,7 @@ impl TypeTable {
         copy.struct_type_params = Vec<u32>.with_capacity(self.struct_type_params.len());
         copy.packed_structs = Vec<u32>.with_capacity(self.packed_structs.len());
         copy.method_params = Vec<TypeMethodParam>.with_capacity(self.method_params.len());
+        copy.probing = Vec<u32>.new();
         i64 i = 0;
         while (i < self.types.len()) { copy.types.push(self.types.get(i)); i += 1; }
         i = 0;

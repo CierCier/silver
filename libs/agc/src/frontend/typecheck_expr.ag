@@ -871,6 +871,14 @@ CalleeTypeArgs typecheck_callee_type_args(AstPool* pool, TypeTable* types, Synta
             : TYPE_UNKNOWN);
         i += 1;
     }
+    // The callee's own parameters shadow an enclosing instance's bindings of
+    // the same names, so its `T` stays a parameter to infer.
+    i = 0;
+    while (i < args.params.len()) {
+        u32 name_id = args.params.get(i);
+        types.push_subst(name_id, types.get_named(types.names.get(name_id)));
+        i += 1;
+    }
     i = 0;
     while (!explicit_args && i < argument_types.len() && i < parameters.len()) {
         if (!expr_is_literal(pool, pool.args.get((i64)call.inner1 + i))) {
@@ -880,6 +888,7 @@ CalleeTypeArgs typecheck_callee_type_args(AstPool* pool, TypeTable* types, Synta
         }
         i += 1;
     }
+    types.pop_subst(args.params.len());
     return move args;
 }
 
@@ -5020,14 +5029,30 @@ void typecheck_report_instance_moves(TypeTable* types, SymbolTable* symbols, Syn
                                      CfgSet* cfg, SyntaxNode* function, SyntaxNode* body,
                                      DiagnosticBag* moves, DiagnosticBag* diagnostics,
                                      bool* ok) {
-    // The generic body's own check reports what holds for every `T`.
+    // The generic body's own check reports what holds for every `T`. It
+    // runs with no bindings: an enclosing instance's `T` is not this one's,
+    // and with it bound a call inside the body would be checked concretely
+    // again.
+    Vec<TypeSubst> outer = Vec<TypeSubst>.new();
+    i64 i = 0;
+    while (i < types.subst.len()) {
+        outer.push(types.subst.get(i));
+        i += 1;
+    }
+    types.pop_subst(outer.len());
     AstPool generic_pool = AstPool.new();
     DiagnosticBag generic = DiagnosticBag.new();
     bool generic_ok = true;
     typecheck_body(&generic_pool, types, symbols, root, binding_function_parameters(function),
                    body, function_return_type_id(types, function), TYPE_UNKNOWN, cfg,
                    &generic, &generic_ok, (bool*)0);
-    i64 i = 0;
+    i = 0;
+    while (i < outer.len()) {
+        types.push_subst(outer.get(i).name_id, outer.get(i).type_id);
+        i += 1;
+    }
+    outer.drop();
+    i = 0;
     while (i < moves.len()) {
         Diagnostic* diagnostic = moves.get(i);
         if (diagnostic.severity == Severity.Error
@@ -5054,6 +5079,15 @@ void typecheck_generic_call_drop_ownership(
     TypeEnv* caller_env, SyntaxNode* function, u32 call_id, CalleeTypeArgs* type_args,
     DiagnosticBag* diagnostics, bool* ok) {
     if (caller_env.expression_depth >= MAX_TYPE_CHECK_DEPTH) { return; }
+    // A recursive call inside an instance being checked is that same check.
+    SyntaxNode* function_name = function_identifier(function);
+    if (function_name == (SyntaxNode*)0) { return; }
+    u32 function_name_id = types.names.intern(function_name.text);
+    i64 probe = 0;
+    while (probe < types.probing.len()) {
+        if (types.probing.get(probe) == function_name_id) { return; }
+        probe += 1;
+    }
     SyntaxNode* body = find_function_body(function);
     if (body == (SyntaxNode*)0) { return; }
 
@@ -5148,6 +5182,7 @@ void typecheck_generic_call_drop_ownership(
         }
         i += 1;
     }
+    types.probing.push(function_name_id);
     DiagnosticBag probe_diagnostics = DiagnosticBag.new();
     bool probe_ok = true;
     i = 0;
@@ -5157,6 +5192,7 @@ void typecheck_generic_call_drop_ownership(
                             &probe_ok);
         i += 1;
     }
+    types.probing.pop();
     DiagnosticBag moves = DiagnosticBag.new();
     bool moves_ok = !probe_ok || pushed == 0
         || move_flow_check(&probe_pool, types, symbols, root, &parameter_locals, &stmt_ids,

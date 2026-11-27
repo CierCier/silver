@@ -937,6 +937,8 @@ class NativeLsp(unittest.TestCase):
         # each call is checked with its type arguments. A Copy instantiation of
         # the same body, and a body whose own check already rejects it, report
         # nothing new; a second call with the same owned type reports nothing again.
+        # A generic call inside an instance is checked with its own binding, and
+        # a recursive call is not checked again inside its own instance.
         text = ("trait Drop { void drop(*self); }\n"
                 "struct Tok { i64 id; }\n"
                 "impl Drop for Tok { void drop(*self) { } }\n"
@@ -949,12 +951,16 @@ class NativeLsp(unittest.TestCase):
                 "void once<T>(T a) { T b = a; }\n"
                 "void both<T>(Tok t, T a) { Tok u = t; Tok v = t; }\n"
                 "Tok mk(i64 id) { Tok t; t.id = id; return move t; }\n"
+                "void twice<T>(T a) { T b = a; T c = a; }\n"
+                "void outer<T>(T a) { twice(a); }\n"
+                "void fan<T>(T a, i64 n) { if (n > 0) { fan(a, n - 1); fan(a, n - 2); } }\n"
                 "i32 main() {\n"
                 "    dup(mk(1)); dup(mk(2)); dup(3);\n"
                 "    GW<Tok> w = { .inner = mk(4) }; g(w);\n"
                 "    GW<i64> n = { .inner = 5 }; g(n);\n"
                 "    Crate<Tok> c; b4(c); Crate<i64> d; b4(d);\n"
                 "    once(mk(6)); both(mk(7), mk(8));\n"
+                "    outer(mk(9)); outer(10); fan(mk(11), 40); fan(12, 40);\n"
                 "    return 0;\n"
                 "}\n")
         uri = self.open(text)
@@ -964,7 +970,9 @@ class NativeLsp(unittest.TestCase):
                           (6, "use of moved value 'a'"),
                           (7, "use of moved value 'a'"),
                           (8, "cannot move an element out of 'Crate<Tok>' by indexing: the container still owns it; "
-                              "use take, pop, swap_remove, or a reference")])
+                              "use take, pop, swap_remove, or a reference"),
+                          (12, "use of moved value 'a'"),
+                          (14, "use of moved value 'a'")])
 
     def test_a_local_callable_is_checked_against_its_own_signature(self):
         # The parameter `f` shadows the function `f`, so its signature rules.
