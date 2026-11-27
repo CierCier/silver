@@ -996,6 +996,17 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 self.register_enum_metadata(enum_item)?;
             }
         }
+        // Constant initializers may name a constant declared later.
+        for item in &program.items {
+            if let ast::ItemKind::GlobalVariable(global) = &item.kind
+                && !global.is_mutable
+                && !global.is_volatile
+                && let Some(init) = &global.initializer
+            {
+                self.const_global_initializers
+                    .insert(global.name.name.clone(), (global.var_type.clone(), init.clone()));
+            }
+        }
         // Pass 0b: lay out struct and enum bodies (field types resolve now).
         for item in &program.items {
             match &item.kind {
