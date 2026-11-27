@@ -3683,10 +3683,12 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         inferred = result_type;
     } else if (expr.kind == ExprKind.Call) {
         AstExpr* callee = pool.get_expr(expr.inner0);
-        bool direct_c_call = callee.kind == ExprKind.Var
-            && env.lookup(callee.aux) == TYPE_UNKNOWN
+        // A local or parameter shadows a global function of the same name.
+        bool local_callee = callee.kind == ExprKind.Var
+            && env.lookup(callee.aux) != TYPE_UNKNOWN;
+        bool direct_c_call = callee.kind == ExprKind.Var && !local_callee
             && item_is_c_extern_function(root, symbols.names.get(callee.aux));
-        if (callee.kind == ExprKind.Var && env.lookup(callee.aux) == TYPE_UNKNOWN) {
+        if (callee.kind == ExprKind.Var && !local_callee) {
             i64 symbol_index = symbols.find(symbols.names.get(callee.aux));
             if (symbol_index >= 0 && symbols.get(symbol_index).c_abi) { direct_c_call = true; }
         }
@@ -3700,7 +3702,7 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         TypeKind callable_kind = callable_entry.kind;
         u32 callable_inner = callable_entry.inner;
         i64 callable_count = callable_entry.count;
-        bool named_function = callee.kind == ExprKind.Var
+        bool named_function = callee.kind == ExprKind.Var && !local_callee
             && find_function_by_name(root, symbols.names.get(callee.aux)) != (SyntaxNode*)0;
         if (callable_kind == TypeKind.Function && !named_function) {
             u32 arg_count = expr.aux;
@@ -3722,8 +3724,14 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 i += 1;
             }
             inferred = types.type_args.get(callable_inner);
+        } else if (local_callee && callable_kind != TypeKind.Function
+                   && callable_kind != TypeKind.Named
+                   && callable_kind != TypeKind.TypeParam
+                   && callable_kind != TypeKind.Unknown) {
+            diagnostics.error(expr.span, not_callable(symbols.names.get(callee.aux)));
+            *ok = false;
         }
-        if (callee.kind == ExprKind.Var) {
+        if (callee.kind == ExprKind.Var && !local_callee) {
             str callee_name = symbols.names.get(callee.aux);
             if (typecheck_str_starts_with(callee_name, "__atomic_")) {
                 inferred = TYPE_UNKNOWN;

@@ -21,6 +21,12 @@ String init_plan_unknown_place() {
     return String.from_str("owner initialization update has no resolved inline place");
 }
 
+/// Diagnostic text: "'{}' is not callable", for a local or parameter that
+/// is called but does not hold a function. Returns an owned string.
+String not_callable(str name) {
+    return @format("'{}' is not callable", name);
+}
+
 /// Diagnostic text: "enum variant '{}' discriminant or automatic successor
 /// exceeds the supported integer range". Returns an owned string.
 String enum_discriminant_overflow(str name) {

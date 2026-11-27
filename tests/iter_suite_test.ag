@@ -38,6 +38,16 @@ i64 multiply_pairs(i64 acc, i64 x) {
     return acc * x;
 }
 
+// A global `f` must not hide a callable parameter or local named `f`,
+// including the one std.iter's consumers take.
+i64 f(i64 x) {
+    return x + 1000;
+}
+
+i64 apply_twice(i64 x, i64(i64) f) {
+    return f(f(x));
+}
+
 i32 main() {
     STDOUT.write_str("=== Zero-Cost Iterator & Collection Tests ===\n\n");
 
@@ -173,6 +183,13 @@ i32 main() {
         SliceIter<i64> it_fold = v.iter();
         i64 folded = iter_fold<SliceIter<i64>, i64, i64>(&it_fold, (i64)100, add_pairs);
         assert_eq_i64(112, folded, "fold with initial 100 = 112");
+
+        assert_eq_i64(8, apply_twice(2, double_val), "parameter f shadows global f");
+        {
+            i64(i64) f = double_val;
+            assert_eq_i64(6, f(3), "local f shadows global f");
+        }
+        assert_eq_i64(1003, f(3), "global f is visible again after the local's scope");
 
         SliceIter<i64> it_red = v.iter();
         i64 reduced = iter_reduce<SliceIter<i64>, i64>(&it_red, multiply_pairs);
