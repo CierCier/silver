@@ -414,6 +414,7 @@ impl TypeChecker {
         self.check_c_callback_contracts(program);
         self.collect_impl_methods(program, table);
         self.collect_struct_layouts(program);
+        self.check_recursive_value_types(program);
         self.check_global_attributes(&program.attributes);
         self.lambdas.symbols = std::mem::take(table);
         for item in &program.items {
@@ -7780,6 +7781,92 @@ impl TypeChecker {
         }
     }
 
+    /// Reports each local struct or enum that holds itself by value, directly
+    /// or through other fields, arrays, tuples, optionals, or generic
+    /// arguments. Such a type has no finite size, and later passes would
+    /// recurse through it forever.
+    fn check_recursive_value_types(&mut self, program: &ast::Program) {
+        // Bounds the search through generic instantiations that keep growing,
+        // such as `G<G<T>>`; the type that grows is itself reported.
+        const MAX_VISITED: usize = 4096;
+        for item in &program.items {
+            let (kind, name, generics) = match &item.kind {
+                ast::ItemKind::Struct(item) => ("struct", &item.name, &item.generics),
+                ast::ItemKind::Enum(item) => ("enum", &item.name, &item.generics),
+                _ => continue,
+            };
+            let params = generics
+                .iter()
+                .flat_map(|generics| &generics.params)
+                .filter_map(|param| match param {
+                    ast::GenericParam::Type(param) => Some(Type::Named {
+                        path: vec![param.name.name.clone()],
+                        generics: Vec::new(),
+                    }),
+                    ast::GenericParam::Lifetime(_) => None,
+                })
+                .collect::<Vec<_>>();
+            let mut pending = self.value_field_types(&name.name, &params);
+            let mut visited = HashSet::default();
+            while let Some(ty) = pending.pop() {
+                if visited.len() >= MAX_VISITED {
+                    break;
+                }
+                match ty {
+                    Type::Named { path, generics } => {
+                        let Some(last) = path.last() else { continue };
+                        if *last == name.name {
+                            self.error(msg::type_contains_itself(kind, &name.name), name.span);
+                            break;
+                        }
+                        let key = Type::Named {
+                            path: path.clone(),
+                            generics: generics.clone(),
+                        }
+                        .to_string();
+                        if visited.insert(key) {
+                            pending.extend(self.value_field_types(last, &generics));
+                        }
+                    }
+                    Type::Array { element, .. } | Type::Optional { inner: element } => {
+                        pending.push(*element);
+                    }
+                    Type::Tuple(items) => pending.extend(items),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Returns the field or payload types that struct or enum `name`
+    /// instantiated with `arguments` stores inline. Unknown names have none.
+    fn value_field_types(&self, name: &str, arguments: &[Type]) -> Vec<Type> {
+        let (params, fields) = if let Some(def) = self.struct_defs.get(name) {
+            (
+                &def.type_params,
+                def.fields.values().cloned().collect::<Vec<_>>(),
+            )
+        } else if let Some(def) = self.enum_defs.get(name) {
+            let payloads = def
+                .variants
+                .values()
+                .flat_map(|variant| variant.payload.iter().map(Type::from_ast))
+                .collect();
+            (&def.type_params, payloads)
+        } else {
+            return Vec::new();
+        };
+        let mapping = params
+            .iter()
+            .cloned()
+            .zip(arguments.iter().cloned())
+            .collect();
+        fields
+            .iter()
+            .map(|field| field.substitute(&mapping))
+            .collect()
+    }
+
     pub fn resolve_type_aliases_in_program(program: &mut ast::Program) {
         let aliases = Self::local_type_aliases(program);
         Self::resolve_type_aliases_in_program_with_aliases(program, &aliases);
@@ -9230,5 +9317,49 @@ fn populate_expression_for_in_types(
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TypeChecker, msg};
+    use crate::{lexer, parser::Parser, symbol_table::CompilerSymbolTable};
+
+    fn type_errors(source: &str) -> Vec<String> {
+        let tokens = lexer::lex(source).expect("probe should lex");
+        let (mut program, errors) = Parser::new(tokens).parse_program();
+        assert!(errors.is_empty(), "probe should parse: {errors:?}");
+        TypeChecker::resolve_type_aliases_in_program(&mut program);
+        let (errors, _) =
+            TypeChecker::new().check_program_with_table(&program, &mut CompilerSymbolTable::new());
+        errors.into_iter().map(|error| error.message).collect()
+    }
+
+    #[test]
+    fn rejects_types_that_contain_themselves_by_value() {
+        let cases = [
+            ("struct R { i64 n; R inner; }", "struct", "R"),
+            ("struct R { R items[2]; }", "struct", "R"),
+            ("struct R { [i64, R] pair; }", "struct", "R"),
+            ("struct Pair<T> { T a; T b; }\nstruct R { Pair<R> pair; }", "struct", "R"),
+            ("struct G<T> { G<G<T>> next; }", "struct", "G"),
+            ("enum E { Leaf(i64); Node(E); }", "enum", "E"),
+        ];
+        let contains = |kind: &str, name: &str| msg::type_contains_itself(kind, name);
+        for (source, kind, name) in cases {
+            assert_eq!(type_errors(source), [contains(kind, name)], "{source}");
+        }
+        let mut mutual = type_errors("struct A { B b; }\nstruct B { A a; }");
+        mutual.sort();
+        assert_eq!(mutual, [contains("struct", "A"), contains("struct", "B")]);
+    }
+
+    #[test]
+    fn accepts_types_that_reach_themselves_through_pointers() {
+        let source = "struct Vec<T> { T* data; i64 len; }\n\
+                      struct Pair<T> { T a; T b; }\n\
+                      struct Node { Node* next; Vec<Node> children; Pair<Pair<i64>> span; }\n\
+                      enum List { Nil; Cons(i64, List*); }";
+        assert!(type_errors(source).is_empty(), "{:?}", type_errors(source));
     }
 }
