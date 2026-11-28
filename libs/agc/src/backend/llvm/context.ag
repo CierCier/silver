@@ -11,6 +11,7 @@ import frontend.diagnostics;
 import frontend.place;
 import frontend.symbols;
 import frontend.types;
+import backend.llvm.target;
 import backend.llvm.types;
 
 /// One local in codegen scope: its stack slot, type, drop flag, and the
@@ -143,12 +144,22 @@ struct MonoRequest {
     u32 value_arg_count;
 }
 
+/// A C function whose ABI signature differs from its Silver declaration,
+/// and the function type that declaration lowers to.
+struct LlvmCSignature {
+    LLVMOpaqueValue* function;
+    LLVMOpaqueType* source;
+}
+
 /// All state for lowering one module to LLVM IR: the LLVM handles, type and
 /// name tables, the AST pool, and the per-function scope, loop, defer, and
 /// monomorphization stacks. Borrows every handle and table it is given.
 struct LlvmContext {
     LLVMOpaqueContext* ctx;
     LLVMTargetDataRef* target_data;
+    LlvmTargetArch target_arch;
+    CStructAbi c_struct_abi;
+    Vec<LlvmCSignature> c_signatures;
     LLVMOpaqueModule* module;
     LLVMOpaqueBuilder* builder;
     TypeTable* types;
@@ -184,6 +195,12 @@ struct LlvmContext {
     Vec<MonoRequest> mono_queue;
     Vec<u32> mono_queue_args;
     Vec<u32> generic_layout_ids;
+    /// Line-table debug info (`backend.llvm.debug_info`); null when off.
+    LLVMOpaqueDIBuilder* di_builder;
+    /// Signature shared by every subprogram: line tables need no types.
+    LLVMOpaqueMetadata* di_signature;
+    /// One DIFile per `source_paths` entry, created on first use.
+    Vec<LLVMOpaqueMetadata*> di_files;
 }
 
 impl LlvmContext {
@@ -196,6 +213,9 @@ impl LlvmContext {
         LlvmContext c;
         c.ctx = ctx;
         c.target_data = target_data;
+        c.target_arch = LlvmTargetArch.Unsupported;
+        c.c_struct_abi = CStructAbi.Unsupported;
+        c.c_signatures = Vec<LlvmCSignature>.new();
         c.module = module;
         c.builder = builder;
         c.types = types;
@@ -231,6 +251,9 @@ impl LlvmContext {
         c.mono_queue = Vec<MonoRequest>.new();
         c.mono_queue_args = Vec<u32>.new();
         c.generic_layout_ids = Vec<u32>.new();
+        c.di_builder = (LLVMOpaqueDIBuilder*)0;
+        c.di_signature = (LLVMOpaqueMetadata*)0;
+        c.di_files = Vec<LLVMOpaqueMetadata*>.new();
         return move c;
     }
 

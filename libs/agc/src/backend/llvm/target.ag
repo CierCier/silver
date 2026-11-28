@@ -1,0 +1,69 @@
+// libs/agc/src/backend/llvm/target.ag — the target a native build emits code for.
+import vendor.llvm.llvm;
+import std.string;
+
+/// An instruction set the native backend emits code for.
+enum LlvmTargetArch {
+    X86_64;
+    Aarch64;
+    Unsupported;
+}
+
+/// How by-value C structs cross an `extern "C"` call on a target.
+enum CStructAbi {
+    /// System V AMD64 psABI.
+    SysV64;
+    /// AAPCS64 as used on Linux.
+    Aapcs64;
+    /// No struct classification; a by-value C struct is a compile error.
+    Unsupported;
+}
+
+/// The architecture named by the first component of `triple`.
+LlvmTargetArch llvm_target_arch(str triple) {
+    if (str_starts_with(triple, "x86_64-") || str_starts_with(triple, "amd64-")) {
+        return LlvmTargetArch.X86_64;
+    }
+    if (str_starts_with(triple, "aarch64-") || str_starts_with(triple, "arm64-")) {
+        return LlvmTargetArch.Aarch64;
+    }
+    return LlvmTargetArch.Unsupported;
+}
+
+/// Returns true when `triple` names an Apple OS, by vendor or OS component.
+bool llvm_target_is_apple(str triple) {
+    String text = String.from_str(triple);
+    bool apple = text.contains("-apple") || text.contains("-darwin") || text.contains("-macos")
+        || text.contains("-ios");
+    text.drop();
+    return apple;
+}
+
+/// Returns true when `triple` names Linux.
+bool llvm_target_is_linux(str triple) {
+    String text = String.from_str(triple);
+    bool linux = text.contains("-linux");
+    text.drop();
+    return linux;
+}
+
+/// The C struct ABI of `triple`. Darwin and Windows arm64 deviate from
+/// AAPCS64 (variadics, stack packing), so they stay unsupported, as in stage0.
+CStructAbi llvm_target_c_struct_abi(str triple) {
+    String text = String.from_str(triple);
+    bool windows = text.contains("windows") || text.contains("win32") || text.contains("mingw");
+    text.drop();
+    LlvmTargetArch arch = llvm_target_arch(triple);
+    if (windows) { return CStructAbi.Unsupported; }
+    if (arch == LlvmTargetArch.X86_64) { return CStructAbi.SysV64; }
+    if (arch == LlvmTargetArch.Aarch64 && !llvm_target_is_apple(triple)) { return CStructAbi.Aapcs64; }
+    return CStructAbi.Unsupported;
+}
+
+/// Returns the LLVM host triple. Free it with `String.drop`.
+String llvm_host_triple() {
+    str raw = LLVMGetDefaultTargetTriple();
+    String triple = String.from_str(raw);
+    LLVMDisposeMessage(raw);
+    return move triple;
+}

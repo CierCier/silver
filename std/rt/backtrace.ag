@@ -136,7 +136,7 @@ void bt_write_hex(i64 fd, i64 value) {
         i = i + 1;
     }
     buf[18] = (u8)0;
-    sys_write(fd, (i64)&buf[0], 19);
+    sys_write(fd, (i64)&buf[0], 18);
 }
 
 // -- Lazy sort + binary search ----------------------------------------------
@@ -392,8 +392,11 @@ i64 bt_resolve(i64 ret_addr) {
 
 /// Look up the exact source line for a return address: the line table is
 /// sorted by (function start, offset), so a composite binary search finds
-/// the last entry with (addr, offset) <= (fn_addr, ret_addr - fn_addr).
-/// Returns (file, line) via the output pointers, or 0 line when unresolved.
+/// the last entry with (addr, offset) <= (fn_addr, ret_addr - 1 - fn_addr).
+/// The byte before the return address belongs to the call itself; the return
+/// address may already start the next line, as after a call that does not
+/// return. Returns (file, line) via the output pointers, or 0 line when
+/// unresolved.
 void bt_line_lookup(i64 fn_addr, i64 ret_addr, u8** out_file, i64* out_line) {
     i64 count = __silver_bt_lines_count;
     if (count <= 0) {
@@ -401,7 +404,7 @@ void bt_line_lookup(i64 fn_addr, i64 ret_addr, u8** out_file, i64* out_line) {
         return;
     }
     bt_ensure_sorted();
-    i64 off = ret_addr - fn_addr;
+    i64 off = ret_addr - 1 - fn_addr;
     i64 lo = 0;
     i64 hi = count - 1;
     i64 best = -1;
