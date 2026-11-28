@@ -3388,7 +3388,8 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     profiler_begin_phase("backtrace line table");
     String bt_lines_path = native_temp_path(".bt_lines.o", pid);
     String bt_lines_error = String.new();
-    if (!llvm_write_bt_line_object(&object_paths, bt_lines_path.to_str(), &bt_lines_error)) {
+    if (!llvm_write_bt_line_object(&object_paths, target_triple.to_str(),
+            bt_lines_path.to_str(), &bt_lines_error)) {
         STDERR.write_str("agc: error: failed to emit the backtrace line table: ");
         STDERR.write_str(bt_lines_error.to_str());
         STDERR.write_str("\n");
