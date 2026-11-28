@@ -113,6 +113,17 @@ impl TypeEnv {
     }
 }
 
+/// True when local or parameter `name_id` holds a function value.
+bool typecheck_is_callable_local(TypeTable* types, TypeEnv* env, u32 name_id) {
+    u32 type_id = env.lookup(name_id);
+    if (type_id == TYPE_UNKNOWN) { return false; }
+    TypeEntry* entry = types.get(types.resolve_subst(type_id));
+    while (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) {
+        entry = types.get(types.resolve_subst(entry.inner));
+    }
+    return entry.kind == TypeKind.Function;
+}
+
 /// Returns true for 8-bit integer types (byte buffers). `char` is excluded.
 bool type_is_byte_like(u32 id) {
     // `char` is a 32-bit Unicode scalar, not a byte: accepting it here would
@@ -2602,6 +2613,10 @@ bool typecheck_judged_methods(TypeTable* types, SyntaxNode* root, u32 owner_type
         || typecheck_type_is_unresolved(types, owner_type, 0))) {
         return false;
     }
+    if (!primitive && owner.count == 0
+        && mono_contains_type_param(&types.scope_type_params, owner.name_id)) {
+        return false;
+    }
     str owner_name = primitive ? types.type_name(owner_type) : types.names.get(owner.name_id);
     if (!primitive && find_item_by_name(root, NodeKind.Struct, owner_name) == (SyntaxNode*)0
         && find_enum_item(root, owner_name) == (SyntaxNode*)0) {
@@ -3035,7 +3050,70 @@ u32 typecheck_method_return_type_for_call(AstPool* pool, SyntaxNode* root,
         receiver = types.get(resolved_receiver);
     }
     if (receiver.kind != TypeKind.Named) { return TYPE_UNKNOWN; }
+    // A type parameter's methods are known only after instantiation.
+    if (receiver.count == 0
+        && mono_contains_type_param(&types.scope_type_params, receiver.name_id)) {
+        return TYPE_UNKNOWN;
+    }
     str owner_name = types.names.get(receiver.name_id);
+    i64 best_score = -1;
+    u32 best_return_type = typecheck_method_return_type_at_depth(pool, root, types,
+        receiver_type, resolved_receiver, owner_name, receiver_depth, method_name,
+        param_count, args_start, static_method, false, &best_score);
+    if (best_return_type == TYPE_UNKNOWN && receiver_depth > 0) {
+        return typecheck_method_return_type_for_call(pool, root, types, resolved_receiver,
+            method_name, param_count, args_start, static_method);
+    }
+    if (receiver_depth > 0) {
+        // Through a pointer receiver, a value impl's overload that fits the
+        // arguments better is the one monomorphization calls.
+        i64 value_score = -1;
+        u32 value_return_type = typecheck_method_return_type_at_depth(pool, root, types,
+            resolved_receiver, resolved_receiver, owner_name, 0, method_name,
+            param_count, args_start, static_method, true, &value_score);
+        if (value_return_type != TYPE_UNKNOWN && value_score > best_score) {
+            return value_return_type;
+        }
+    }
+    return best_return_type;
+}
+
+/// Whether `impl_item`'s target type arguments fit those of `receiver`, as
+/// monomorphization requires before it picks a method from that impl.
+bool typecheck_impl_fits_receiver_args(SyntaxNode* root, TypeTable* types,
+                                       SyntaxNode* impl_item, SyntaxNode* target,
+                                       u32 receiver) {
+    TypeEntry* entry = types.get(receiver);
+    Vec<u32> arg_ids = Vec<u32>.new();
+    i64 i = 0;
+    while (i < entry.count) {
+        arg_ids.push(types.resolve_subst(types.type_args.get(entry.inner + (u32)i)));
+        i += 1;
+    }
+    Vec<u32> declared = Vec<u32>.new();
+    mono_impl_type_parameters(impl_item, types, &declared);
+    if (declared.len() == 0) {
+        mono_collect_struct_parameters(root, target.text, types, &declared);
+    }
+    Vec<u32> bound = Vec<u32>.new();
+    bool fits = mono_match_target_args(target, types, &declared, &arg_ids, &bound);
+    bound.drop();
+    declared.drop();
+    arg_ids.drop();
+    return fits;
+}
+
+/// Returns the return type of the best-fitting `method_name` among impls of
+/// `owner_name` at `receiver_depth`, and its argument score in `*out_score`.
+/// With `check_args`, impls whose target type arguments do not fit the
+/// receiver's are skipped.
+u32 typecheck_method_return_type_at_depth(AstPool* pool, SyntaxNode* root,
+                                          TypeTable* types, u32 receiver_type,
+                                          u32 resolved_receiver, str owner_name,
+                                          u32 receiver_depth, str method_name,
+                                          i64 param_count, u32 args_start,
+                                          bool static_method, bool check_args,
+                                          i64* out_score) {
     u32 best_return_type = TYPE_UNKNOWN;
     i64 best_score = -1;
     SyntaxNode* item = root.first_child;
@@ -3043,7 +3121,9 @@ u32 typecheck_method_return_type_for_call(AstPool* pool, SyntaxNode* root,
         if (item.kind == NodeKind.Impl) {
             SyntaxNode* target = impl_target_identifier(item);
             if (target != (SyntaxNode*)0 && strcmp(target.text, owner_name) == 0
-                && impl_target_pointer_depth(item) == receiver_depth) {
+                && impl_target_pointer_depth(item) == receiver_depth
+                && (!check_args || typecheck_impl_fits_receiver_args(
+                    root, types, item, target, resolved_receiver))) {
                 SyntaxNode* block = item.first_child;
                 while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
                     block = block.next_sibling;
@@ -3153,10 +3233,7 @@ u32 typecheck_method_return_type_for_call(AstPool* pool, SyntaxNode* root,
         }
         item = item.next_sibling;
     }
-    if (best_return_type == TYPE_UNKNOWN && receiver_depth > 0) {
-        return typecheck_method_return_type_for_call(pool, root, types, resolved_receiver,
-            method_name, param_count, args_start, static_method);
-    }
+    *out_score = best_score;
     return best_return_type;
 }
 
@@ -3186,6 +3263,10 @@ u32 typecheck_method_parameter_type_for_call(AstPool* pool, SyntaxNode* root,
         receiver = types.get(resolved_receiver);
     }
     if (receiver.kind != TypeKind.Named) { return TYPE_UNKNOWN; }
+    if (receiver.count == 0
+        && mono_contains_type_param(&types.scope_type_params, receiver.name_id)) {
+        return TYPE_UNKNOWN;
+    }
     str owner_name = types.names.get(receiver.name_id);
     u32 best_parameter_type = TYPE_UNKNOWN;
     u32 fallback_parameter_type = TYPE_UNKNOWN;
@@ -3939,9 +4020,11 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         TypeKind callable_kind = callable_entry.kind;
         u32 callable_inner = callable_entry.inner;
         i64 callable_count = callable_entry.count;
-        // A local binding shadows every function of the same name.
-        bool local_binding = callee.kind == ExprKind.Var && env.lookup(callee.aux) != TYPE_UNKNOWN;
-        bool named_function = callee.kind == ExprKind.Var && !local_binding
+        // A function-typed local or parameter shadows a top-level function
+        // of the same name.
+        bool local_callable = callee.kind == ExprKind.Var
+            && typecheck_is_callable_local(types, env, callee.aux);
+        bool named_function = callee.kind == ExprKind.Var && !local_callable
             && find_function_by_name(root, symbols.names.get(callee.aux)) != (SyntaxNode*)0;
         if (callable_kind == TypeKind.Function && !named_function) {
             u32 arg_count = expr.aux;
@@ -3959,17 +4042,6 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 u32 actual_type = infer_expr(pool, types, symbols, root, env, arg_id, diagnostics, ok);
                 actual_type = typecheck_adopt_literal_target(pool, types, symbols, root, arg_id,
                     actual_type, parameter_type, diagnostics, ok);
-                bool literal = expr_is_literal(pool, arg_id);
-                if (!direct_c_call
-                    && !typecheck_call_argument_matches(types, parameter_type, actual_type, literal)
-                    && !typecheck_implicit_borrow(types, parameter_type, actual_type, literal)
-                    && !typecheck_tuple_literal_fits(pool, root, types, parameter_type, arg_id)
-                    && !typecheck_implicit_cast(root, types, actual_type, parameter_type)) {
-                    diagnostics.error(pool.get_expr(arg_id).span,
-                        argument_type_mismatch(i + 1, types.type_name(parameter_type),
-                            types.type_name(actual_type)));
-                    *ok = false;
-                }
                 typecheck_char_pointer_argument(types, parameter_type, actual_type,
                     pool.get_expr(arg_id).span, diagnostics, ok);
                 if (parameter_kind == TypeKind.Pointer) { pool.mutable_borrows.set((i64)arg_id); }
@@ -3980,11 +4052,27 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                     typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
                                                        arg_id, diagnostics, ok);
                 }
+                // Types still naming a generic parameter are checked at
+                // instantiation, and a C function's arguments convert.
+                if (!direct_c_call
+                    && !typecheck_type_is_unresolved(types, parameter_type, 0)
+                    && !typecheck_type_is_unresolved(types, actual_type, 0)
+                    && !typecheck_call_argument_matches(types, parameter_type, actual_type,
+                        expr_is_literal(pool, arg_id))
+                    && !typecheck_implicit_borrow(types, parameter_type, actual_type,
+                        expr_is_literal(pool, arg_id))
+                    && !typecheck_tuple_literal_fits(pool, root, types, parameter_type, arg_id)
+                    && !typecheck_implicit_cast(root, types, actual_type, parameter_type)) {
+                    diagnostics.error(pool.get_expr(arg_id).span,
+                        argument_type_mismatch(i + 1, types.type_name(parameter_type),
+                            types.type_name(actual_type)));
+                    *ok = false;
+                }
                 i += 1;
             }
             inferred = types.type_args.get(callable_inner);
         }
-        if (callee.kind == ExprKind.Var) {
+        if (callee.kind == ExprKind.Var && !local_callable) {
             str callee_name = symbols.names.get(callee.aux);
             if (typecheck_str_starts_with(callee_name, "__atomic_")) {
                 inferred = TYPE_UNKNOWN;
@@ -4010,12 +4098,9 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
             bool ambiguous = false;
             bool no_match = false;
             u32 resolved_symbol_id = 0;
-            // The callable branch above checked a local callable's arguments.
-            bool local_callable = local_binding && callable_kind == TypeKind.Function;
-            SyntaxNode* callee_fn = local_callable ? (SyntaxNode*)0
-                : typecheck_resolve_free_function(
-                    pool, types, symbols, root, env, callee_name, expr, diagnostics, ok,
-                    &overloaded, &ambiguous, &no_match, &resolved_symbol_id);
+            SyntaxNode* callee_fn = typecheck_resolve_free_function(
+                pool, types, symbols, root, env, callee_name, expr, diagnostics, ok,
+                &overloaded, &ambiguous, &no_match, &resolved_symbol_id);
             if (ambiguous || no_match) {
                 String message = ambiguous
                     ? String.from_str("call to overloaded function '")
@@ -5338,9 +5423,15 @@ void typecheck_function_statements_scoped(AstPool* pool, TypeTable* types, Symbo
                                           DiagnosticBag* diagnostics, bool* ok, bool* unsupported_out) {
     SyntaxNode* body = find_function_body(function);
     if (body == (SyntaxNode*)0) { return; }
+    SyntaxNode* name = function_identifier(function);
+    types.scope_type_params.clear();
+    if (name != (SyntaxNode*)0) {
+        mono_collect_generic_parameters(name.next_sibling, types, &types.scope_type_params);
+    }
     typecheck_body(pool, types, symbols, root, binding_function_parameters(function), body,
                    function_return_type_id(types, function), TYPE_UNKNOWN, cfg, diagnostics, ok,
                    unsupported_out);
+    types.scope_type_params.clear();
 }
 
 /// Type-checks the statements of `body` with `parameters` in scope. A
@@ -5513,8 +5604,15 @@ void typecheck_impl_methods(AstPool* pool, SymbolTable* symbols, SyntaxNode* roo
                 }
                 bool function_ok = true;
                 bool unsupported = false;
+                types.scope_type_params.clear();
+                mono_impl_type_parameters(item, types, &types.scope_type_params);
+                if (!is_cast) {
+                    mono_collect_generic_parameters(name.next_sibling, types,
+                                                    &types.scope_type_params);
+                }
                 typecheck_body(pool, types, symbols, root, cursor, next, expected_return,
                                owner, cfg, diagnostics, &function_ok, &unsupported);
+                types.scope_type_params.clear();
                 if (unsupported && function_ok) {
                     diagnostics.error(name.span, unchecked_function_body(name.text));
                     function_ok = false;

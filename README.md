@@ -182,8 +182,8 @@ What this means in practice:
 - **Weaker guarantees than Rust.** Borrow checking is limited to the borrow-origin
   rules. Raw pointers are unchecked and not marked `unsafe`. Taking two locks in
   different orders can deadlock, and the compiler does not check it.
-- **Narrow platform support.** Stage1 builds native programs for x86_64 Linux
-  only. aarch64 Linux and WebAssembly (`wasm32-wasip1`) are stage0-only, and
+- **Narrow platform support.** Stage1 builds native programs for x86_64 and
+  aarch64 Linux only. WebAssembly (`wasm32-wasip1`) is stage0-only, and
   WebAssembly has no threads. The Windows port is a design and partial
   implementation, not a supported target.
 - **Small ecosystem.** The package manifest takes local-path and Git
@@ -292,12 +292,13 @@ agc path/to/file.ag --emit=module --shared -o path/to/file.agm
 
 ### Native targets
 
-Stage1 builds native programs for the host target on x86_64 Linux. An explicit
-`--target TRIPLE` must match it exactly, and unsupported targets fail before any
-output is created. `check` accepts another target's `cfg` values, which does not
-make that target supported. Stage0 also cross-compiles for aarch64 Linux
-(`--target aarch64-unknown-linux-gnu`); `agc run` and the test runner execute
-those binaries under `qemu-aarch64` on an x86_64 host. See the
+Stage1 builds native programs for x86_64 and aarch64 Linux, from either host.
+Omitting `--target` builds for the host; `--target aarch64-unknown-linux-gnu`
+or `--target x86_64-unknown-linux-gnu` cross-compiles, and other targets fail
+before any output is created. `check` accepts another target's `cfg` values,
+which does not make that target supported. Stage0 also targets WebAssembly.
+`agc run` and the test runner execute a binary for the other architecture under
+`qemu-aarch64` or `qemu-x86_64`. See the
 [compiler target contract](docs/compiler-guide.md#native-target-contract).
 
 ## Testing
