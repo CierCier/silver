@@ -730,9 +730,17 @@ void stress_conditional_and_borrowed_transfers() {
             Both(move left, _): { keep_leaf_id(move left); },
             Neither: {},
         };
+        TwinHolder named;
+        named.id = 2;
+        named.twin = LeafTwin.Both(OwnedLeaf.new(61, 4096), OwnedLeaf.new(62, 8192));
+        match named.twin {
+            Both(move left, right): { keep_leaf_id(move left); i32 seen = right.id; },
+            Neither: {},
+        };
+        assert_eq_i32(leaf_drop_count, 4, "a named sibling of a moved field payload drops in its arm");
     }
-    assert_eq_i32(leaf_drop_count, 2, "a partly moved field enum drops each payload once");
-    assert_eq_i64(leaf_bytes_freed, 192, "a partly moved field enum frees each payload once");
+    assert_eq_i32(leaf_drop_count, 4, "a partly moved field enum drops each payload once");
+    assert_eq_i64(leaf_bytes_freed, 12480, "a partly moved field enum frees each payload once");
 
     // A field of a call result is matched through one temporary, so the arm
     // and that temporary do not both drop the unnamed sibling.
