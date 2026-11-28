@@ -445,6 +445,9 @@ extern "C" {
     LLVMOpaqueValue* LLVMConstRealOfString(LLVMOpaqueType* p0, i8* p1);
     /// Returns the module's IR text. Free it with `LLVMDisposeMessage`.
     i8* LLVMPrintModuleToString(LLVMOpaqueModule* p0);
+    /// Writes the module's IR text to file `p1` ("-" is stdout). Returns
+    /// nonzero on failure and sets `*p2`; free it with `LLVMDisposeMessage`.
+    i32 LLVMPrintModuleToFile(LLVMOpaqueModule* p0, i8* p1, i8** p2);
     /// Frees a string LLVM returned (print, triple, and error message outputs).
     void LLVMDisposeMessage(i8* p0);
     /// Creates pass builder options. Dispose with
