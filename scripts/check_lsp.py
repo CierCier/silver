@@ -978,6 +978,20 @@ class NativeLsp(unittest.TestCase):
                           (15, "use of moved value 'a'"),
                           (15, "use of moved value 'a'")])
 
+    def test_an_assignment_in_a_generic_instance_is_move_checked(self):
+        # `b = a` compares `T` with the bound `Tok`, so the instance's
+        # bindings apply there as they do for `let` and `return`.
+        text = ("trait Drop { void drop(*self); }\n"
+                "struct Tok { i64 id; }\n"
+                "impl Drop for Tok { void drop(*self) { } }\n"
+                "Tok mk(i64 id) { Tok t; t.id = id; return move t; }\n"
+                "void bad<T>(T a) { T b; b = a; T c = a; }\n"
+                "i32 main() { bad(mk(1)); bad(2); return 0; }\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
+                         [(4, "use of moved value 'a'")])
+
     def test_a_type_named_like_a_type_parameter_does_not_loop_the_instance_check(self):
         # Binding `T` to `GW<T>`, where the inner `T` is the struct, would
         # substitute into itself without end.

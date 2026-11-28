@@ -5046,6 +5046,10 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
             *ok = false;
         } else if (target_type != TYPE_UNKNOWN && val_type != TYPE_UNKNOWN
             && !types_match_value(types, target_type, val_type, expr_is_literal(pool, stmt.inner1))
+            // Checking a generic body as one instantiation binds its `T`.
+            && !types_match_value(types, types.resolve_subst(target_type),
+                                  types.resolve_subst(val_type),
+                                  expr_is_literal(pool, stmt.inner1))
             && !typecheck_tuple_literal_fits(pool, root, types, target_type, stmt.inner1)
             && !typecheck_implicit_cast(root, types, val_type, target_type)) {
             String message = String.from_str("type mismatch: expected ");
@@ -5180,7 +5184,9 @@ bool typecheck_is_shared_value_error(str message) {
 /// True when `type_id` is, or contains, a named type or type parameter
 /// whose name is `name_id`.
 bool typecheck_type_mentions_name(TypeTable* types, u32 type_id, u32 name_id, i64 depth) {
-    if (depth > 32 || (i64)type_id >= types.types.len()) { return false; }
+    // Too deep to tell: report a mention, so the caller skips the binding.
+    if (depth > 32) { return true; }
+    if ((i64)type_id >= types.types.len()) { return false; }
     TypeEntry* entry = types.get(type_id);
     TypeKind kind = entry.kind;
     u32 inner = entry.inner;
