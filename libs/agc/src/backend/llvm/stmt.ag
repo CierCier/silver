@@ -243,7 +243,7 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
         // the root live.
         if (stmt.inner0 != 0) {
             u32 ret_val_ty = llvm_expr_type(ctx, stmt.inner0);
-        if (llvm_type_needs_tracking(ctx, ret_val_ty)) {
+        if (llvm_value_transfers_ownership(ctx, ret_val_ty)) {
             llvm_clear_place_drops(ctx, stmt.inner0);
         }
         }
@@ -531,7 +531,19 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
     }
 
     if (stmt.kind == StmtKind.Expr) {
-        llvm_emit_expr(ctx, stmt.inner0);
+        AstExpr* discarded = ctx.pool.get_expr(stmt.inner0);
+        bool literal = discarded.kind == ExprKind.ArrayLit || discarded.kind == ExprKind.StructLit;
+        u32 discarded_type = llvm_expr_type(ctx, stmt.inner0);
+        Span discarded_span = discarded.span;
+        LLVMOpaqueValue* value = llvm_emit_literal_value(ctx, stmt.inner0);
+        // A literal took ownership of its elements' sources as it built
+        // them, so a discarded one drops them as a temporary at block exit.
+        if (literal && value != (LLVMOpaqueValue*)0 && !ctx.is_terminated()
+            && llvm_value_transfers_ownership(ctx, discarded_type)) {
+            LLVMOpaqueValue* slot = llvm_entry_alloca(ctx, LLVMTypeOf(value), "discarded_literal");
+            LLVMBuildStore(ctx.builder, value, slot);
+            llvm_add_temporary_local(ctx, slot, discarded_type, stmt.inner0, discarded_span);
+        }
         return;
     }
     if (stmt.kind == StmtKind.If) {

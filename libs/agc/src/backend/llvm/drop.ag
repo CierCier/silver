@@ -418,7 +418,7 @@ void llvm_emit_value_drop_at_ptr(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 typ
     TypeEntry* entry = ctx.types.get(resolved);
     if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) { return; }
     if (entry.kind == TypeKind.Array) {
-        if (entry.count > 0 && llvm_type_needs_tracking(ctx, entry.inner)) {
+        if (entry.count > 0 && llvm_value_transfers_ownership(ctx, entry.inner)) {
             LLVMOpaqueValue* count = LLVMConstInt(
                 LLVMInt64TypeInContext(ctx.ctx), (u64)entry.count, 0);
             llvm_emit_drop_in_place(ctx, entry.inner, ptr, count);
@@ -431,7 +431,7 @@ void llvm_emit_value_drop_at_ptr(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 typ
         while (i < entry.count) {
             u32 element_ty = ctx.types.resolve_subst(ctx.types.type_args.get(entry.inner + (u32)i));
             if (element_ty != TYPE_UNKNOWN && element_ty != 0
-                && llvm_type_needs_tracking(ctx, element_ty)) {
+                && llvm_value_transfers_ownership(ctx, element_ty)) {
                 LLVMOpaqueValue* element_ptr = LLVMBuildStructGEP2(ctx.builder, tuple_ty, ptr,
                                                                    (u32)i, "drop_tuple_field");
                 llvm_emit_value_drop_at_ptr(ctx, element_ptr, element_ty);
@@ -470,7 +470,7 @@ void llvm_emit_value_drop_at_ptr(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 typ
         LlvmFieldInfo* field = def.fields.get_ptr(i);
         u32 field_ty = mono_resolve_struct_field_type(ctx, resolved, field.type_id);
         if (field_ty != TYPE_UNKNOWN && field_ty != 0
-            && llvm_type_needs_tracking(ctx, field_ty)) {
+            && llvm_value_transfers_ownership(ctx, field_ty)) {
             LLVMOpaqueValue* field_ptr = LLVMBuildStructGEP2(ctx.builder, struct_ty, ptr,
                                                               (u32)i, "drop_field");
             llvm_emit_value_drop_at_ptr(ctx, field_ptr, field_ty);
@@ -490,7 +490,7 @@ LLVMOpaqueValue* llvm_emit_drop_in_place(LlvmContext* ctx, u32 elem_type,
 /// initialization `node` says they are not live.
 LLVMOpaqueValue* llvm_emit_tracked_drop_in_place(LlvmContext* ctx, u32 elem_type,
     LLVMOpaqueValue* ptr, LLVMOpaqueValue* count, LLVMOpaqueValue* node, Span span) {
-    if (!llvm_type_needs_tracking(ctx, elem_type)) {
+    if (!llvm_value_transfers_ownership(ctx, elem_type)) {
         return LLVMConstInt(LLVMInt64TypeInContext(ctx.ctx), 0, 0);
     }
     if (ctx.current_fn == (LLVMOpaqueValue*)0 || ptr == (LLVMOpaqueValue*)0
@@ -862,14 +862,9 @@ void llvm_init_tree_build(LlvmContext* ctx, LlvmLocal* local, InitOwnerPlan* pla
     ctx.builder = saved_builder;
 }
 
-/// Keeps the initialized temporary at `ptr`, which holds rvalue `expr_id`, as
-/// an unnamed local, so it drops once when the enclosing block exits. Returns
-/// that local.
-///
-/// A temporary can live in one arm of `?:` or `&&` while its block's cleanup
-/// runs on every path, so its state starts `UNINIT` at the end of the entry
-/// block and becomes live here. `ptr` must be an entry-block slot.
-LlvmLocal* llvm_add_temporary_local(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 type_id,
+/// Adds the slot `ptr` for rvalue `expr_id` as an unnamed local whose state
+/// starts `UNINIT` at the end of the entry block, and returns its name.
+u32 llvm_add_unlive_temporary_local(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 type_id,
                                     u32 expr_id, Span span) {
     String name = String.from_str("__temporary_");
     append_u32(&name, (u32)ctx.locals.len());
@@ -880,8 +875,8 @@ LlvmLocal* llvm_add_temporary_local(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 
     LLVMOpaqueValue* entry_end = LLVMGetBasicBlockTerminator(
         LLVMGetEntryBasicBlock(ctx.current_fn));
     if (entry_end == (LLVMOpaqueValue*)0) {
-        llvm_register_local_drops(ctx, name_id, ptr, type_id, true, span);
-        return ctx.find_local(name_id);
+        llvm_register_local_drops(ctx, name_id, ptr, type_id, false, span);
+        return name_id;
     }
     LLVMOpaqueBuilder* saved_builder = ctx.builder;
     ctx.builder = LLVMCreateBuilderInContext(ctx.ctx);
@@ -889,8 +884,50 @@ LlvmLocal* llvm_add_temporary_local(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 
     llvm_register_local_drops(ctx, name_id, ptr, type_id, false, span);
     LLVMDisposeBuilder(ctx.builder);
     ctx.builder = saved_builder;
+    return name_id;
+}
+
+/// Keeps the initialized temporary at `ptr`, which holds rvalue `expr_id`, as
+/// an unnamed local, so it drops once when the enclosing block exits. Returns
+/// that local.
+///
+/// A temporary can live in one arm of `?:` or `&&` while its block's cleanup
+/// runs on every path, so its state starts `UNINIT` at the end of the entry
+/// block and becomes live here. `ptr` must be an entry-block slot.
+LlvmLocal* llvm_add_temporary_local(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 type_id,
+                                    u32 expr_id, Span span) {
+    u32 name_id = llvm_add_unlive_temporary_local(ctx, ptr, type_id, expr_id, span);
     llvm_set_local_drop_live(ctx, name_id, true);
     return ctx.find_local(name_id);
+}
+
+/// Tracks the storage `slot` of a literal of `type_id` while its elements are
+/// built, so a later element that exits the function drops the ones already
+/// stored. Returns the tracking local's index, or -1 when nothing in the
+/// literal needs a drop. `slot` must be an entry-block slot.
+i64 llvm_begin_literal_tracking(LlvmContext* ctx, LLVMOpaqueValue* slot, u32 type_id,
+                                Span span) {
+    if (!llvm_value_transfers_ownership(ctx, type_id)) { return -1; }
+    // Not a temporary of the literal expression: the literal's value leaves
+    // this storage when it is complete.
+    llvm_add_unlive_temporary_local(ctx, slot, type_id, 0, span);
+    return ctx.locals.len() - 1;
+}
+
+/// Marks element `projection` of the literal tracked at `local_index` stored.
+void llvm_track_literal_element(LlvmContext* ctx, i64 local_index, Projection projection) {
+    if (local_index < 0 || ctx.is_terminated()) { return; }
+    Vec<Projection> path = Vec<Projection>.new();
+    path.push(move projection);
+    llvm_set_path_drop_live(ctx, ctx.locals.get_ptr(local_index), &path, true);
+    path.drop();
+}
+
+/// The literal tracked at `local_index` is complete and its value leaves.
+void llvm_end_literal_tracking(LlvmContext* ctx, i64 local_index) {
+    if (local_index < 0 || ctx.is_terminated()) { return; }
+    llvm_store_init_tree(ctx, ctx.locals.get_ptr(local_index),
+        LLVMConstInt(LLVMInt8TypeInContext(ctx.ctx), LLVM_INIT_UNINIT, 0));
 }
 
 /// Every inline child has a state node, including Copy and scalar fields. The
@@ -1307,28 +1344,89 @@ void llvm_drop_active_unmoved_payloads(LlvmContext* ctx) {
     llvm_drop_active_unmoved_payloads_above(ctx, 0);
 }
 
+/// Is `type_id` a non-generic enum whose payloads need a drop? Cleanup
+/// drops such a value through its payloads, which the tracking predicate
+/// does not look into for enums. A generic instance such as `Optional<Buf>`
+/// is tracked by its local's drop flag instead.
+bool llvm_enum_type_owns_payloads(LlvmContext* ctx, u32 type_id) {
+    u32 resolved = ctx.types.resolve_subst(type_id);
+    if (resolved == TYPE_UNKNOWN || resolved == 0) { return false; }
+    TypeEntry* entry = ctx.types.get(resolved);
+    if (entry.kind != TypeKind.Named || entry.count > 0) { return false; }
+    str enum_name = ctx.types.names.get(entry.name_id);
+    SyntaxNode* enum_item = find_enum_item(ctx.root, enum_name);
+    return enum_item != (SyntaxNode*)0 && !llvm_item_is_generic_enum(enum_item)
+        && llvm_enum_needs_payload_drop(ctx, resolved, enum_name);
+}
+
+/// Does moving a value of `type_id` move a drop with it? Either drop
+/// tracking covers the type, it is an enum whose payloads cleanup drops, or
+/// it is an array, tuple, or struct that holds such an enum inline.
+bool llvm_value_transfers_ownership(LlvmContext* ctx, u32 type_id) {
+    Vec<u32> active = Vec<u32>.new();
+    bool owns = llvm_value_transfers_ownership_inner(ctx, type_id, &active);
+    active.drop();
+    return owns;
+}
+
+bool llvm_value_transfers_ownership_inner(LlvmContext* ctx, u32 type_id, Vec<u32>* active) {
+    if (llvm_type_needs_tracking(ctx, type_id) || llvm_enum_type_owns_payloads(ctx, type_id)) {
+        return true;
+    }
+    u32 resolved = ctx.types.resolve_subst(type_id);
+    if (resolved == TYPE_UNKNOWN || resolved == 0) { return false; }
+    TypeEntry* entry = ctx.types.get(resolved);
+    if (entry.kind == TypeKind.Array) {
+        return entry.count > 0 && llvm_value_transfers_ownership_inner(ctx, entry.inner, active);
+    }
+    if (entry.kind == TypeKind.Tuple) {
+        i64 i = 0;
+        while (i < entry.count) {
+            if (llvm_value_transfers_ownership_inner(ctx,
+                    ctx.types.type_args.get(entry.inner + (u32)i), active)) {
+                return true;
+            }
+            i += 1;
+        }
+        return false;
+    }
+    if (entry.kind != TypeKind.Named) { return false; }
+    str type_name = ctx.types.names.get(entry.name_id);
+    if (find_enum_item(ctx.root, type_name) != (SyntaxNode*)0) { return false; }
+    i64 ai = 0;
+    while (ai < active.len()) {
+        if (active.get(ai) == resolved) { return false; }
+        ai += 1;
+    }
+    LlvmStructDef* def = ctx.find_struct_by_str(type_name);
+    if (def == (LlvmStructDef*)0) { return false; }
+    active.push(resolved);
+    i64 i = 0;
+    while (i < def.fields.len()) {
+        LlvmFieldInfo* field = def.fields.get_ptr(i);
+        u32 field_ty = mono_resolve_struct_field_type(ctx, resolved, field.type_id);
+        if (field_ty != TYPE_UNKNOWN && field_ty != 0
+            && llvm_value_transfers_ownership_inner(ctx, field_ty, active)) {
+            active.pop();
+            return true;
+        }
+        i += 1;
+    }
+    active.pop();
+    return false;
+}
+
 /// Whether the value `src_id` reads is drop-tracked. A local registered for
 /// drop counts even when the type predicate cannot judge its type, as for a
-/// generic enum instance like `Maybe<Buf>`. So does an enum field whose
-/// payload its owner drops: the owner must release it to the new value.
+/// generic enum instance like `Maybe<Buf>`. So does an enum whose payloads
+/// cleanup drops, as for a field `h.ev` of a non-generic `Ev`.
 bool llvm_source_needs_tracking(LlvmContext* ctx, u32 src_id) {
     AstExpr* source = ctx.pool.get_expr(src_id);
     if (source.kind == ExprKind.Var) {
         LlvmLocal* local = ctx.find_local(source.aux);
         if (local != (LlvmLocal*)0 && local.drop_flag != (LLVMOpaqueValue*)0) { return true; }
     }
-    u32 type_id = llvm_expr_type(ctx, src_id);
-    if (llvm_type_needs_tracking(ctx, type_id)) { return true; }
-    if (source.kind == ExprKind.Ternary) {
-        return llvm_source_needs_tracking(ctx, source.inner1)
-            || llvm_source_needs_tracking(ctx, source.aux);
-    }
-    if (source.kind != ExprKind.Field) { return false; }
-    u32 resolved = ctx.types.resolve_subst(type_id);
-    if (resolved == TYPE_UNKNOWN || resolved == 0) { return false; }
-    TypeEntry* entry = ctx.types.get(resolved);
-    return entry.kind == TypeKind.Named
-        && llvm_enum_needs_payload_drop(ctx, resolved, ctx.types.names.get(entry.name_id));
+    return llvm_value_transfers_ownership(ctx, llvm_expr_type(ctx, src_id));
 }
 
 /// Moves drop ownership from place operand `src_id` to the value built from
@@ -1538,20 +1636,11 @@ u32 llvm_assignment_source(LlvmContext* ctx, u32 expr_id) {
 void llvm_clear_place_drops(LlvmContext* ctx, u32 expr_id) {
     expr_id = llvm_assignment_source(ctx, expr_id);
     if (expr_id == 0) { return; }
-    AstExpr value = *ctx.pool.get_expr(expr_id);
-    if (value.kind == ExprKind.ArrayLit || value.kind == ExprKind.StructLit) {
-        i64 count = value.aux;
-        i64 i = 0;
-        while (i < count) {
-            i64 offset = value.kind == ExprKind.ArrayLit ? 1 + i : i * 2 + 1;
-            u32 member = ctx.pool.args.get((i64)value.inner1 + offset);
-            if (llvm_type_needs_tracking(ctx, llvm_expr_type(ctx, member))) {
-                llvm_clear_place_drops(ctx, member);
-            }
-            i += 1;
-        }
-        return;
-    }
+    AstExpr* value = ctx.pool.get_expr(expr_id);
+    // A literal released each element's source as it captured it. Releasing
+    // them again here would drop the ownership of a source a later element
+    // reinitialized.
+    if (value.kind == ExprKind.ArrayLit || value.kind == ExprKind.StructLit) { return; }
     llvm_clear_place_drops_at_local(ctx, expr_id, -1);
 }
 
