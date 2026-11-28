@@ -62,18 +62,24 @@ String llvm_static_local_symbol(LlvmContext* ctx, u32 var_name_id, Span span,
 }
 
 /// Emits the deferred statements registered at or above `mark`, newest
-/// first, stopping if a statement terminates the block.
+/// first, stopping if a statement terminates the block. Each sees the
+/// locals that were visible where it was written.
 void llvm_emit_defers_above(LlvmContext* ctx, i64 mark) {
     i64 i = ctx.deferred_statements.len() - 1;
     while (i >= mark && !ctx.is_terminated()) {
-        u32 deferred_stmt = ctx.deferred_statements.get(i);
-        Vec<u32> hidden_defers = Vec<u32>.new();
+        LlvmDefer deferred = ctx.deferred_statements.get(i);
+        Vec<LlvmDefer> hidden_defers = Vec<LlvmDefer>.new();
         while (ctx.deferred_statements.len() > i) {
             hidden_defers.push(ctx.deferred_statements.pop());
         }
+        LlvmLocalRange later;
+        later.start = deferred.locals_len;
+        later.end = ctx.locals.len();
+        ctx.hidden_locals.push(later);
         ctx.defer_emission_depth += 1;
-        llvm_emit_stmt(ctx, deferred_stmt);
+        llvm_emit_stmt(ctx, deferred.stmt_id);
         ctx.defer_emission_depth -= 1;
+        LlvmLocalRange _later = ctx.hidden_locals.pop();
         while (hidden_defers.len() > 0) {
             ctx.deferred_statements.push(hidden_defers.pop());
         }
@@ -250,7 +256,10 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
     }
 
     if (stmt.kind == StmtKind.Defer) {
-        ctx.deferred_statements.push(stmt.inner0);
+        LlvmDefer deferred;
+        deferred.stmt_id = stmt.inner0;
+        deferred.locals_len = ctx.locals.len();
+        ctx.deferred_statements.push(deferred);
         return;
     }
 
@@ -286,7 +295,7 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
             LLVMSetInitializer(ptr, LLVMConstNull(llvm_ty));
             storage_name.drop();
 
-            llvm_clear_copy_source(ctx, stmt.inner1, true);
+            llvm_clear_copy_source(ctx, stmt.inner1);
             ctx.add_local(var_name_id, ptr, type_id, true);
             LlvmLocal* local = ctx.find_local(var_name_id);
             if (stmt.inner1 != 0) {
@@ -369,17 +378,21 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
         }
         // A copy initializer transfers drop ownership to the new local: the
         // bits stay readable from the source, but only the destination
-        // drops. Clearing runs before add_local so a shadowing `let x = x`
-        // resolves to the outer source. Temps and untracked sources are
-        // unaffected.
-        llvm_clear_copy_source(ctx, stmt.inner1, true);
+        // drops. The source clears after emission, which makes the arm a
+        // conditional took and the temporary an rvalue's field lives in
+        // known. The new local stays hidden until then, so a shadowing
+        // `let x = x` reads and releases the outer `x`.
         ctx.add_local(var_name_id, ptr, type_id, true);
+        LlvmLocalRange declared;
+        declared.start = ctx.locals.len() - 1;
+        declared.end = ctx.locals.len();
         LlvmLocal* local = ctx.find_local(var_name_id);
         if (stmt.inner1 != 0) {
             AstExpr* initializer = ctx.pool.get_expr(stmt.inner1);
             local.is_string_literal_backed = initializer.kind == ExprKind.Literal
                 && initializer.inferred_type == TYPE_STR;
         }
+        ctx.hidden_locals.push(declared);
 
         if (stmt.inner1 != 0) {
             // Generic enum constructors need the declared local type.
@@ -408,6 +421,8 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
                 ctx.note_unresolved("local-initializer", var_name);
             }
         }
+        llvm_clear_copy_source(ctx, stmt.inner1);
+        LlvmLocalRange _declared = ctx.hidden_locals.pop();
         llvm_register_local_drops(ctx, var_name_id, ptr, type_id, stmt.inner1 != 0, stmt.span);
         return;
     }
@@ -482,7 +497,7 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
             // evaluated above, which keeps self-assignment sound. A copied
             // RHS transfers ownership to the target; the source stays
             // readable but no longer drops.
-            llvm_clear_copy_source(ctx, stmt.inner1, true);
+            llvm_clear_copy_source(ctx, stmt.inner1);
             if (target_place.borrowed && target_place.node != (LLVMOpaqueValue*)0) {
                 llvm_reference_update(ctx, target_place, stmt.span, BorrowedTransition.Cleanup);
             } else { llvm_emit_assign_predrop(ctx, stmt.inner0, stmt.inner1); }

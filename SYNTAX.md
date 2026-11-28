@@ -35,7 +35,7 @@ prove type checking, code generation, or runtime behavior. Stage0 lives under
 | Traits, operators, and casts | [operator traits](std/ops.ag), [stage1 lowering](libs/agc/src/frontend/lower_expr.ag) | [comparison](tests/compare_trait_test.ag), [sequences](tests/sequence_traits_test.ag) |
 | Control flow, matching, and defers | [stage1 statement codegen](libs/agc/src/backend/llvm/stmt.ag) | [iterators](tests/iterator_ergonomics_test.ag), [guards](tests/guard_test.ag) |
 | Macros, attributes, cfg, and static values | [stage1 cfg](libs/agc/src/frontend/cfg.ag), [stage0 parser](bootstrap/stage0/agc/src/parser/prt_parser.rs) | [JSON serialization](tests/json_test.ag), [formatting](tests/fmt_test.ag) |
-| Ownership and borrowing | [stage0 borrow checker](bootstrap/stage0/agc/src/semantic/borrow_check.rs), [stage1 ownership](libs/agc/src/frontend/ownership.ag) | [container cleanup](tests/collection_drop_glue_test.ag), [Box](tests/box_test.ag) |
+| Ownership and borrowing | [stage0 borrow checker](bootstrap/stage0/agc/src/semantic/borrow_check.rs), [stage1 move flow](libs/agc/src/frontend/move_flow.ag) | [container cleanup](tests/collection_drop_glue_test.ag), [Box](tests/box_test.ag), [owner transfers](tests/memory_stress.ag) |
 | Threads and channels | [stage1 Send check](libs/agc/src/frontend/send.ag), [borrowed launch](libs/agc/src/frontend/scoped_launch.ag), [`shared` and `lock`](libs/agc/src/frontend/sync_sugar.ag), [channels](std/channel.ag), [Arc](std/mem/arc.ag) | [borrowed launch](tests/scoped_launch_test.ag), [`shared` and `lock`](tests/shared_lock_test.ag), [channels](tests/channel_test.ag), [bounded channels](tests/channel_bounded_test.ag), [Arc](tests/arc_test.ag) |
 | Result and optional values | [Optional](std/optional.ag), [Result](std/result.ag), [syscall errors](std/sys/result.ag) | [structured errors](tests/structured_error_test.ag), [Result cleanup](tests/unwrap_or_err_drop_test.ag) |
 | Allocation, formatting, FFI, and assembly | [allocator](std/mem/alloc.ag), [display](std/display.ag), [stage1 codegen](libs/agc/src/backend/llvm/generator.ag) | [allocation](tests/allocation_bounds_test.ag), [display](tests/display_test.ag), [Rust FFI](tests/rust_ffi_test.ag), [syscalls](tests/syscall_wrapper_test.ag) |
@@ -446,6 +446,21 @@ impl Display for Vector2 {
 }
 ```
 
+A bound on an impl's parameters limits where its methods apply. A call to one
+of them on a type that misses the bound is rejected at the call site. The
+built-in bound `Copy` holds for the Copy types of §8.1 and needs no impl:
+
+```silver
+impl<T: Copy> Vec<T> {
+    T get(&self, i64 index) { ... }   // a copy is safe only for Copy elements
+}
+
+Vec<i64> ids;     i64 first = ids.get(0);        // accepted
+Vec<String> names; &String n = names.get_ref(0);  // borrow an owned element
+// names.get(0)  error: 'get' is not available on 'Vec<String>': 'String' is
+//               not Copy, so a copy of a borrowed one would be dropped twice
+```
+
 ### External Declarations (`extern`)
 
 ```silver
@@ -632,6 +647,10 @@ Defers fire in **LIFO** order, including before early returns.
     if (error_condition) { return -1; }  // defers fire here
 }
 ```
+
+A deferred statement names the bindings visible where it was written. An
+inner binding that shadows one of those names does not change what the defer
+reads, even when a `return` inside the inner scope runs it.
 
 ### Control Flow Statements
 
@@ -1053,8 +1072,8 @@ control cleanup of local owned values.
 
 `TypeProperties {is_copy, needs_drop}` is the single source of truth:
 
-- **Copy** (bitwise, `copy_from` — no invalidation): primitives (`bool`, `i8`/`i16`/`i32`/`i64`/`u8`…/`f32`/`f64`/`char`), raw pointers (`T*`), and structs/enums whose every field/variant payload is Copy. `T x = y` copies.
-- **Move** (destructive, `move_out` — invalidates source): `String`, `Vec<T>`, `HashMap<K,V>`, `HashSet<K>`, `Deque<T>`, `Box<T>`, `Rc<T>`, `File`, etc., and any struct containing them. `T x = y` moves; use `T x = move y` to be explicit. LSP shows implicit `move`/`copy` inlay hints before the source place.
+- **Copy** (bitwise, `copy_from` — no invalidation): primitives (`bool`, `i8`/`i16`/`i32`/`i64`/`u8`…/`f32`/`f64`/`char`), raw pointers (`T*`), and structs/enums without a `Drop` implementation whose every field/variant payload is Copy. `T x = y` copies.
+- **Move** (destructive, `move_out` — invalidates source): `String`, `Vec<T>`, `HashMap<K,V>`, `HashSet<K>`, `Deque<T>`, `Box<T>`, `Rc<T>`, `File`, etc., any type with its own `Drop` implementation (even when every field is Copy), and any struct containing them. `T x = y`, `x = y`, and an initializer field `{ .f = y }` move; use `T x = move y` to be explicit. LSP shows implicit `move`/`copy` inlay hints before the source place.
 
 ```silver
 String a = String.from_str("hello");
@@ -1082,13 +1101,85 @@ zoo.cage = String.from_str("c"); // reinit — `zoo.cage` is live again
 // move zoo  would invalidate both fields; `zoo.cage` vs `zoo.keeper` are disjoint
 ```
 
-`v[i]` is an `Index` place. Index is conservative: `v` overlaps `v[i]`, and `v[i]` overlaps `v[j]` (different indices) — borrow/move of `v[i]` conflicts with `v[j]` and with `v`.
+An element of a fixed-size array is an `Index` place. Moving `a[i]` out
+empties that element until it is reassigned. Stage1 tracks each constant
+index separately and treats a computed index as possibly any element. Stage0
+treats every index of one array as the same place, so it also rejects a later
+`a[j]`.
 
 ```silver
-Vec<String> v; v.push(String.from_str("a")); v.push(String.from_str("b"));
-String s = move v[0]; // conservatively moves the Index place; later v[1] access is rejected
-// v[0] = String.from_str("c"); // reinit `v[0]` before indexed access
+String a[2];
+a[0] = String.from_str("a");
+a[1] = String.from_str("b");
+String s = move a[0];          // `a[0]` is empty; `a[1]` is still live in stage1
+a[0] = String.from_str("c");   // reinitialize before using `a[0]` or `a`
 ```
+
+A heap container (`Vec<T>`, `Slice<T>`, or any type with `__index_get`)
+still owns its elements, so a non-Copy element cannot be moved out by
+indexing: `move v[i]` and `T x = v[i]` are rejected. Use `v.take(i)`,
+`v.pop()`, `v.swap_remove(i)`, or borrow the element.
+
+Accessors that return a copy of an element (`get`, `try_get`, `iter`,
+`Slice.iter`, `for x in &v`, `HashMap.get`, `values`, `peek`, `front`, a lock
+guard's `get`)
+live in `impl<T: Copy>` blocks. For a non-Copy element, borrow it with
+`get_ref` or `get_mut`, or take it out. Iterating `for x in v` consumes `v`
+and moves each element out; `v` is left empty and stays usable.
+
+### 8.2 Moves Across Control Flow
+
+Each path through a function carries its own record of which places hold a
+value. Where paths meet, after an `if`, a `match`, a `&&` or `||`, a loop, a
+`break`, or a `continue`, a place holds a value only if it holds one on every
+incoming path. Using a place that a move emptied on any incoming path is an
+error:
+
+```silver
+String s = String.from_str("x");
+while (more()) {
+    if (done()) { consume(move s); break; }  // leaves the loop with `s` empty
+}
+print(&s);                                   // error: use of possibly moved value 's'
+```
+
+A loop is checked until its state stops changing, so a move late in the body
+reaches the next iteration's start, and a move in a `while` condition repeats
+on every test. A `defer` runs when its scope exits, on the fall-through path
+and on every `return`, `break`, or `continue` that leaves the scope, and is
+checked against the state at each exit. A block that yields a value, such as
+a `match` arm `{ ...; leaf; }`, hands `leaf` out before its defers run, so a
+defer in that block cannot consume it. Code after a `return`, `break`,
+`continue`, or a call that never returns is unreachable and is not checked.
+
+A conditional expression moves only the arm it takes: in
+`Token t = ready ? a : make();`, `a` is moved when `ready` is true and still
+owned when it is false, so a later use of `a` is a use of a possibly moved
+value. A `match` arm moves its result the same way. Both rules hold whatever
+the result is used for, as in `keep(ready ? a : make())` or
+`(ready ? a : make()).id`. `r ? fallback` consumes an owned `r`. In a
+`match`, a `move` binding owns its payload for the arm and can be moved on; the scrutinee no longer
+owns that payload. A guard that fails falls through to the next arm with
+the scrutinee intact.
+
+Passing a `Vec<T>` or an array to a `Slice<T>` parameter lends a view; the
+caller keeps the container and its elements.
+
+A temporary that owns a resource, such as the result of `make()` in
+`make().id` or of a `match` or `?` fallback whose field or method is used,
+lives like an unnamed local: it drops once when its enclosing
+block exits, on every exit path, and a loop body drops its temporaries on
+each pass.
+
+A local declared without a value starts as zeroed storage. It must be assigned
+on every path before it is read or moved, unless part of it is assigned: the
+unassigned fields of a value built field by field keep their zero value. A
+whole array of owned elements needs every element assigned before it, or a
+struct that holds it, is read or moved; a read of another field of that struct
+is unaffected. A
+method that takes `*self` or `&mut self`, and `&mut x` or `&x` passed to a `T*`
+parameter, may initialize the storage in place, so `Vec<i64> v; v.push(1);`
+is accepted. Such a borrow of a value that was moved out is still rejected.
 
 Borrow origins interact with places: `&x` vs `move x` conflicts; `&x.a` vs `move x.b` is allowed (disjoint fields); `&mut x.a` vs `move x.a` conflicts.
 
@@ -1394,11 +1485,9 @@ All futex-based primitives are seq_cst by default.
   a detached task keeps its slot until a waiter or the exit-time join-all
   reaps it. A launch that finds no free slot yields a task whose
   `started()` is false.
-- A `Task` can be stored in a collection. A bitwise copy of a handle, such as
-  one read with `Vec.get`, becomes stale once any copy is waited: dropping a
-  stale copy does nothing, and waiting it aborts. Move handles out with
-  `pop`, `take` or `swap_remove` instead. Waiting one task from two threads
-  at once is not supported.
+- A `Task` can be stored in a collection. It is not Copy, so `Vec.get` on a
+  `Vec<Task<T>>` is rejected. Move handles out with `pop`, `take` or
+  `swap_remove`. Waiting one task from two threads at once is not supported.
 - The runtime entry (`std.sys.entry`) is imported automatically and provides
   `_start`; every binary links statically against the pure-Silver runtime —
   there is no libc, and `--dynamic-runtime` no longer exists.

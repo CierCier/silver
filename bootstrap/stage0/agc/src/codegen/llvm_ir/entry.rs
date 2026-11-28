@@ -153,7 +153,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             None
         };
         let mut generator = LlvmIrGenerator {
-            ownership: crate::semantic::move_check::analyze_program_with_imports(program, &[], &Default::default()).init_plan,
+            ownership: crate::semantic::move_check::analyze_program_with_imports(program, &[], &Default::default(), &Default::default()).init_plan,
             owner_function: None,
             owner_states: HashMap::default(),
             borrowed_binding_states: HashMap::default(),
@@ -199,8 +199,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             loop_stack: Vec::new(),
             doc_comments: Vec::new(),
             loop_defers_base: Vec::new(),
+            hidden_scopes: Vec::new(),
             symbol_table: table.clone(),
             temp_counter: 0,
+            rvalue_temporaries: Default::default(),
             task_trampoline_counter: 0,
             debug,
             debug_nested: false,
@@ -320,7 +322,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             None
         };
         let mut generator = LlvmIrGenerator {
-            ownership: ownership.cloned().unwrap_or_else(|| crate::semantic::move_check::analyze_program_with_imports(program, imported_modules, &Default::default()).init_plan),
+            ownership: ownership.cloned().unwrap_or_else(|| crate::semantic::move_check::analyze_program_with_imports(program, imported_modules, &Default::default(), &Default::default()).init_plan),
             owner_function: None,
             owner_states: HashMap::default(),
             borrowed_binding_states: HashMap::default(),
@@ -366,6 +368,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             loop_stack: Vec::new(),
             doc_comments: Vec::new(),
             loop_defers_base: Vec::new(),
+            hidden_scopes: Vec::new(),
             symbol_table: table.clone(),
             debug,
             debug_nested: false,
@@ -373,6 +376,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             stable_places: rustc_hash::FxHashSet::default(),
             abi_handler: abi::get_abi_handler(&effective_triple),
             temp_counter: 0,
+            rvalue_temporaries: Default::default(),
             task_trampoline_counter: 0,
             leak_check,
             emit_bt_tables: true,
@@ -851,7 +855,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             None
         };
         let mut generator = LlvmIrGenerator {
-            ownership: ownership.cloned().unwrap_or_else(|| crate::semantic::move_check::analyze_program_with_imports(program, imported_modules, &Default::default()).init_plan),
+            ownership: ownership.cloned().unwrap_or_else(|| crate::semantic::move_check::analyze_program_with_imports(program, imported_modules, &Default::default(), &Default::default()).init_plan),
             owner_function: None,
             owner_states: HashMap::default(),
             borrowed_binding_states: HashMap::default(),
@@ -897,6 +901,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             loop_stack: Vec::new(),
             doc_comments: Vec::new(),
             loop_defers_base: Vec::new(),
+            hidden_scopes: Vec::new(),
             symbol_table: table.clone(),
             debug,
             debug_nested: false,
@@ -904,6 +909,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             stable_places: rustc_hash::FxHashSet::default(),
             abi_handler: abi::get_abi_handler(&effective_triple),
             temp_counter: 0,
+            rvalue_temporaries: Default::default(),
             task_trampoline_counter: 0,
             leak_check,
             emit_bt_tables,

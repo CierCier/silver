@@ -255,6 +255,11 @@ String instantiated_argument_type_mismatch(i64 number, str expected, str found) 
                    number, expected, found);
 }
 
+/// Diagnostic text: "argument count mismatch: expected {}, found {}".
+String argument_count_mismatch(i64 expected, i64 found) {
+    return @format("argument count mismatch: expected {}, found {}", expected, found);
+}
+
 /// Diagnostic text: "pointer argument type mismatch: expected {}, found {}".
 /// Returns an owned string.
 String pointer_argument_type_mismatch(str expected, str found) {
@@ -282,6 +287,17 @@ String generic_method_bound_failed(str type_name, str trait_name) {
     message.push_str(trait_name);
     message.push_str("'");
     return move message;
+}
+
+/// Diagnostic text: "'{}' is not Copy, so a copy of a borrowed one would
+/// be dropped twice; borrow it with a reference method such as get_ref".
+String bound_requires_copy(str type_name) {
+    return @format("'{}' is not Copy, so a copy of a borrowed one would be dropped twice; borrow it with a reference method such as get_ref", type_name);
+}
+
+/// Diagnostic text: "'{}' is not available on '{}': {}".
+String method_bound_not_met(str method_name, str owner, str reason) {
+    return @format("'{}' is not available on '{}': {}", method_name, owner, reason);
 }
 
 /// Diagnostic text: "cannot move '{}' out of '{}' because it implements
@@ -390,6 +406,56 @@ String use_of_moved_value(str name) {
     s.push_str(name);
     s.push_str("'");
     return move s;
+}
+
+/// Diagnostic text: "use of possibly moved value '{}'": moved on some path
+/// reaching the use. Returns an owned string.
+String use_of_possibly_moved_value(str name) {
+    return @format("use of possibly moved value '{}'", name);
+}
+
+/// Diagnostic text: "use of partially moved value '{}': '{}' was moved", or
+/// "may have been moved" when only some paths moved it. Returns an owned string.
+String use_of_partially_moved_value(str name, str part, bool maybe) {
+    return @format("use of partially moved value '{}': '{}' {}", name, part,
+                   maybe ? "may have been moved" : "was moved");
+}
+
+/// Diagnostic text: "use of uninitialized value '{}'", or "use of '{}' before
+/// '{}' is initialized" for a missing part. Returns an owned string.
+String use_of_uninitialized_value(str name, str part) {
+    if (strcmp(name, part) == 0) {
+        return @format("use of uninitialized value '{}'", name);
+    }
+    return @format("use of '{}' before '{}' is initialized", name, part);
+}
+
+/// Diagnostic text: "use of possibly uninitialized value '{}'", or "use of
+/// '{}' while '{}' may be uninitialized". Returns an owned string.
+String use_of_possibly_uninitialized_value(str name, str part) {
+    if (strcmp(name, part) == 0) {
+        return @format("use of possibly uninitialized value '{}'", name);
+    }
+    return @format("use of '{}' while '{}' may be uninitialized", name, part);
+}
+
+/// Diagnostic text: "cannot move an element out of '{}' by indexing: the
+/// container still owns it; use take, pop, swap_remove, or a reference".
+/// Returns an owned string.
+String cannot_move_out_of_indexed_element(str container) {
+    return @format("cannot move an element out of '{}' by indexing: the container still owns it; use take, pop, swap_remove, or a reference", container);
+}
+
+/// Diagnostic text: "payload of type '{}' must be moved into the enum (it
+/// owns a resource)". Returns an owned string.
+String payload_must_be_moved(str type_name) {
+    return @format("payload of type '{}' must be moved into the enum (it owns a resource)", type_name);
+}
+
+/// Diagnostic text: "cannot move out of payload in a match arm with a guard".
+/// Returns static text.
+str move_in_guarded_match_arm() {
+    return "cannot move out of payload in a match arm with a guard";
 }
 
 /// Diagnostic text: "cannot assign to moved value '{}'". Returns an owned
@@ -684,6 +750,11 @@ str note_task_handle_consumed() {
 /// Diagnostic text: "value moved here". Returns static text.
 str note_value_moved_here() {
     return "value moved here";
+}
+
+/// Diagnostic text: "declared here without a value". Returns static text.
+str note_declared_without_value() {
+    return "declared here without a value";
 }
 
 /// Diagnostic text: "cannot move '{}' out of its lock block: the shared value

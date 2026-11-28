@@ -265,13 +265,14 @@ flowchart TD
 
 #### 7. Ownership (`place.rs` / `move_path.rs` / `init.rs` / `type_properties.rs` / `move_check.rs` / `borrow_check.rs` / `drop_elaborate.rs`)
 - `Place {local, projections}` with `is_prefix_of` / `overlaps` (Index `v[i]` vs `v[j]` conservative, `v` overlaps `v[i]`).
-- `TypeProperties {is_copy, needs_drop}`: primitives/ptr/all-Copy struct = Copy, `String`/`Vec`/`HashMap`/`HashSet`/`Deque` = Move.
+- `TypeProperties {is_copy, needs_drop}`: primitives/ptr/all-Copy struct = Copy, `String`/`Vec`/`HashMap`/`HashSet`/`Deque` = Move. A type with its own `Drop` impl is a drop owner, so it moves even when every field is Copy.
+- `move_check.rs` walks statements in order. Loops repeat until the state is stable (at most 8 passes) and join their `break` states into the exit and their `continue` states before the step. `return`, `break`, and `continue` check the defers of the scopes they leave. A `let`, an assignment, or an initializer element that reads a tracked place moves it and records an owner transfer; codegen clears the source's drop state only at recorded transfers. A borrowed call argument is checked again after the other arguments, so `f(&t, move t)` is rejected. Moving an owned element out of a heap container by index is rejected, also as a by-value argument or a returned value. A conditional transfers each arm on its own path and joins the results. Statements after a terminating statement are not checked. A `match` arm declares its `move` bindings in a scope of its own, and a guarded refutable arm joins the guard-miss state into the next arm.
 - `MovePathTree` + `InitState` + `move_out`/`copy_from`/`initialize`/`read`; field-granular `x.a` vs `x.b`, reinit `x.a = make()`.
 - `Borrow {place, kind}` via `places_overlap`.
 - `init_plan.rs` carries typed owner layouts and resolved places from move
   analysis to LLVM. Concrete generic instances complete their plans through the
   same semantic layout resolver. The native frontend uses `init_plan.ag` and
-  returns owner plans with its ownership result.
+  builds owner plans with `build_owner_plans` before expression checking.
 
 #### 8. Monomorphization (`semantic/monomorph.rs`)
 - Runs a fixpoint generation loop:
@@ -495,9 +496,45 @@ may use designators too. Other array literals, such as a `static` local or a
 function argument, fail with a designator diagnostic because the array
 literal form has no indices.
 
-Stage1 is stricter than stage0 in two cases. It rejects a non-exhaustive `match`
+### Native move and initialization checking
+
+After a body type-checks cleanly, `typecheck_body` runs
+[`move_flow_check`](../libs/agc/src/frontend/move_flow.ag) on the same lowered
+statements, so functions, impl methods, trait defaults, and `cast` blocks share
+one pass. The checker records how each argument is passed while it selects
+overloads: `AstPool.consumed` marks by-value uses, and
+`AstPool.mutable_borrows` marks `*self`, `&mut self`, `&mut x`, and `T*`
+arguments. The pass reads only those facts and the inferred types.
+
+Each owned (non-Copy) local is a tree of places: the local, its struct and
+tuple fields, and the constant-index elements of a fixed-size array. A path
+state records `Init`, `Empty`, or `Maybe` per place, with the cause (moved or
+declared without a value) and its span for the note. An array's own entry
+stands for its elements without a place, so a whole-array read needs every
+element. Branches fork the state;
+joins mark disagreeing places `Maybe`. A loop repeats its condition and body,
+joining the `continue` states before the step, until the head state is stable.
+Its exit joins the false-condition state with the `break` states. `return`,
+`break`, and `continue` first walk the deferred statements of the scopes they
+leave; a block walks its own defers at its end. While a defer is walked, the
+locals declared after its registration are hidden, so its names resolve as
+written; both backends hide the same locals when they emit it. A `let` reuses
+its place on each loop pass, so the states converge. A conditional expression
+consumes each arm on its own branch, and the backends clear the source of the
+arm that ran. A `match` arm, a `?` fallback, and a value block's result are
+consumed the same way, whatever the result is used for: the result is a new
+owner even when only its field or method is used. A `move` binding in a
+`match` arm is an owned place for that arm.
+
+Section 8.2 of [SYNTAX.md](../SYNTAX.md) states the rules the pass enforces.
+`ownership.ag` now only builds owner initialization plans before expression
+checking.
+
+Stage1 is stricter than stage0 in three cases. It rejects a non-exhaustive `match`
 on an enum and an unknown field in a struct literal. Stage0 accepts both, and
-the generated code fails at run time.
+the generated code fails at run time. Stage1 also rejects a read of a local
+that only some paths initialized; stage0 accepts it and reads the zeroed
+storage, and the runtime init state still prevents a drop of that storage.
 
 A generic body is a template, so the checker does not judge a method call on
 a type-parameter receiver inside it. Each concrete call instead reports
@@ -507,6 +544,26 @@ shadows the parameter. The check follows a parameter that the body passes
 whole to another generic function. A call to a method
 with its own type parameters fails when no declaration takes that many
 arguments, or when monomorphization cannot infer the method's type arguments.
+
+Both stages check the bounds of a method's inherent impl at each call. The
+built-in bound `Copy` is satisfied by the `TypeProperties` Copy rule and has
+no impl. Stage1 skips the check while the receiver's type arguments are still
+open, as in a generic body, and checks again on each concrete instantiation;
+a type that an imported artifact defines is not open. Stage0 judges a `Copy`
+bound only where the receiver is concrete, and it also checks a `Copy` bound
+on a trait's type parameter in `impl Trait<X> for Y`, which stage1 does not
+check yet.
+Stage1 also resolves a call to an imported free function against the retained
+declaration, so the call's arguments move or borrow as the signature says.
+
+Both backends keep a temporary that owns a resource, such as a method
+receiver built by a call, as an unnamed local that drops when its block
+exits. In stage1, `llvm_emit_reference_place` gives every value-producing
+expression (a call, block, `?:`, `match`, `?` fallback, or `wait`) such a
+local when its field or method is used. Stage1 starts that local's drop state empty in the entry block, so a
+temporary built in only one arm of `?:` drops only when that arm ran. Stage0
+lowers each arm as a block and drops the arm's temporaries at the end of the
+arm. Stage0 also rejects `&` applied to a temporary, as in `peek(&mk(6))`.
 
 ## 7. Diagnostics
 

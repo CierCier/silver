@@ -162,6 +162,14 @@ impl OwnedLeaf {
     bool valid(OwnedLeaf* self) {
         return self.owns && self.bytes != (i8*)0 && self.len > 0;
     }
+
+    i64 size(&self) {
+        return self.len;
+    }
+
+    i32 into_first(self) {
+        return self.first();
+    }
 }
 
 impl Drop for OwnedLeaf {
@@ -333,6 +341,38 @@ void stress_owner_moves_and_params() {
     assert_eq_i32(leaf_drop_count, 2, "early-returned pair leaves dropped");
     assert_eq_i32(node_drop_count, 1, "early-return scratch node dropped once");
     assert_eq_i32(node_payload_free_count, 1, "early-return scratch payload freed");
+
+    // OwnedLeaf's fields are all Copy, but its Drop frees memory, so a
+    // plain `=` must transfer ownership rather than duplicate it.
+    reset_owner_counters();
+    {
+        OwnedLeaf a = OwnedLeaf.new(1, 8);
+        OwnedLeaf b = a;
+        assert_eq_i32(b.first(), 1, "implicitly moved leaf keeps its bytes");
+    }
+    assert_eq_i32(leaf_drop_count, 1, "implicit let transfer drops once");
+    assert_eq_i64(leaf_bytes_freed, 8, "implicit let transfer frees once");
+
+    reset_owner_counters();
+    {
+        OwnedLeaf a = OwnedLeaf.new(2, 4);
+        OwnedLeaf b = OwnedLeaf.new(3, 16);
+        b = a;
+        assert_eq_i32(b.first(), 2, "assigned leaf holds the source bytes");
+    }
+    assert_eq_i32(leaf_drop_count, 2, "assignment drops the old value and the moved one");
+    assert_eq_i64(leaf_bytes_freed, 20, "assignment frees both buffers once");
+
+    reset_owner_counters();
+    {
+        OwnedLeaf l = OwnedLeaf.new(4, 2);
+        OwnedLeaf r = OwnedLeaf.new(5, 3);
+        PairOwner p = { .id = 6, .left = l, .right = r, .peer = (PairOwner*)0 };
+        assert_eq_i32(p.sum(), 15, "initializer took both leaves");
+    }
+    assert_eq_i32(pair_drop_count, 1, "initializer-built pair dropped once");
+    assert_eq_i32(leaf_drop_count, 2, "initializer sources drop only through the pair");
+    assert_eq_i64(leaf_bytes_freed, 5, "initializer sources free once");
 }
 
 void stress_loop_churn() {
@@ -356,6 +396,346 @@ void stress_loop_churn() {
     assert_eq_i64(leaf_bytes_freed, 560, "loop pair leaf bytes accounted");
 }
 
+// ---------------- Conditional and borrowed transfers ----------------
+i32 deferred_leaf_id = 0;
+
+/// A defer names the `outer` leaf visible where it was written, even when
+/// the return runs it inside a scope with another leaf of that name.
+i32 defer_sees_outer_leaf() {
+    OwnedLeaf leaf = OwnedLeaf.new(21, 1);
+    defer deferred_leaf_id = leaf.id;
+    {
+        OwnedLeaf leaf = OwnedLeaf.new(22, 1);
+        return leaf.id;
+    }
+}
+
+i64 leaf_count(Slice<OwnedLeaf> leaves) {
+    return leaves.len();
+}
+
+void keep_leaf(OwnedLeaf leaf) {
+    assert_eq_i32(leaf.first(), 25, "match binding moved its payload out");
+}
+
+struct LeafSlot {
+    [OwnedLeaf, i64] pair;
+}
+
+/// A non-generic enum whose payload owns a leaf, held by a plain struct.
+enum LeafEvent { Held(OwnedLeaf); Idle; }
+
+struct EventHolder {
+    LeafEvent event;
+    i64 serial;
+}
+
+/// Two leaves and no destructor of its own, so a field can move out.
+struct LeafPair {
+    OwnedLeaf left;
+    OwnedLeaf right;
+}
+
+LeafPair leaf_pair(i32 id) {
+    LeafPair pair;
+    pair.left = OwnedLeaf.new(id, 2);
+    pair.right = OwnedLeaf.new(id + 1, 3);
+    return move pair;
+}
+
+OwnedLeaf left_of_new_pair(i32 id) {
+    return leaf_pair(id).left;
+}
+
+i32 first_of(OwnedLeaf leaf) {
+    return leaf.first();
+}
+
+void stress_conditional_and_borrowed_transfers() {
+    STDOUT.write_str("\n--- Conditional and borrowed transfers ---\n");
+    reset_owner_counters();
+    {
+        OwnedLeaf a = OwnedLeaf.new(20, 4);
+        bool pick = leaf_drop_count == 0;
+        OwnedLeaf b = pick ? a : OwnedLeaf.new(19, 2);
+        assert_eq_i32(b.first(), 20, "conditional took the leaf");
+    }
+    assert_eq_i32(leaf_drop_count, 1, "conditional transfer drops once");
+    assert_eq_i64(leaf_bytes_freed, 4, "conditional transfer frees once");
+
+    reset_owner_counters();
+    {
+        OwnedLeaf a = OwnedLeaf.new(20, 4);
+        bool pick = leaf_drop_count != 0;
+        OwnedLeaf b = pick ? a : OwnedLeaf.new(19, 2);
+        assert_eq_i32(b.first(), 19, "conditional built the other leaf");
+    }
+    assert_eq_i32(leaf_drop_count, 2, "both leaves drop once when the other arm runs");
+    assert_eq_i64(leaf_bytes_freed, 6, "both leaves free once when the other arm runs");
+
+    reset_owner_counters();
+    {
+        OwnedLeaf a = OwnedLeaf.new(25, 4);
+        keep_leaf(leaf_drop_count == 0 ? a : OwnedLeaf.new(25, 2));
+    }
+    assert_eq_i32(leaf_drop_count, 1, "a conditional argument moves its leaf into the callee");
+    assert_eq_i64(leaf_bytes_freed, 4, "a conditional argument frees its leaf once");
+
+    reset_owner_counters();
+    {
+        OwnedLeaf a = OwnedLeaf.new(25, 4);
+        keep_leaf(leaf_drop_count != 0 ? a : OwnedLeaf.new(25, 2));
+    }
+    assert_eq_i32(leaf_drop_count, 2, "the unused leaf drops at scope exit");
+    assert_eq_i64(leaf_bytes_freed, 6, "both conditional-argument leaves free once");
+
+    reset_owner_counters();
+    assert_eq_i32(defer_sees_outer_leaf(), 22, "inner leaf returned its id");
+    assert_eq_i32(deferred_leaf_id, 21, "defer read the leaf in its own scope");
+    assert_eq_i32(leaf_drop_count, 2, "both shadowing leaves dropped once");
+
+    reset_owner_counters();
+    {
+        Vec<OwnedLeaf> leaves = Vec<OwnedLeaf>.new();
+        leaves.push(OwnedLeaf.new(23, 2));
+        leaves.push(OwnedLeaf.new(24, 3));
+        assert_eq_i64(leaf_count(leaves), 2, "slice parameter viewed the vec");
+        i64(Slice<OwnedLeaf>) count = leaf_count;
+        assert_eq_i64(count(leaves), 2, "a local callable's slice parameter viewed the vec");
+        assert_eq_i64(leaves.len(), 2, "vec still owns its leaves after the call");
+    }
+    assert_eq_i32(leaf_drop_count, 2, "vec viewed as a slice drops its leaves once");
+    assert_eq_i64(leaf_bytes_freed, 5, "vec viewed as a slice frees once");
+
+    reset_owner_counters();
+    {
+        Vec<OwnedLeaf> leaves = Vec<OwnedLeaf>.new();
+        leaves.push(OwnedLeaf.new(40, 1));
+        leaves.push(OwnedLeaf.new(41, 2));
+        leaves.push(OwnedLeaf.new(42, 3));
+        leaves.push(OwnedLeaf.new(43, 4));
+        Vec<i32> ids = Vec<i32>.new();
+        ids.push(leaves.get_ref(1).first());
+        assert_eq_i32(ids.get(0), 41, "get copied a Copy element out");
+        assert_eq_i32(leaf_drop_count, 0, "a borrowed element is not dropped");
+        {
+            OwnedLeaf last = leaves.pop();
+            OwnedLeaf first = leaves.take(0);
+            OwnedLeaf swapped = leaves.swap_remove(0);
+            assert_eq_i32(last.first() + first.first() + swapped.first(), 124, "pop, take, and swap_remove moved the elements out");
+        }
+        assert_eq_i32(leaf_drop_count, 3, "taken elements drop once with their new owners");
+        assert_eq_i64(leaves.len(), 1, "the vec still owns one element");
+        ids.drop();
+    }
+    assert_eq_i32(leaf_drop_count, 4, "the vec drops only the element it still owns");
+    assert_eq_i64(leaf_bytes_freed, 10, "each element frees once");
+
+    reset_owner_counters();
+    {
+        OwnedLeaf a = OwnedLeaf.new(29, 4);
+        bool outer = leaf_drop_count == 0;
+        bool inner = leaf_drop_count != 0;
+        OwnedLeaf b = outer ? (inner ? a : OwnedLeaf.new(30, 2)) : OwnedLeaf.new(31, 1);
+        assert_eq_i32(b.first(), 30, "nested conditional built the inner leaf");
+    }
+    assert_eq_i32(leaf_drop_count, 2, "nested conditional drops each leaf once");
+    assert_eq_i64(leaf_bytes_freed, 6, "nested conditional frees each leaf once");
+
+    reset_owner_counters();
+    {
+        Optional<OwnedLeaf> maybe = Optional<OwnedLeaf>.Some(OwnedLeaf.new(25, 6));
+        match maybe {
+            Some(move leaf): keep_leaf(move leaf),
+            None: {},
+        };
+    }
+    assert_eq_i32(leaf_drop_count, 1, "moved payload binding drops once");
+    assert_eq_i64(leaf_bytes_freed, 6, "moved payload binding frees once");
+
+    // A `move` binding owns its payload: it drops once whether a local
+    // takes it, the arm only reads it, or the arm yields a Copy field.
+    reset_owner_counters();
+    {
+        Optional<OwnedLeaf> maybe = Optional<OwnedLeaf>.Some(OwnedLeaf.new(32, 2));
+        match maybe {
+            Some(move leaf): { OwnedLeaf kept = leaf; },
+            None: {},
+        };
+        Optional<OwnedLeaf> other = Optional<OwnedLeaf>.Some(OwnedLeaf.new(33, 3));
+        match other {
+            Some(move leaf): { i32 id = leaf.first(); },
+            None: {},
+        };
+        Optional<OwnedLeaf> third = Optional<OwnedLeaf>.Some(OwnedLeaf.new(34, 4));
+        i64 len = match third {
+            Some(move leaf): leaf.len,
+            None: 0,
+        };
+        assert_eq_i64(len, 4, "an arm yielded a Copy field of its binding");
+    }
+    assert_eq_i32(leaf_drop_count, 3, "each move binding drops its payload once");
+    assert_eq_i64(leaf_bytes_freed, 9, "each move binding frees its payload once");
+
+    reset_owner_counters();
+    {
+        EventHolder holder;
+        holder.event = LeafEvent.Held(OwnedLeaf.new(37, 3));
+        holder.serial = 1;
+        LeafEvent taken = move holder.event;
+        EventHolder copied;
+        copied.event = LeafEvent.Held(OwnedLeaf.new(38, 4));
+        copied.serial = 2;
+        LeafEvent implicit = copied.event;
+        EventHolder matched;
+        matched.event = LeafEvent.Held(OwnedLeaf.new(39, 5));
+        matched.serial = 3;
+        i32 matched_id = match matched.event { Held(move leaf): leaf.id, Idle: 0 };
+        assert_eq_i32(matched_id, 39, "a move binding reads its payload out of an enum field");
+    }
+    assert_eq_i32(leaf_drop_count, 3, "an enum field moved out drops its payload once");
+    assert_eq_i64(leaf_bytes_freed, 12, "an enum field moved out frees its payload once");
+
+    // A borrowed receiver's computed index runs once, so the leaf it moved
+    // is not read again.
+    reset_owner_counters();
+    {
+        OwnedLeaf leaves[2];
+        leaves[0] = OwnedLeaf.new(41, 1);
+        leaves[1] = OwnedLeaf.new(42, 1);
+        OwnedLeaf probe = OwnedLeaf.new(40, 1);
+        assert_eq_i32(leaves[first_of(probe) - 39].first(), 42, "a receiver's index moves its argument once");
+    }
+    assert_eq_i32(leaf_drop_count, 3, "a receiver's moved index argument drops once");
+
+    // An arm block drops its own locals and runs its defers at the arm's end.
+    reset_owner_counters();
+    deferred_leaf_id = 0;
+    {
+        Optional<OwnedLeaf> maybe = Optional<OwnedLeaf>.Some(OwnedLeaf.new(35, 1));
+        match maybe {
+            Some(leaf): {
+                OwnedLeaf extra = OwnedLeaf.new(36, 5);
+                defer deferred_leaf_id = leaf.id;
+            },
+            None: {},
+        };
+        assert_eq_i32(leaf_drop_count, 1, "an arm block dropped its local");
+        assert_eq_i32(deferred_leaf_id, 35, "an arm block ran its defer");
+    }
+    assert_eq_i32(leaf_drop_count, 2, "an arm local and the payload drop once");
+    assert_eq_i64(leaf_bytes_freed, 6, "an arm local and the payload free once");
+
+    reset_owner_counters();
+    {
+        OwnedLeaf a = OwnedLeaf.new(26, 7);
+        LeafSlot slot = { .pair = [a, 1] };
+        assert_eq_i32(slot.pair[0].first(), 26, "tuple field took the leaf");
+    }
+    assert_eq_i32(leaf_drop_count, 1, "tuple element in an initializer drops once");
+    assert_eq_i64(leaf_bytes_freed, 7, "tuple element in an initializer frees once");
+
+    reset_owner_counters();
+    {
+        i32 first = OwnedLeaf.new(27, 3).first();
+        assert_eq_i32(first, 27, "temporary was readable");
+        assert_eq_i32(leaf_drop_count, 0, "a temporary lives to the end of its block");
+    }
+    assert_eq_i32(leaf_drop_count, 1, "a temporary drops once at block exit");
+    i64 pass = 0;
+    while (pass < 3) {
+        i32 _id = OwnedLeaf.new(28, 1).first();
+        pass += 1;
+    }
+    assert_eq_i32(leaf_drop_count, 4, "a loop body drops its temporary on each pass");
+
+    reset_owner_counters();
+    {
+        bool taken = leaf_drop_count == 0;
+        i32 hit = taken ? OwnedLeaf.new(32, 2).first() : 0;
+        i32 miss = taken ? 0 : OwnedLeaf.new(33, 5).first();
+        assert_eq_i32(hit + miss, 32, "only the arm that ran built a temporary");
+    }
+    assert_eq_i32(leaf_drop_count, 1, "only the temporary of the arm that ran drops");
+    assert_eq_i64(leaf_bytes_freed, 2, "only the temporary of the arm that ran frees");
+
+    reset_owner_counters();
+    {
+        bool ready = leaf_drop_count > 0;
+        bool skipped = ready && OwnedLeaf.new(35, 2).valid();
+        bool evaluated = !ready && OwnedLeaf.new(36, 3).valid();
+        assert_true(!skipped && evaluated, "only the evaluated operand built a temporary");
+    }
+    assert_eq_i32(leaf_drop_count, 1, "a skipped operand's temporary never drops");
+    assert_eq_i64(leaf_bytes_freed, 3, "only the evaluated operand's temporary frees");
+
+    reset_owner_counters();
+    {
+        OwnedLeaf.new(34, 3).drop();
+    }
+    assert_eq_i32(leaf_drop_count, 1, "an explicitly dropped temporary drops once");
+    assert_eq_i64(leaf_bytes_freed, 3, "an explicitly dropped temporary frees once");
+
+    reset_owner_counters();
+    {
+        Optional<i64> pick = Optional<i64>.Some(1);
+        i32 id = (match pick { Some(n): OwnedLeaf.new(37, 2), None: OwnedLeaf.new(38, 9) }).id;
+        Optional<OwnedLeaf> missing = Optional<OwnedLeaf>.None;
+        i64 len = (missing ? OwnedLeaf.new(39, 4)).size();
+        assert_eq_i64((i64)id + len, 41, "a match result and a fallback were readable");
+        assert_eq_i32(leaf_drop_count, 0, "a match or fallback result lives to the end of its block");
+    }
+    assert_eq_i32(leaf_drop_count, 2, "a match or fallback result drops once");
+    assert_eq_i64(leaf_bytes_freed, 6, "a match or fallback result frees once");
+
+    reset_owner_counters();
+    {
+        Optional<OwnedLeaf> first = Optional<OwnedLeaf>.Some(OwnedLeaf.new(40, 2));
+        Optional<OwnedLeaf> second = first;
+        OwnedLeaf kept = OwnedLeaf.new(41, 3);
+        OwnedLeaf taken = second ? kept;
+        OwnedLeaf named = OwnedLeaf.new(42, 4);
+        Optional<OwnedLeaf> missing = Optional<OwnedLeaf>.None;
+        OwnedLeaf used = missing ? named;
+        assert_eq_i32(taken.first() + used.first(), 82, "a payload and a named fallback were taken");
+        assert_eq_i32(leaf_drop_count, 0, "a moved Optional and its fallbacks are still owned");
+    }
+    assert_eq_i32(leaf_drop_count, 3, "a moved Optional and a named fallback drop once");
+    assert_eq_i64(leaf_bytes_freed, 9, "a moved Optional and a named fallback free once");
+
+    // A field moved out of a call result leaves; its temporary keeps and
+    // drops only the sibling.
+    reset_owner_counters();
+    {
+        OwnedLeaf named = leaf_pair(43).left;
+        OwnedLeaf returned = left_of_new_pair(45);
+        i32 consumed = first_of(leaf_pair(49).left) + leaf_pair(51).right.into_first();
+        OwnedLeaf assigned = OwnedLeaf.new(70, 1);
+        assigned = leaf_pair(53).left;
+        i32 id = leaf_pair(55).left.id;
+        i64 size = leaf_pair(57).right.size();
+        LeafPair rebuilt = { .left = leaf_pair(59).left, .right = OwnedLeaf.new(72, 1) };
+        i32 kept = named.first() + returned.first() + assigned.first() + rebuilt.left.first();
+        assert_eq_i32(consumed + kept, 301, "each moved field kept its own bytes");
+        assert_eq_i64((i64)id + size, 58, "a Copy field and a borrowed field were readable");
+    }
+    assert_eq_i32(leaf_drop_count, 18, "a field moved out of a temporary drops once");
+    assert_eq_i64(leaf_bytes_freed, 42, "a field moved out of a temporary frees once");
+
+    // A shadowing local takes the outer value it names.
+    reset_owner_counters();
+    {
+        OwnedLeaf leaf = OwnedLeaf.new(61, 2);
+        {
+            OwnedLeaf leaf = leaf;
+            assert_eq_i32(leaf.first(), 61, "a shadowing local read the outer value");
+        }
+        assert_eq_i32(leaf_drop_count, 1, "a shadowing local drops the value it took");
+    }
+    assert_eq_i32(leaf_drop_count, 1, "a shadowed local does not drop again");
+    assert_eq_i64(leaf_bytes_freed, 2, "a shadowed value frees once");
+}
+
 void stress_defer_and_break_continue() {
     STDOUT.write_str("\n--- Defer, break, continue with owned locals ---\n");
     reset_node_counters();
@@ -371,6 +751,25 @@ void stress_defer_and_break_continue() {
     assert_eq_i32(defer_marker, 10, "defer executed when owned block exits");
     assert_eq_i32(pair_drop_count, 1, "owned value dropped with defer present");
     assert_eq_i32(leaf_drop_count, 2, "nested leaves dropped with defer present");
+
+    reset_owner_counters();
+    {
+        OwnedLeaf outer_leaf = OwnedLeaf.new(52, 3);
+        Optional<i64> pick = Optional<i64>.Some(1);
+        OwnedLeaf yielded = match pick {
+            Some(n): {
+                OwnedLeaf inner = OwnedLeaf.new(53, 4);
+                defer { defer_marker = defer_marker + 1; }
+                outer_leaf;
+            },
+            None: OwnedLeaf.new(54, 5),
+        };
+        assert_eq_i32(defer_marker, 11, "a yielding block ran its defer");
+        assert_eq_i32(leaf_drop_count, 1, "a yielding block dropped its own local");
+        assert_eq_i32(yielded.first(), 52, "a value block handed out the outer leaf");
+    }
+    assert_eq_i32(leaf_drop_count, 2, "a leaf yielded by a value block drops once");
+    assert_eq_i64(leaf_bytes_freed, 7, "a leaf yielded by a value block frees once");
 
     reset_node_counters();
     for (i32 i = 0; i < 10; i = i + 1) {
@@ -440,6 +839,7 @@ i32 main() {
     stress_cross_linked_nodes();
     stress_owner_moves_and_params();
     stress_loop_churn();
+    stress_conditional_and_borrowed_transfers();
     stress_defer_and_break_continue();
     stress_large_raw_memory();
 

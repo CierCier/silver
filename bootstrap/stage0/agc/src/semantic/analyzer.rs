@@ -798,6 +798,9 @@ impl Analyzer {
             if path.is_empty() {
                 continue;
             }
+            if path.len() == 1 && path[0].name == crate::traits::BUILTIN_COPY {
+                continue;
+            }
             if path.len() == 1 {
                 let name = &path[0].name;
                 match self.has_symbol(name) {

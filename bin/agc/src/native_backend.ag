@@ -3133,11 +3133,10 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         check_declared_types(&symbols, &tree, &cfg, &diagnostics);
         profiler_end_phase("check declared types");
         if (diagnostics.is_empty()) {
-            profiler_begin_phase("check ownership");
-            OwnershipResult ownership = check_ownership(&tree, &symbols, &diagnostics, &cfg);
-            Vec<InitOwnerPlan> _previous_plans = move symbols.init_owner_plans;
-            symbols.init_owner_plans = move ownership.owner_plans;
-            profiler_end_phase("check ownership");
+            profiler_begin_phase("build owner plans");
+            Vec<InitOwnerPlan> plans = build_owner_plans(&tree, &symbols, &diagnostics, &cfg);
+            symbols.init_owner_plans = move plans;
+            profiler_end_phase("build owner plans");
         }
         // Expression checking chooses each launch's overload, which the
         // borrow and Send checks then judge. They scan every file, so every

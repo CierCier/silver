@@ -238,18 +238,20 @@ LlvmPlace llvm_emit_reference_place(LlvmContext* ctx, u32 expr_id) {
     }
     if (expression.kind == ExprKind.Call || expression.kind == ExprKind.MethodCall
         || expression.kind == ExprKind.StructLit || expression.kind == ExprKind.Block
-        || expression.kind == ExprKind.Ternary || expression.kind == ExprKind.Slice) {
+        || expression.kind == ExprKind.Ternary || expression.kind == ExprKind.Slice
+        || expression.kind == ExprKind.Match || expression.kind == ExprKind.UnwrapOr
+        || expression.kind == ExprKind.Wait) {
         LLVMOpaqueValue* value = llvm_emit_expr(ctx, expr_id);
         if (value == (LLVMOpaqueValue*)0) { return place; }
         place.type_id = llvm_expr_type(ctx, expr_id);
         place.data = llvm_entry_alloca(ctx, LLVMTypeOf(value), "reference_temporary");
         LLVMBuildStore(ctx.builder, value, place.data);
-        String name = String.from_str("__reference_temporary_");
-        append_u32(&name, (u32)ctx.locals.len());
-        u32 name_id = ctx.names.intern(name.to_str());
-        ctx.add_local(name_id, place.data, place.type_id, true);
-        llvm_register_local_drops(ctx, name_id, place.data, place.type_id, true, expression.span);
-        place.node = llvm_init_tree_node_ptr(ctx, ctx.find_local(name_id), 0);
+        // A conditional leaves its consumer to release the arm it copied; the
+        // temporary is that consumer here.
+        if (expression.kind == ExprKind.Ternary) { llvm_clear_copy_source(ctx, expr_id); }
+        LlvmLocal* temporary = llvm_add_temporary_local(ctx, place.data, place.type_id,
+                                                        expr_id, expression.span);
+        place.node = llvm_init_tree_node_ptr(ctx, temporary, 0);
         return place;
     }
     if (expression.kind == ExprKind.Index) {

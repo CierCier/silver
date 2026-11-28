@@ -1567,6 +1567,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                                 expression.kind.as_ref()
                                             {
                                                 self.clear_field_flags(&ident.name)?;
+                                            } else if let Some((root, path)) =
+                                                self.lvalue_root_and_path(expression)
+                                            {
+                                                // A field scrutinee's owner must not
+                                                // drop the zeroed payload again.
+                                                self.clear_field_flags_for_path(&root, &path)?;
                                             }
                                             let orig_data = self
                                                 .builder
@@ -1732,6 +1738,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .is_some();
             if !arm_terminated {
                 all_arms_terminated = false;
+                // The arm scope holds its `move` bindings; release them here.
+                self.emit_defers(1)?;
                 self.builder
                     .build_unconditional_branch(end_bb)
                     .map_err(|e| CodegenError::new(format!("failed match arm end branch: {e}")))?;

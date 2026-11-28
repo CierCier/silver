@@ -1553,6 +1553,7 @@ impl<'a> ParallelGraphExecutor<'a> {
             &ast,
             &import_lowering.module_artifacts,
             checker.consuming_method_calls(),
+            checker.indexed_elements(),
         );
         if let Some(error) = ownership.errors.first() {
             return Err(error.message.clone());

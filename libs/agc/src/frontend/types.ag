@@ -149,6 +149,8 @@ struct TypeMethodParam {
     i64 parameter_index;
     u32 param_type;
     bool is_value;
+    /// A pointer or `&mut` parameter, which may write its argument.
+    bool is_mutable;
 }
 
 /// The canonical type table: interned types addressed by `u32` id, plus
@@ -1148,6 +1150,17 @@ impl TypeTable {
     TypeProperties properties(TypeTable* self, u32 id) {
         return type_properties_at(self, id, 0);
     }
+    /// Returns true when a struct or enum named `name_id` has registered
+    /// properties, from source or from an imported artifact.
+    bool has_definition(TypeTable* self, u32 name_id) {
+        i64 i = 0;
+        while (i < self.struct_properties.len()) {
+            if (self.struct_properties.get_ptr(i).name_id == name_id) { return true; }
+            i += 1;
+        }
+        return false;
+    }
+
     /// Records the field types of struct `name`.
     void register_struct_properties(TypeTable* self, str name, Vec<u32>* fields) {
         u32 name_id = self.names.intern(name);
@@ -1267,7 +1280,7 @@ impl TypeTable {
     /// Records whether a method parameter takes its argument by value.
     void register_method_param(TypeTable* self, str owner, str method,
                                i64 param_count, i64 index, u32 param_type,
-                               bool is_value) {
+                               bool is_value, bool is_mutable) {
         String base_owner = String.new();
         i64 oi = 0;
         while (owner[oi] != 0 && owner[oi] != (u8)'<') {
@@ -1286,6 +1299,7 @@ impl TypeTable {
                 && entry.parameter_index == index
                 && (entry.param_type == param_type || param_type == TYPE_UNKNOWN)) {
                 entry.is_value = is_value;
+                entry.is_mutable = is_mutable;
                 if (param_type != TYPE_UNKNOWN) {
                     entry.param_type = param_type;
                 }
@@ -1300,13 +1314,14 @@ impl TypeTable {
         param.parameter_index = index;
         param.param_type = param_type;
         param.is_value = is_value;
+        param.is_mutable = is_mutable;
         self.method_params.push(param);
     }
 
-    /// Returns true when the parameter takes `arg_type` by value. Generic owner
+    /// The recorded parameter that takes `arg_type`, or null. Generic owner
     /// arguments (`Vec<T>`) are ignored when matching the owner.
-    bool method_param_is_value(TypeTable* self, str owner, str method,
-                               i64 param_count, i64 index, u32 arg_type) {
+    TypeMethodParam* find_method_param(TypeTable* self, str owner, str method,
+                                       i64 param_count, i64 index, u32 arg_type) {
         String base_owner = String.new();
         i64 oi = 0;
         while (owner[oi] != 0 && owner[oi] != (u8)'<') {
@@ -1325,7 +1340,7 @@ impl TypeTable {
                     && (param_count == 0 || entry.param_count == param_count)
                     && entry.parameter_index == index
                     && entry.param_type == arg_type) {
-                    return entry.is_value;
+                    return entry;
                 }
                 i += 1;
             }
@@ -1338,7 +1353,7 @@ impl TypeTable {
                     && entry.method_name_id == method_name_id
                     && entry.param_count == param_count
                     && entry.parameter_index == index) {
-                    return entry.is_value;
+                    return entry;
                 }
                 i += 1;
             }
@@ -1349,13 +1364,27 @@ impl TypeTable {
             if (entry.owner_name_id == owner_name_id
                 && entry.method_name_id == method_name_id
                 && entry.parameter_index == index) {
-                return entry.is_value;
+                return entry;
             }
             i += 1;
         }
-        return false;
+        return (TypeMethodParam*)0;
     }
 
+
+    /// Returns true when the recorded parameter takes `arg_type` by value.
+    bool method_param_is_value(TypeTable* self, str owner, str method,
+                               i64 param_count, i64 index, u32 arg_type) {
+        TypeMethodParam* param = self.find_method_param(owner, method, param_count, index, arg_type);
+        return param != (TypeMethodParam*)0 && param.is_value;
+    }
+
+    /// Returns true when the recorded parameter is a mutable borrow.
+    bool method_param_is_mutable(TypeTable* self, str owner, str method,
+                                 i64 param_count, i64 index, u32 arg_type) {
+        TypeMethodParam* param = self.find_method_param(owner, method, param_count, index, arg_type);
+        return param != (TypeMethodParam*)0 && param.is_mutable;
+    }
 
     /// Returns true when type `id` copies implicitly.
     bool is_copy(TypeTable* self, u32 id) {

@@ -163,15 +163,16 @@ i64 main() {
     }
     if (__atomic_load_i64(&g_drops, ATOMIC_SEQ_CST) != 2) { return 14; }
 
-    // 7. Stale handle copies.
+    // 7. Handles taken out of a Vec. `tasks.get(0)` would copy the handle
+    // and is rejected; `take` moves it, so the Vec keeps no stale handle.
     Vec<Task<i64>> tasks = Vec<Task<i64>>.new();
     tasks.push(launch twice(1));
     tasks.push(launch twice(2));
-    if (wait tasks.get(0) != 2) { return 9; }   // a copy: the Vec keeps a stale handle
+    if (wait tasks.take(0) != 2) { return 9; }
     i64 flag = 0;
     {
         Task<void> reuse = launch slow_write(&mut flag, 1);
-        tasks.clear();   // must not join `reuse` through the stale copy
+        tasks.clear();   // joins only the remaining handle, never `reuse`
     }
     if (flag != 1) { return 10; }
 

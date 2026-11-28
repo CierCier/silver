@@ -329,23 +329,14 @@ impl HashMap<K, V> {
         return -1;
     }
 
-    /// Get value for key. Aborts if key not found.
-    V get(&self, K key) {
+    /// Shared reference to the value for key. Aborts if key not found.
+    &V get_ref(&self, K key) {
         i64 idx = self.find_slot(key);
-        if (idx >= 0) {
-            return self.values[idx];
+        if (idx < 0) {
+            STDOUT.write_str("HashMap::get_ref: key not found\n");
+            abort();
         }
-        STDOUT.write_str("HashMap::get: key not found\n");
-        abort();
-    }
-
-    /// Get value for key, or None when the key is absent.
-    Optional<V> get_opt(&self, K key) {
-        i64 idx = self.find_slot(key);
-        if (idx >= 0) {
-            return Optional<V>.some(self.values[idx]);
-        }
-        return Optional<V>.none();
+        return &self.values[idx];
     }
 
     /// Get pointer to value for key. Aborts if key not found.
@@ -474,14 +465,38 @@ impl HashMap<K, V> {
         return d;
     }
 
-    /// Indexed access: map[key] — returns value for key, aborts if not found.
-    V __index_get(&self, K key) {
-        return self.get(key);
-    }
-
     /// Indexed assignment: map[key] = value — inserts or updates entry.
     void __index_set(&mut self, K key, V value) {
         self.insert(key, value);
+    }
+}
+
+/// Accessors that return copies of values. A copy of an owned value would be
+/// dropped twice, so these need a Copy value type; borrow an owned value with
+/// `get_ref` or `get_ptr`.
+impl<K, V: Copy> HashMap<K, V> {
+    /// Copy of the value for key. Aborts if key not found.
+    V get(&self, K key) {
+        i64 idx = self.find_slot(key);
+        if (idx >= 0) {
+            return self.values[idx];
+        }
+        STDOUT.write_str("HashMap::get: key not found\n");
+        abort();
+    }
+
+    /// Copy of the value for key, or None when the key is absent.
+    Optional<V> get_opt(&self, K key) {
+        i64 idx = self.find_slot(key);
+        if (idx >= 0) {
+            return Optional<V>.some(self.values[idx]);
+        }
+        return Optional<V>.none();
+    }
+
+    /// Indexed access: map[key] — copy of the value, aborts if not found.
+    V __index_get(&self, K key) {
+        return self.get(key);
     }
 }
 
@@ -603,10 +618,8 @@ struct HashMapIter<K, V> {
     i64 idx;
 }
 
-impl<K, V> HashMap<K, V> {
-    /// Borrows the map and yields live `(K, V)` entries as owned copies.
-    /// `&self` — does NOT consume the map; iterator holds raw
-    /// pointers and yields via copy (`keys[idx]`/`values[idx]`). Map stays live.
+impl<K: Copy, V: Copy> HashMap<K, V> {
+    /// Borrows the map and yields copies of live `(K, V)` entries.
     HashMapIter<K, V> iter(&self) {
         HashMapIter<K, V> it;
         it.keys = self.keys;
@@ -616,8 +629,10 @@ impl<K, V> HashMap<K, V> {
         it.idx = 0;
         return it;
     }
+}
 
-    /// Iterate over all live values, yielding owned copies.
+impl<K, V: Copy> HashMap<K, V> {
+    /// Borrows the map and yields copies of live values.
     HashMapValuesIter<K, V> values(&self) {
         HashMapValuesIter<K, V> it;
         it.values = self.values;
@@ -627,17 +642,7 @@ impl<K, V> HashMap<K, V> {
         return it;
     }
 
-    /// Iterate over all live keys, yielding owned copies.
-    HashMapKeysIter<K, V> keys(&self) {
-        HashMapKeysIter<K, V> it;
-        it.keys = self.keys;
-        it.ctrl = self.ctrl;
-        it.capacity = self.capacity;
-        it.idx = 0;
-        return it;
-    }
-
-    /// Iterate over all live values yielding owned copies (non-destructive).
+    /// Borrows the map mutably and yields copies of live values.
     HashMapIterMut<K, V> iter_mut(&mut self) {
         HashMapIterMut<K, V> it;
         it.values = self.values;
@@ -646,7 +651,21 @@ impl<K, V> HashMap<K, V> {
         it.idx = 0;
         return it;
     }
+}
 
+impl<K: Copy, V> HashMap<K, V> {
+    /// Borrows the map and yields copies of live keys.
+    HashMapKeysIter<K, V> keys(&self) {
+        HashMapKeysIter<K, V> it;
+        it.keys = self.keys;
+        it.ctrl = self.ctrl;
+        it.capacity = self.capacity;
+        it.idx = 0;
+        return it;
+    }
+}
+
+impl<K, V> HashMap<K, V> {
     /// Open an entry-handle for `key`. The handle borrows the map mutably
     /// for its lifetime; the borrow checker statically prevents any other
     /// access to the map until the handle is dropped.

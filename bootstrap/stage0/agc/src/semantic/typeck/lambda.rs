@@ -93,8 +93,11 @@ impl TypeChecker {
         }
     }
 
-    pub(super) fn lambda_copy_type(&self, ty: &Type) -> bool {
+    /// True when values of `ty` copy implicitly: no `Drop` implementation
+    /// and no owned field or payload. This is the built-in `Copy` bound.
+    pub(super) fn type_is_copy(&self, ty: &Type) -> bool {
         let mut context = TypePropertiesContext::new();
+        context.insert_module_exports(&self.imported_modules);
         context
             .drop_bases
             .extend(self.drop_owner_bases.iter().cloned());
@@ -127,7 +130,7 @@ impl TypeChecker {
             .lambdas
             .checked_types
             .get(&key(expression.span))
-            .is_some_and(|ty| self.lambda_copy_type(ty))
+            .is_some_and(|ty| self.type_is_copy(ty))
         {
             self.demand_capture(expression, CaptureMode::Shared);
             return;
@@ -221,7 +224,7 @@ impl TypeChecker {
             Type::Reference { .. } | Type::Pointer { .. } => {
                 self.demand_capture(expression, CaptureMode::Shared)
             }
-            _ if self.lambda_copy_type(parameter) => {
+            _ if self.type_is_copy(parameter) => {
                 self.demand_capture(expression, CaptureMode::Shared)
             }
             _ => self.consume_capture(expression),
@@ -255,7 +258,7 @@ impl TypeChecker {
             self.lambdas.binding_origins.insert(binding_key, binding.clone());
             binding
         };
-        let mode = if mode == CaptureMode::Owned && self.lambda_copy_type(&ty) {
+        let mode = if mode == CaptureMode::Owned && self.type_is_copy(&ty) {
             CaptureMode::Shared
         } else {
             mode

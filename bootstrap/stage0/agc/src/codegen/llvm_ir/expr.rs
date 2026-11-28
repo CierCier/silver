@@ -41,6 +41,34 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .map_err(|e| CodegenError::new(format!("failed to allocate local `{name}`: {e}")))
     }
 
+    /// An entry-block drop flag that starts false on every path. A temporary
+    /// built on only some paths, such as in the right operand of `&&`, sets it
+    /// where it is built; block-exit cleanup then reads a defined value.
+    pub(crate) fn create_entry_drop_flag(
+        &self,
+        function: FunctionValue<'ctx>,
+        name: &str,
+    ) -> CodegenResult<PointerValue<'ctx>> {
+        let bool_type = self.context.bool_type();
+        let flag = self.create_entry_alloca(function, name, bool_type.as_basic_type_enum())?;
+        let builder = self.context.create_builder();
+        match flag
+            .as_instruction_value()
+            .and_then(|alloca| alloca.get_next_instruction())
+        {
+            Some(next) => builder.position_before(&next),
+            None => builder.position_at_end(
+                flag.as_instruction_value()
+                    .and_then(|alloca| alloca.get_parent())
+                    .ok_or_else(|| CodegenError::new("drop flag has no entry block"))?,
+            ),
+        }
+        builder
+            .build_store(flag, bool_type.const_zero())
+            .map_err(|e| CodegenError::new(format!("failed to clear drop flag `{name}`: {e}")))?;
+        Ok(flag)
+    }
+
     pub(crate) fn intern_string_literal(
         &mut self,
         value: &str,
@@ -2308,6 +2336,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 ));
             };
             let field_value = self.emit_expression_value(&field_init.value)?;
+            self.transfer_owner_value(&field_init.value)?;
             let llvm_field_ty =
                 struct_ty
                     .get_field_type_at_index(index as u32)
@@ -2355,10 +2384,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
 
         let first = self.emit_expression_value(&items[0])?;
+        self.transfer_owner_value(&items[0])?;
         let element_ty = first.get_type();
         let mut values = vec![first];
         for item in &items[1..] {
             let value = self.emit_expression_value(item)?;
+            self.transfer_owner_value(item)?;
             if value.get_type() != element_ty {
                 return Err(CodegenError::with_span(
                     "array literal elements must have the same type",
@@ -2445,6 +2476,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let mut field_types = Vec::with_capacity(items.len());
         for item in items {
             let value = self.emit_expression_value(item)?;
+            self.transfer_owner_value(item)?;
             field_types.push(value.get_type());
             values.push(value);
         }
@@ -2467,6 +2499,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(aggregate.as_basic_value_enum())
     }
 
+    /// Emits one initializer element. An element taken from an owned place
+    /// moves out of it before the next element runs, matching the order in
+    /// which the move checker records the transfer.
+    fn emit_initializer_element(
+        &mut self,
+        element: &ast::Expression,
+        element_type: &ast::Type,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let value = self.emit_expression_value_for_expected(element, element_type)?;
+        self.transfer_owner_value(element)?;
+        Ok(value)
+    }
+
+    /// Builds `{ ... }` for `target_type`.
     pub(crate) fn emit_typed_initializer_value(
         &mut self,
         items: &[ast::InitializerItem],
@@ -2529,7 +2575,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             ));
                         };
                         let value =
-                            self.emit_expression_value_for_expected(value_expr, field_ty)?;
+                            self.emit_initializer_element(value_expr, field_ty)?;
                         let llvm_field_ty = struct_ty
                             .get_field_type_at_index(index as u32)
                             .ok_or_else(|| {
@@ -2580,7 +2626,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 expr.span,
                             )
                         })?;
-                        let value = self.emit_expression_value_for_expected(expr, field_ty)?;
+                        let value = self.emit_initializer_element(expr, field_ty)?;
                         let llvm_field_ty = struct_ty
                             .get_field_type_at_index(index as u32)
                             .ok_or_else(|| {
@@ -2636,7 +2682,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             *span,
                         ));
                     };
-                    let value = self.emit_expression_value_for_expected(expr, &types[index])?;
+                    let value = self.emit_initializer_element(expr, &types[index])?;
                     let value =
                         self.cast_value_to_basic_type(value, field_types[index], &expr.span)?;
                     aggregate = self
@@ -2699,7 +2745,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 unreachable!()
                             };
                             let value =
-                                self.emit_expression_value_for_expected(expr, &base_elem)?;
+                                self.emit_initializer_element(expr, &base_elem)?;
                             let value =
                                 self.cast_value_to_basic_type(value, base_llvm_ty, &expr.span)?;
                             let mut indices = vec![self.context.i32_type().const_zero()];
@@ -2744,7 +2790,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 unreachable!()
                             };
                             let value =
-                                self.emit_expression_value_for_expected(expr, &array.element_type)?;
+                                self.emit_initializer_element(expr, &array.element_type)?;
                             let value =
                                 self.cast_value_to_basic_type(value, element_llvm_ty, &expr.span)?;
                             let indices = [
@@ -2784,7 +2830,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                         index.span,
                                     ));
                                 };
-                                let elem_val = self.emit_expression_value_for_expected(
+                                let elem_val = self.emit_initializer_element(
                                     value,
                                     &array.element_type,
                                 )?;
@@ -2894,7 +2940,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             let tuple_ty = self.context.struct_type(&field_types, false);
             let mut aggregate = tuple_ty.get_undef();
             for (index, item) in items.iter().enumerate() {
-                let value = self.emit_expression_value_for_expected(item, &types[index])?;
+                let value = self.emit_initializer_element(item, &types[index])?;
                 let value = self.cast_value_to_basic_type(value, field_types[index], &item.span)?;
                 aggregate = self
                     .builder
@@ -2961,6 +3007,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ast::StatementKind::Expression(expr) => {
                 let value = self.emit_expression_value(expr)?;
                 self.clear_yielded_value_flags(expr)?;
+                // Locals and temporaries of this block drop here, except the
+                // yielded value; popping the scope alone would leak them.
+                self.emit_defers(1)?;
                 value
             }
             _ => {
@@ -2983,6 +3032,25 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(value)
     }
 
+    /// Releases one element of a yielded aggregate. A name the checker
+    /// recorded as moved there already left when the aggregate was built,
+    /// so a later element that reinitializes it keeps its new value.
+    fn clear_yielded_element(&mut self, element: &ast::Expression) -> CodegenResult<()> {
+        // A place whose move was already recorded while the aggregate was
+        // built has left its owner; a later element may have refilled it,
+        // and clearing it again would leak the replacement.
+        if matches!(
+            element.kind.as_ref(),
+            ast::ExpressionKind::Identifier(_)
+                | ast::ExpressionKind::FieldAccess { .. }
+                | ast::ExpressionKind::Index { .. }
+        ) && self.records_move(element)
+        {
+            return Ok(());
+        }
+        self.clear_yielded_value_flags(element)
+    }
+
     fn clear_yielded_value_flags(&mut self, expression: &ast::Expression) -> CodegenResult<()> {
         if let ast::ExpressionKind::Identifier(ident) = expression.kind.as_ref() {
             if let Some(flag) = self
@@ -2999,12 +3067,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 ast::ExpressionKind::Tuple(items)
                 | ast::ExpressionKind::EnumVariant { fields: items, .. } => {
                     for item in items {
-                        self.clear_yielded_value_flags(item)?;
+                        self.clear_yielded_element(item)?;
                     }
                 }
                 ast::ExpressionKind::StructLiteral { fields, .. } => {
                     for field in fields {
-                        self.clear_yielded_value_flags(&field.value)?;
+                        self.clear_yielded_element(&field.value)?;
                     }
                 }
                 ast::ExpressionKind::Initializer { items } => {
@@ -3012,7 +3080,27 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         let (ast::InitializerItem::Positional(value)
                         | ast::InitializerItem::Field { value, .. }
                         | ast::InitializerItem::Index { value, .. }) = item;
-                        self.clear_yielded_value_flags(value)?;
+                        self.clear_yielded_element(value)?;
+                    }
+                }
+                // A yielded field or element leaves its owner before the
+                // block's cleanup runs, so the owner does not drop it. A
+                // Copy value is only read: its owner stays whole and still
+                // runs its own Drop.
+                ast::ExpressionKind::FieldAccess { .. } | ast::ExpressionKind::Index { .. } => {
+                    let yielded_ty = self
+                        .lvalue_root_and_path(expression)
+                        .and_then(|(root, path)| {
+                            let var = self.lookup_variable(&root)?;
+                            self.field_type_at_path(&var.ty, &path).ok()
+                        });
+                    let owned = match yielded_ty {
+                        Some(ty) => self.type_needs_drop_glue(&ty, &mut Vec::new())?,
+                        None => true,
+                    };
+                    if owned {
+                        self.transition_owner_expr(expression, false)?;
+                        self.clear_drop_flag_of(expression)?;
                     }
                 }
                 _ => {}
@@ -3092,7 +3180,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 if phi_ty.is_int_type() && value.get_type().is_int_type() {
                     let target_ty = phi_ty.into_int_type();
                     let int_val = value.into_int_value();
-                    self.builder.position_at_end(*bb);
+                    // The arm already branched to the join; cast before it.
+                    let branch = bb.get_terminator().ok_or_else(|| {
+                        CodegenError::new("if expression arm has no branch")
+                    })?;
+                    self.builder.position_before(&branch);
                     let casted = if int_val.get_type().get_bit_width() > target_ty.get_bit_width() {
                         self.builder
                             .build_int_truncate(int_val, target_ty, "if.trunc")
@@ -3499,6 +3591,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                                 expression.kind.as_ref()
                                             {
                                                 self.clear_field_flags(&ident.name)?;
+                                            } else if let Some((root, path)) =
+                                                self.lvalue_root_and_path(expression)
+                                            {
+                                                // A field scrutinee's owner must not
+                                                // drop the zeroed payload again.
+                                                self.clear_field_flags_for_path(&root, &path)?;
                                             }
                                             let orig_data = self
                                                 .builder
@@ -3835,9 +3933,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         })?;
                         let name = format!("field.rvalue.tmp.{}", self.temp_counter);
                         self.temp_counter += 1;
-                        self.register_owner_state(
+                        if self.register_owner_state(
                             &ast::Identifier { name, span: object.span }, &ty, temp, true,
-                        )?;
+                        )? {
+                            self.rvalue_temporaries.insert(object.span.into(), temp);
+                        }
                         let state = self.owner_node_for_storage(temp);
                         (temp, ty, state, false)
                     }

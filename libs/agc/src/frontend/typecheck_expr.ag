@@ -15,6 +15,7 @@ import frontend.symbols;
 import frontend.sync_sugar;
 import frontend.messages;
 import frontend.monomorph;
+import frontend.move_flow;
 import frontend.types;
 import frontend.cfg;
 /// Nesting limit for expression type checking; deeper code reports an error.
@@ -44,11 +45,14 @@ struct LocalVar {
 /// The locals in scope during expression checking, innermost last, plus
 /// the current nesting depth. `launched_call` is the call a `launch` wraps;
 /// the launch pass judges how its reference parameters are borrowed.
+/// `cfg` is the build's active configuration for in-body `@cfg`; null means
+/// the Linux debug defaults.
 struct TypeEnv {
     Vec<LocalVar> locals;
     u32 expression_depth;
     u32 expected_return;
     u32 launched_call;
+    CfgSet* cfg;
 }
 
 impl TypeEnv {
@@ -59,6 +63,7 @@ impl TypeEnv {
         env.expression_depth = 0;
         env.expected_return = TYPE_UNKNOWN;
         env.launched_call = 0;
+        env.cfg = (CfgSet*)0;
         return move env;
     }
 
@@ -68,6 +73,7 @@ impl TypeEnv {
         TypeEnv env = TypeEnv.new();
         env.expression_depth = self.expression_depth;
         env.expected_return = self.expected_return;
+        env.cfg = self.cfg;
         i64 i = 0;
         while (i < self.locals.len()) {
             env.locals.push(self.locals.get(i));
@@ -131,15 +137,10 @@ bool type_is_numeric_or_char(u32 id) {
     return type_is_numeric(id) || id == TYPE_CHAR;
 }
 
-/// Parses a decimal literal index; returns -1 when malformed.
+/// Parses a literal index in any integer radix; returns -1 when malformed.
 i64 typecheck_literal_index(str text) {
     i64 value = 0;
-    i64 i = 0;
-    while (text[i] >= (u8)'0' && text[i] <= (u8)'9') {
-        value = value * 10 + ((i64)text[i] - 48);
-        i += 1;
-    }
-    return i > 0 && text[i] == 0 ? value : -1;
+    return items_parse_enum_tag(text, false, &value) ? value : -1;
 }
 
 /// True when `type_id` mentions an unknown type or a type parameter. The
@@ -1147,6 +1148,34 @@ SyntaxNode* typecheck_overload_by_symbol(TypeTable* types, Interner* names, Synt
     return (SyntaxNode*)0;
 }
 
+/// The declaration of the one imported Silver function `name` that takes
+/// `arity` arguments, or null. Its signature decides how each argument is
+/// passed, as for a local function.
+SyntaxNode* typecheck_imported_function(SymbolTable* symbols, str name, i64 arity) {
+    SyntaxNode* found = (SyntaxNode*)0;
+    i64 index = 0;
+    while (index < symbols.symbols.len()) {
+        Symbol* symbol = symbols.symbols.get_ptr(index);
+        index += 1;
+        if (symbol.kind != SymbolKind.Function
+            || strcmp(symbols.names.get(symbol.name_id), name) != 0) {
+            continue;
+        }
+        if (symbol.c_abi || symbol.declaration == (SyntaxNode*)0
+            || symbol.declaration.kind != NodeKind.Function) {
+            return (SyntaxNode*)0;
+        }
+        Vec<Binding> params = Vec<Binding>.new();
+        collect_parameter_bindings(binding_function_parameters(symbol.declaration), &params);
+        bool fits = binding_parameters_accept_arity(&params, arity);
+        params.drop();
+        if (!fits) { continue; }
+        if (found != (SyntaxNode*)0) { return (SyntaxNode*)0; }
+        found = symbol.declaration;
+    }
+    return found;
+}
+
 /// Resolves a free-function call to the overload whose parameters fit its
 /// arguments. Returns null when none fits or several do; sets `*overloaded`
 /// and `*ambiguous` for the caller to report.
@@ -1179,7 +1208,9 @@ SyntaxNode* typecheck_resolve_free_function(AstPool* pool, TypeTable* types,
         }
     }
     if (!typecheck_has_free_overloads(types, root, name)) {
-        return find_function_by_name_and_arity(root, name, (i64)call.aux);
+        SyntaxNode* local = find_function_by_name_and_arity(root, name, (i64)call.aux);
+        return local != (SyntaxNode*)0 ? local
+            : typecheck_imported_function(symbols, name, (i64)call.aux);
     }
     *overloaded = true;
 
@@ -1834,17 +1865,50 @@ u32 typecheck_arm_moved_binding(AstPool* pool, TypeTable* types, SyntaxNode* roo
     return arm.moves_payload ? pool.arm_bindings.get((i64)arm.bindings_start) : 0;
 }
 
-/// Reports moving a field out of a value whose type implements Drop, or a
+/// Whether an argument of `actual` type passed for a parameter of `expected`
+/// type is coerced to a view of it, which leaves the argument with its owner:
+/// a `Vec`, an array, or a value with its own `cast Slice<T>` passed as a
+/// `Slice`. The cast borrows its source; codegen does not drop it.
+bool typecheck_coerces_to_view(TypeTable* types, u32 expected, u32 actual) {
+    if (expected == TYPE_UNKNOWN || actual == TYPE_UNKNOWN) { return false; }
+    TypeEntry* view = types.get(types.resolve_subst(expected));
+    TypeEntry* source = types.get(types.resolve_subst(actual));
+    if (view.kind != TypeKind.Named || strcmp(types.names.get(view.name_id), "Slice") != 0) {
+        return false;
+    }
+    return source.kind == TypeKind.Array
+        || (source.kind == TypeKind.Named && strcmp(types.names.get(source.name_id), "Slice") != 0);
+}
+
+/// Records that `place_id` is passed by value, for the move-flow pass, and
+/// reports moving a field out of a value whose type implements Drop, or a
 /// value out of a lock block. Returns true when it reported.
 bool typecheck_reject_partial_drop_move(AstPool* pool, TypeTable* types, SymbolTable* symbols,
                                         SyntaxNode* root, TypeEnv* env, u32 place_id,
                                         DiagnosticBag* diagnostics, bool* ok) {
+    pool.consumed.set((i64)place_id);
     if (typecheck_reject_locked_move(pool, types, symbols, root, place_id, diagnostics, ok)) {
         return true;
     }
+    AstExpr* place = pool.get_expr(place_id);
+    if (place.kind == ExprKind.Ternary) {
+        // Either arm can be the value that moves.
+        bool then_reported = place.inner1 != 0
+            && typecheck_reject_partial_drop_move(pool, types, symbols, root, env, place.inner1,
+                                                  diagnostics, ok);
+        bool else_reported = place.aux != 0
+            && typecheck_reject_partial_drop_move(pool, types, symbols, root, env, place.aux,
+                                                  diagnostics, ok);
+        return then_reported || else_reported;
+    }
     Vec<u32> fields = Vec<u32>.new();
     u32 root_name = typecheck_collect_place(pool, place_id, &fields);
-    if (root_name == 0 || fields.len() == 0) {
+    if (root_name == 0) {
+        fields.drop();
+        return typecheck_reject_rvalue_drop_move(pool, types, symbols, root, place_id,
+                                                 diagnostics, ok);
+    }
+    if (fields.len() == 0) {
         fields.drop();
         return false;
     }
@@ -1930,6 +1994,64 @@ bool typecheck_reject_partial_drop_move(AstPool* pool, TypeTable* types, SymbolT
     owner_text.drop();
     fields.drop();
     return false;
+}
+
+/// Rejects moving a non-Copy field out of a temporary when the temporary's
+/// type, or a field type on the way to the moved field, implements Drop:
+/// `take(make_guard().leaf)`. That destructor still needs the whole value.
+bool typecheck_reject_rvalue_drop_move(AstPool* pool, TypeTable* types, SymbolTable* symbols,
+                                       SyntaxNode* root, u32 place_id,
+                                       DiagnosticBag* diagnostics, bool* ok) {
+    // `fields` runs from the outermost projection inward.
+    Vec<u32> fields = Vec<u32>.new();
+    AstExpr* rvalue = pool.get_expr(place_id);
+    while (rvalue.kind == ExprKind.Move && rvalue.inner0 != 0) {
+        rvalue = pool.get_expr(rvalue.inner0);
+    }
+    while (rvalue.kind == ExprKind.Field && rvalue.inner0 != 0) {
+        fields.push(rvalue.aux);
+        rvalue = pool.get_expr(rvalue.inner0);
+    }
+    u32 moved_type = rvalue.inferred_type;
+    i64 i = fields.len() - 1;
+    while (i >= 0 && moved_type != TYPE_UNKNOWN) {
+        TypeEntry* entry = types.get(types.resolve_subst(moved_type));
+        if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) {
+            moved_type = TYPE_UNKNOWN;
+        } else {
+            moved_type = typecheck_struct_field_type(types, root, moved_type,
+                                                     symbols.names.get(fields.get(i)));
+        }
+        i -= 1;
+    }
+    bool rejected = false;
+    if (fields.len() > 0 && moved_type != TYPE_UNKNOWN
+        && !typecheck_type_is_copy(root, types, moved_type)) {
+        String place_text = String.new();
+        i = fields.len() - 1;
+        while (i >= 0) {
+            if (place_text.len() > 0) { place_text.push('.'); }
+            place_text.push_str(symbols.names.get(fields.get(i)));
+            i -= 1;
+        }
+        u32 owner_type = rvalue.inferred_type;
+        i = fields.len() - 1;
+        while (i >= 0 && !rejected) {
+            if (typecheck_type_has_drop_impl(root, types, owner_type)) {
+                String message = cannot_move_field_out_of_drop_type(place_text.to_str(),
+                                                                    types.type_name(owner_type));
+                diagnostics.error(pool.get_expr(place_id).span, move message);
+                *ok = false;
+                rejected = true;
+            }
+            owner_type = typecheck_struct_field_type(types, root, owner_type,
+                                                     symbols.names.get(fields.get(i)));
+            i -= 1;
+        }
+        place_text.drop();
+    }
+    fields.drop();
+    return rejected;
 }
 
 /// True when `owner.method(...)` constructs a variant of enum `owner`,
@@ -2526,6 +2648,24 @@ void typecheck_method_call_target(AstPool* pool, TypeTable* types, SyntaxNode* r
                                        args_start, true, &ret_start, &name)
                 != (SyntaxNode*)0);
     types.pop_subst(1);
+    // A method of a bounded implementation, such as `get` in
+    // `impl<T: Copy> Vec<T>`, exists only where the bounds hold.
+    SyntaxNode* declaring = name == (SyntaxNode*)0 || name.parent == (SyntaxNode*)0
+        ? (SyntaxNode*)0 : name.parent.parent;
+    if (selected && declaring != (SyntaxNode*)0 && declaring.kind == NodeKind.Impl) {
+        declaring = typecheck_receiver_impl(root, types, receiver_type, owner_name,
+                                            name, declaring);
+        String failure = String.new();
+        mono_owner_bound_failure(root, types, declaring, owner_type, &failure);
+        bool bounds_hold = failure.len() == 0;
+        if (!bounds_hold) {
+            diagnostics.error(span, method_bound_not_met(method_name,
+                types.type_name(owner_type), failure.to_str()));
+            *ok = false;
+        }
+        failure.drop();
+        if (!bounds_hold) { return; }
+    }
     // Overload selection does not infer a method's own type parameters. A
     // generic declaration whose arity fits is matched by monomorphization,
     // which reports its own failure where the call's type is inferred.
@@ -2546,6 +2686,68 @@ void typecheck_method_call_target(AstPool* pool, TypeTable* types, SyntaxNode* r
                                                          types.type_name(owner_type)));
         *ok = false;
     }
+}
+
+/// Returns the parameter count of the method declared at `name`, or -1.
+i64 typecheck_declared_arity(SyntaxNode* name) {
+    SyntaxNode* parameters = name.next_sibling;
+    while (parameters != (SyntaxNode*)0 && parameters.kind != NodeKind.Parenthesized) {
+        parameters = parameters.next_sibling;
+    }
+    if (parameters == (SyntaxNode*)0) { return -1; }
+    Vec<Binding> bindings = Vec<Binding>.new();
+    collect_parameter_bindings(parameters, &bindings);
+    i64 arity = bindings.len();
+    bindings.drop();
+    return arity;
+}
+
+/// Returns true when impl `item` declares a method named like `selected`
+/// with the same parameter count.
+bool typecheck_impl_declares_overload(SyntaxNode* item, SyntaxNode* selected) {
+    SyntaxNode* block = item.first_child;
+    while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+        block = block.next_sibling;
+    }
+    i64 arity = typecheck_declared_arity(selected);
+    SyntaxNode* member = block == (SyntaxNode*)0 ? (SyntaxNode*)0 : block.first_child;
+    while (member != (SyntaxNode*)0) {
+        if (member.kind == NodeKind.Token && member.token_kind == TokenKind.Identifier
+            && strcmp(member.text, selected.text) == 0
+            && typecheck_declared_arity(member) == arity) {
+            return true;
+        }
+        member = member.next_sibling;
+    }
+    return false;
+}
+
+/// The implementation that declares the overload at `selected_name` for a
+/// receiver as indirect as `receiver_type`: `(&v).into_iter()` uses
+/// `impl ... for Vec<T>*`, not the by-value impl. An impl whose method of
+/// that name takes other parameters does not apply. Falls back to `selected`.
+SyntaxNode* typecheck_receiver_impl(SyntaxNode* root, TypeTable* types, u32 receiver_type,
+                                    str owner_name, SyntaxNode* selected_name,
+                                    SyntaxNode* selected) {
+    u32 depth = 0;
+    TypeEntry* entry = types.get(types.resolve_subst(receiver_type));
+    while (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) {
+        depth += 1;
+        entry = types.get(types.resolve_subst(entry.inner));
+    }
+    if (impl_target_pointer_depth(selected) == depth) { return selected; }
+    SyntaxNode* item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Impl && impl_target_pointer_depth(item) == depth) {
+            SyntaxNode* target = impl_target_identifier(item);
+            if (target != (SyntaxNode*)0 && strcmp(target.text, owner_name) == 0
+                && typecheck_impl_declares_overload(item, selected_name)) {
+                return item;
+            }
+        }
+        item = item.next_sibling;
+    }
+    return selected;
 }
 
 /// Returns the type parameter `type_args` binds for a callee parameter
@@ -2763,14 +2965,18 @@ String typecheck_method_symbol_for_call(AstPool* pool, SyntaxNode* root,
                                    best_ret_start, best_name, best_params);
 }
 
-/// Returns true when the overload a call selects takes parameter
-/// `parameter_index` (0 is `self` for an instance call) by value. A method
-/// with no local declaration that fits keeps the arity-based answer.
-bool typecheck_selected_parameter_is_value(AstPool* pool, SyntaxNode* root, TypeTable* types,
-                                           u32 receiver_type, str method_name,
-                                           i64 param_count, u32 args_start,
-                                           bool static_method, i64 parameter_index,
-                                           u32 arg_type) {
+/// How a call passes one argument: by value, through a shared borrow, or
+/// through a raw pointer or `&mut` borrow that may initialize its target.
+enum ParameterMode { Value; Shared; Mutable; }
+
+/// The mode in which the overload a call selects takes parameter
+/// `parameter_index` (0 is `self` for an instance call). A method with no
+/// local declaration that fits keeps the arity-based by-value answer.
+ParameterMode typecheck_selected_parameter_mode(AstPool* pool, SyntaxNode* root, TypeTable* types,
+                                                u32 receiver_type, str method_name,
+                                                i64 param_count, u32 args_start,
+                                                bool static_method, i64 parameter_index,
+                                                u32 arg_type) {
     u32 resolved_receiver = types.resolve_subst(receiver_type);
     TypeEntry* receiver = types.get(resolved_receiver);
     while (receiver.kind == TypeKind.Pointer || receiver.kind == TypeKind.Reference) {
@@ -2786,8 +2992,15 @@ bool typecheck_selected_parameter_is_value(AstPool* pool, SyntaxNode* root, Type
             &ret_start, &name);
     }
     if (params_node == (SyntaxNode*)0) {
-        return typecheck_method_parameter_is_value(root, types, receiver_type, method_name,
-                                                   param_count, parameter_index, arg_type);
+        if (typecheck_method_parameter_is_value(root, types, receiver_type, method_name,
+                                                param_count, parameter_index, arg_type)) {
+            return ParameterMode.Value;
+        }
+        // A method known only from an imported artifact keeps its recorded mode.
+        return receiver.kind == TypeKind.Named
+            && types.method_param_is_mutable(types.names.get(receiver.name_id), method_name,
+                                             param_count, parameter_index, arg_type)
+            ? ParameterMode.Mutable : ParameterMode.Shared;
     }
     Vec<Binding> params = Vec<Binding>.new();
     collect_parameter_bindings(params_node, &params);
@@ -2797,14 +3010,18 @@ bool typecheck_selected_parameter_is_value(AstPool* pool, SyntaxNode* root, Type
         && binding_is_variadic_parameter(params.get_ptr(params.len() - 1))) {
         index = params.len() - 1;
     }
-    bool value_parameter = false;
+    ParameterMode mode = ParameterMode.Shared;
     if (index >= 0 && index < params.len()) {
-        Binding* parameter = params.get_ptr(index);
-        value_parameter = parameter.declared_type.kind != ProjectionTypeKind.Pointer
-            && parameter.declared_type.kind != ProjectionTypeKind.Reference;
+        TypeProjection* declared = &params.get_ptr(index).declared_type;
+        if (declared.kind == ProjectionTypeKind.Pointer
+            || (declared.kind == ProjectionTypeKind.Reference && declared.is_mutable)) {
+            mode = ParameterMode.Mutable;
+        } else if (declared.kind != ProjectionTypeKind.Reference) {
+            mode = ParameterMode.Value;
+        }
     }
     params.drop();
-    return value_parameter;
+    return mode;
 }
 
 /// Returns the return type of the method a call resolves to.
@@ -3682,6 +3899,11 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                             }
                             payload_text.drop();
                             arm_env.insert(binding_name, payload_type);
+                            i64 slot = (i64)arm.bindings_start + binding_index;
+                            while (pool.arm_binding_types.len() <= slot) {
+                                pool.arm_binding_types.push(TYPE_UNKNOWN);
+                            }
+                            pool.arm_binding_types.set(slot, payload_type);
                             binding_index += 1;
                         }
                         bool seen_tag = false;
@@ -3797,6 +4019,11 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
             && find_function_by_name(root, symbols.names.get(callee.aux)) != (SyntaxNode*)0;
         if (callable_kind == TypeKind.Function && !named_function) {
             u32 arg_count = expr.aux;
+            // A C function's type does not record whether it is variadic.
+            if (!direct_c_call && (i64)arg_count != callable_count) {
+                diagnostics.error(expr.span, argument_count_mismatch(callable_count, (i64)arg_count));
+                *ok = false;
+            }
             i64 i = 0;
             while (i < (i64)arg_count && i < callable_count) {
                 u32 parameter_type = types.type_args.get(callable_inner + 1 + (u32)i);
@@ -3808,17 +4035,20 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                     actual_type, parameter_type, diagnostics, ok);
                 typecheck_char_pointer_argument(types, parameter_type, actual_type,
                     pool.get_expr(arg_id).span, diagnostics, ok);
+                if (parameter_kind == TypeKind.Pointer) { pool.mutable_borrows.set((i64)arg_id); }
                 if (parameter_kind != TypeKind.Pointer
                     && parameter_kind != TypeKind.Reference
-                    && pool.get_expr(arg_id).kind != ExprKind.Move) {
+                    && pool.get_expr(arg_id).kind != ExprKind.Move
+                    && !typecheck_coerces_to_view(types, parameter_type, actual_type)) {
                     typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
                                                        arg_id, diagnostics, ok);
                 }
                 // Types still naming a generic parameter are checked at
                 // instantiation, by typecheck_generic_call_drop_ownership;
                 // stage1 spells the item's own type parameters as plain
-                // named types.
-                if (!typecheck_type_is_unresolved(types, parameter_type, 0)
+                // named types. A C function's arguments convert.
+                if (!direct_c_call
+                    && !typecheck_type_is_unresolved(types, parameter_type, 0)
                     && !typecheck_type_is_unresolved(types, actual_type, 0)
                     && !mono_mentions_type_param(types, parameter_type,
                                                  &types.scope_type_params, 0)
@@ -3843,15 +4073,6 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                     *ok = false;
                 }
                 i += 1;
-            }
-            if ((i64)arg_count != callable_count) {
-                String message = String.from_str("argument count mismatch: expected ");
-                message.push_display(&callable_count);
-                message.push_str(", found ");
-                i64 actual_count = (i64)arg_count;
-                message.push_display(&actual_count);
-                diagnostics.error(expr.span, move message);
-                *ok = false;
             }
             inferred = types.type_args.get(callable_inner);
         }
@@ -3959,9 +4180,13 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                             pool.get_expr(arg_expr_id).span, diagnostics, ok);
                         TypeEntry* expected_entry = types.get(expected_arg_type);
                         TypeEntry* actual_entry = types.get(types.resolve_subst(actual_arg_type));
+                        if (expected_entry.kind == TypeKind.Pointer) {
+                            pool.mutable_borrows.set((i64)arg_expr_id);
+                        }
                         if (expected_entry.kind != TypeKind.Pointer
                             && expected_entry.kind != TypeKind.Reference
-                            && pool.get_expr(arg_expr_id).kind != ExprKind.Move) {
+                            && pool.get_expr(arg_expr_id).kind != ExprKind.Move
+                            && !typecheck_coerces_to_view(types, expected_arg_type, actual_arg_type)) {
                             typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
                                                                arg_expr_id, diagnostics, ok);
                         }
@@ -4200,12 +4425,16 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         }
         // The argument types select the overload, and with it whether the
         // call takes `self` by value.
-        if (!static_method && (strcmp(method_name, "drop") == 0
-             || typecheck_selected_parameter_is_value(pool, root, types, receiver_type,
-                    method_name, total_param_count, expr.inner1, false, 0, receiver_type))
-            && receiver.kind != ExprKind.Move) {
-            typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
-                                               expr.inner0, diagnostics, ok);
+        if (!static_method) {
+            ParameterMode receiver_mode = strcmp(method_name, "drop") == 0 ? ParameterMode.Value
+                : typecheck_selected_parameter_mode(pool, root, types, receiver_type,
+                    method_name, total_param_count, expr.inner1, false, 0, receiver_type);
+            if (receiver_mode == ParameterMode.Value && receiver.kind != ExprKind.Move) {
+                typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
+                                                   expr.inner0, diagnostics, ok);
+            } else if (receiver_mode == ParameterMode.Mutable) {
+                pool.mutable_borrows.set((i64)expr.inner0);
+            }
         }
         if (has_arguments) {
             i64 arg_index = 0;
@@ -4248,14 +4477,27 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                         arg_type = argument.inferred_type;
                     }
                 }
+                ParameterMode arg_mode = variant_constructor ? ParameterMode.Value
+                    : typecheck_selected_parameter_mode(pool, root, types, receiver_type,
+                          method_name, total_param_count, expr.inner1, static_method,
+                          parameter_index, arg_type);
+                AstExpr* payload = pool.get_expr(arg_id);
+                u32 payload_type = types.resolve_subst(payload.inferred_type);
+                // A named owner placed in a variant must say `move`; temporaries need not.
                 if (variant_constructor
-                    || typecheck_selected_parameter_is_value(pool, root, types, receiver_type,
-                           method_name, total_param_count, expr.inner1, static_method,
-                           parameter_index, arg_type)) {
-                    if (pool.get_expr(arg_id).kind != ExprKind.Move) {
-                        typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
-                                                           arg_id, diagnostics, ok);
-                    }
+                    && (payload.kind == ExprKind.Var || payload.kind == ExprKind.Field)
+                    && types.get(payload_type).kind == TypeKind.Named
+                    && !typecheck_type_is_copy(root, types, payload_type)) {
+                    diagnostics.error(payload.span,
+                        payload_must_be_moved(types.type_name(payload_type)));
+                    *ok = false;
+                }
+                if (arg_mode == ParameterMode.Value && pool.get_expr(arg_id).kind != ExprKind.Move
+                    && !typecheck_coerces_to_view(types, expected_arg_type, arg_type)) {
+                    typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
+                                                       arg_id, diagnostics, ok);
+                } else if (arg_mode == ParameterMode.Mutable) {
+                    pool.mutable_borrows.set((i64)arg_id);
                 }
                 arg_index += 1;
             }
@@ -4408,14 +4650,14 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 }
             } else if (entry.kind == TypeKind.Str) {
                 inferred = TYPE_U8;
-            } else if (entry.kind == TypeKind.Named && entry.count > 0) {
-                str base = types.names.get(entry.name_id);
-                if (strcmp(base, "Vec") == 0 || strcmp(base, "Slice") == 0) {
-                    inferred = types.resolve_subst(types.type_args.get(entry.inner));
-                }
             } else if (entry.kind == TypeKind.Named) {
-                inferred = typecheck_method_return_type(root, types, target_type,
-                                                        "__index_get", 2);
+                str base = types.names.get(entry.name_id);
+                if (entry.count > 0 && (strcmp(base, "Vec") == 0 || strcmp(base, "Slice") == 0)) {
+                    inferred = types.resolve_subst(types.type_args.get(entry.inner));
+                } else {
+                    inferred = typecheck_method_return_type(root, types, target_type,
+                                                            "__index_get", 2);
+                }
             }
         }
     } else if (expr.kind == ExprKind.Slice) {
@@ -4918,6 +5160,11 @@ bool typecheck_str_contains(str message, str marker) {
     return false;
 }
 
+/// Returns true for a method whose impl bound the concrete receiver misses.
+bool typecheck_is_method_bound_error(str message) {
+    return message[0] == '\'' && typecheck_str_contains(message, "' is not available on '");
+}
+
 /// Returns true for a shared_value_outside_lock or lock_needs_shared
 /// message: a generic body that uses its `T` directly is wrong once `T` is
 /// a `shared` Mutex, and one that locks its `T` is wrong unless it is.
@@ -5012,6 +5259,7 @@ void typecheck_generic_call_drop_ownership(
 
     TypeEnv callee_env = TypeEnv.new();
     callee_env.expression_depth = caller_env.expression_depth;
+    callee_env.cfg = caller_env.cfg;
     u32 expected_return = function_return_type_id(types, function);
     callee_env.expected_return = expected_return;
     bool concrete_args = true;
@@ -5078,6 +5326,7 @@ void typecheck_generic_call_drop_ownership(
     AstPool probe_pool = AstPool.new();
     ExprLowerer lowerer = ExprLowerer.new(&probe_pool, types, &symbols.names);
     lowerer.unit_root = root;
+    lowerer.cfg = caller_env.cfg;
     Vec<u32> stmt_ids = Vec<u32>.new();
     lowerer.lower_block(body, &stmt_ids);
     if (lowerer.unsupported) {
@@ -5138,6 +5387,7 @@ void typecheck_generic_call_drop_ownership(
             && (typecheck_is_drop_ancestor_error(diagnostic.message.to_str())
                 || typecheck_is_shared_value_error(diagnostic.message.to_str())
                 || typecheck_str_contains(diagnostic.message.to_str(), "' out of its lock block: ")
+                || typecheck_is_method_bound_error(diagnostic.message.to_str())
                 || typecheck_str_starts_with(diagnostic.message.to_str(), "pointer argument type mismatch:")
                 || typecheck_str_contains(diagnostic.message.to_str(),
                                           " once type parameters are known: "))
@@ -5153,7 +5403,7 @@ void typecheck_generic_call_drop_ownership(
 /// Type-checks every statement of a function body. Sets `*unsupported_out`
 /// (when non-null) if the body cannot be lowered.
 void typecheck_function_statements_scoped(AstPool* pool, TypeTable* types, SymbolTable* symbols,
-                                          SyntaxNode* root, SyntaxNode* function,
+                                          SyntaxNode* root, SyntaxNode* function, CfgSet* cfg,
                                           DiagnosticBag* diagnostics, bool* ok, bool* unsupported_out) {
     SyntaxNode* body = find_function_body(function);
     if (body == (SyntaxNode*)0) { return; }
@@ -5163,7 +5413,7 @@ void typecheck_function_statements_scoped(AstPool* pool, TypeTable* types, Symbo
         mono_collect_generic_parameters(name.next_sibling, types, &types.scope_type_params);
     }
     typecheck_body(pool, types, symbols, root, binding_function_parameters(function), body,
-                   function_return_type_id(types, function), TYPE_UNKNOWN, diagnostics, ok,
+                   function_return_type_id(types, function), TYPE_UNKNOWN, cfg, diagnostics, ok,
                    unsupported_out);
     types.scope_type_params.clear();
 }
@@ -5171,13 +5421,15 @@ void typecheck_function_statements_scoped(AstPool* pool, TypeTable* types, Symbo
 /// Type-checks the statements of `body` with `parameters` in scope. A
 /// receiver written without a type (`*self`, `&self`, `self`) has
 /// `self_type`. Sets `*unsupported_out` (when non-null) if the body cannot
-/// be lowered.
+/// be lowered. In-body `@cfg` conditions use `cfg`, the build's active
+/// configuration.
 void typecheck_body(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode* root,
                     SyntaxNode* parameters, SyntaxNode* body, u32 expected_return,
-                    u32 self_type, DiagnosticBag* diagnostics, bool* ok,
+                    u32 self_type, CfgSet* cfg, DiagnosticBag* diagnostics, bool* ok,
                     bool* unsupported_out) {
     TypeEnv env = TypeEnv.new();
     env.expected_return = expected_return;
+    env.cfg = cfg;
     Vec<Binding> params = Vec<Binding>.new();
     collect_parameter_bindings(parameters, &params);
     i64 p = 0;
@@ -5201,6 +5453,7 @@ void typecheck_body(AstPool* pool, TypeTable* types, SymbolTable* symbols, Synta
 
     ExprLowerer lowerer = ExprLowerer.new(pool, types, &symbols.names);
     lowerer.unit_root = root;
+    lowerer.cfg = cfg;
     Vec<u32> stmt_ids = Vec<u32>.new();
     lowerer.lower_block(body, &stmt_ids);
     if (lowerer.unsupported) {
@@ -5214,12 +5467,28 @@ void typecheck_body(AstPool* pool, TypeTable* types, SymbolTable* symbols, Synta
         stmt_ids.drop();
         return;
     }
+    // Parameters are the outermost locals; capture them before statements add more.
+    Vec<LocalVar> parameter_locals = Vec<LocalVar>.new();
+    i64 local_index = 0;
+    while (local_index < env.locals.len()) {
+        parameter_locals.push(env.locals.get(local_index));
+        local_index += 1;
+    }
+    bool body_ok = true;
     i64 s = 0;
     while (s < stmt_ids.len()) {
         typecheck_statement(pool, types, symbols, root, &env, expected_return, stmt_ids.get(s),
-                            diagnostics, ok);
+                            diagnostics, &body_ok);
         s += 1;
     }
+    // Move flow needs settled types; a body with type errors would only echo them.
+    if (!body_ok) {
+        *ok = false;
+    } else if (!move_flow_check(pool, types, symbols, root, &parameter_locals, &stmt_ids,
+                                diagnostics)) {
+        *ok = false;
+    }
+    parameter_locals.drop();
     stmt_ids.drop();
 }
 
@@ -5338,7 +5607,7 @@ void typecheck_impl_methods(AstPool* pool, SymbolTable* symbols, SyntaxNode* roo
                                                     &types.scope_type_params);
                 }
                 typecheck_body(pool, types, symbols, root, cursor, next, expected_return,
-                               owner, diagnostics, &function_ok, &unsupported);
+                               owner, cfg, diagnostics, &function_ok, &unsupported);
                 types.scope_type_params.clear();
                 if (unsupported && function_ok) {
                     diagnostics.error(name.span, unchecked_function_body(name.text));
@@ -5857,7 +6126,7 @@ bool typecheck_expressions_scoped(AstPool* pool, SymbolTable* symbols, SyntaxTre
                 bool function_ok = true;
                 bool unsupported = false;
                 typecheck_function_statements_scoped(pool, &symbols.types, symbols, tree.root,
-                                                     item, diagnostics, &function_ok,
+                                                     item, cfg, diagnostics, &function_ok,
                                                      &unsupported);
                 // A body the checker cannot lower is a limitation, not an
                 // accepted body. A macro error already explains it.

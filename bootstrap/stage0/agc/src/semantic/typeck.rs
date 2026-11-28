@@ -220,6 +220,11 @@ pub struct TypeChecker {
     /// Whether the overload selected at each instance method call takes its
     /// receiver by value.
     consuming_method_calls: HashMap<MethodCallKey, bool>,
+    /// The container and element type of each index through `__index_get`,
+    /// keyed by the index expression's span. An impl's `Item` need not be its
+    /// type argument; a monomorph shares its generic body's span, so the move
+    /// checker maps the recorded container onto the one it sees.
+    indexed_elements: HashMap<CallSiteKey, (ast::Type, ast::Type)>,
     /// Resolved iterator types for ForIn expressions, populated during typeck.
     /// Maps (expr start, expr end) → AST type of the IntoIter associated type.
     /// Used to populate the ForIn AST node after typeck for codegen.
@@ -354,6 +359,13 @@ impl TypeChecker {
     pub fn new() -> Self {
         Self::default()
     }
+    /// Records the element type `container[i]` resolves to through
+    /// `__index_get`, with the container type it was resolved for.
+    fn record_indexed_element(&mut self, span: Span, container: &Type, element: &Type) {
+        let key = (span.file, span.start, span.end, span.expansion);
+        self.indexed_elements.entry(key).or_insert_with(|| (container.to_ast(), element.to_ast()));
+    }
+
     fn type_from_ast(&mut self, source: &ast::Type) -> Type {
         let mut normalized = source.clone();
         let defaults = self
@@ -398,7 +410,11 @@ impl TypeChecker {
             });
         }
         table.record_program_symbols(program, CompilerPhase::TypeCheck);
-        for trait_error in validate_traits_with_imports(program, &self.imported_traits) {
+        for trait_error in validate_traits_with_imports(
+            program,
+            &self.imported_traits,
+            &self.imported_modules,
+        ) {
             self.errors.push(TypeError {
                 message: trait_error.message,
                 span: trait_error.span,
@@ -531,6 +547,10 @@ impl TypeChecker {
 
     pub fn consuming_method_calls(&self) -> &HashMap<MethodCallKey, bool> {
         &self.consuming_method_calls
+    }
+
+    pub fn indexed_elements(&self) -> &HashMap<CallSiteKey, (ast::Type, ast::Type)> {
+        &self.indexed_elements
     }
 
     fn ingest_module(&mut self, module: &ModuleArtifact) {
@@ -1282,7 +1302,7 @@ impl TypeChecker {
 
                     if let Some(init) = &let_stmt.initializer {
                         let init_type = self.check_expr(init, Some(&declared));
-                        if !self.lambdas.frames.is_empty() && !self.lambda_copy_type(&init_type) {
+                        if !self.lambdas.frames.is_empty() && !self.type_is_copy(&init_type) {
                             self.consume_capture(init);
                         }
                         if !self.is_assignable(&declared, &init_type)
@@ -1299,7 +1319,7 @@ impl TypeChecker {
                         return;
                     };
                     let inferred = self.check_expr(init, None);
-                    if !self.lambdas.frames.is_empty() && !self.lambda_copy_type(&inferred) {
+                    if !self.lambdas.frames.is_empty() && !self.type_is_copy(&inferred) {
                         self.consume_capture(init);
                     }
                     if Self::is_void_like(&inferred) {
@@ -1324,7 +1344,7 @@ impl TypeChecker {
                     let expected = self.current_return.clone();
                     let found = value.as_ref().map(|value| {
                         let found = self.check_expr(value, expected.as_ref());
-                        if !self.lambda_copy_type(&found) {
+                        if !self.type_is_copy(&found) {
                             self.consume_capture(value);
                         }
                         found
@@ -1903,7 +1923,7 @@ impl TypeChecker {
                 ast::BinaryOperator::Assign => {
                     let left_ty = self.check_expr(left, None);
                     let right_ty = self.check_expr(right, None);
-                    if !self.lambdas.frames.is_empty() && !self.lambda_copy_type(&right_ty) {
+                    if !self.lambdas.frames.is_empty() && !self.type_is_copy(&right_ty) {
                         self.consume_capture(right);
                     }
                     if is_mutex_type(&left_ty) && !is_mutex_type(&right_ty) && right_ty != Type::Unknown {
@@ -2948,6 +2968,7 @@ impl TypeChecker {
                                 None,
                                 object.span,
                             ) {
+                                self.record_indexed_element(expr.span, &object_ty, &result_ty);
                                 result_ty
                             } else {
                                 self.error(
@@ -3019,6 +3040,7 @@ impl TypeChecker {
                             None,
                             object.span,
                         ) {
+                            self.record_indexed_element(expr.span, &object_ty, &result_ty);
                             result_ty
                         } else {
                             self.error(
@@ -4024,6 +4046,7 @@ impl TypeChecker {
         };
 
         let mut matches: Vec<(usize, Type, HashMap<String, Type>, FunctionSig)> = Vec::new();
+        let mut unmet_bounds = None;
 
         for candidate_id in &candidate_ids {
             let Some(candidate) = self.function_symbols.get(candidate_id).cloned() else {
@@ -4224,7 +4247,8 @@ impl TypeChecker {
             }
 
             if ok {
-                if !self.bounds_satisfied(&candidate.bounds, &mapping, span) {
+                if !self.bounds_hold_quietly(&candidate.bounds, &mapping, span) {
+                    unmet_bounds.get_or_insert_with(|| (candidate.bounds.clone(), mapping.clone()));
                     continue;
                 }
                 let return_type = self.substitute_type(&candidate.return_type, &mapping);
@@ -4232,6 +4256,12 @@ impl TypeChecker {
             }
         }
 
+        if matches.is_empty()
+            && let Some((bounds, mapping)) = unmet_bounds
+        {
+            self.bounds_satisfied(&bounds, &mapping, span);
+            return (Type::Unknown, arg_types);
+        }
         if matches.is_empty() {
             let arg_desc: String = if arg_types.len() == 1 {
                 format!("{}", arg_types[0])
@@ -4427,6 +4457,7 @@ impl TypeChecker {
         let candidate_ids = self.methods.get(&key).cloned()?;
 
         let mut matches: Vec<(usize, Type, HashMap<String, Type>, MethodSig)> = Vec::new();
+        let mut unmet_bounds = None;
         let owner_ty = Self::method_owner_type(receiver_ty);
 
         for candidate_id in candidate_ids {
@@ -4792,8 +4823,8 @@ impl TypeChecker {
             }
 
             if ok {
-                let sat = self.bounds_satisfied(&candidate.bounds, &mapping, span);
-                if !sat {
+                if !self.bounds_hold_quietly(&candidate.bounds, &mapping, span) {
+                    unmet_bounds.get_or_insert_with(|| (candidate.bounds.clone(), mapping.clone()));
                     continue;
                 }
                 let return_type = self.substitute_type(&candidate.return_type, &mapping);
@@ -4802,6 +4833,9 @@ impl TypeChecker {
         }
 
         if matches.is_empty() {
+            if let Some((bounds, mapping)) = unmet_bounds {
+                self.bounds_satisfied(&bounds, &mapping, span);
+            }
             return None;
         }
 
@@ -5330,6 +5364,20 @@ impl TypeChecker {
         bounds
     }
 
+    /// Whether `bounds` hold, reporting nothing. An overload whose bounds
+    /// fail is skipped; its failure is reported only when no overload fits.
+    fn bounds_hold_quietly(
+        &mut self,
+        bounds: &[TypeBoundPredicate],
+        mapping: &HashMap<String, Type>,
+        span: Span,
+    ) -> bool {
+        let reported = self.errors.len();
+        let holds = self.bounds_satisfied(bounds, mapping, span);
+        self.errors.truncate(reported);
+        holds
+    }
+
     fn bounds_satisfied(
         &mut self,
         bounds: &[TypeBoundPredicate],
@@ -5361,7 +5409,10 @@ impl TypeChecker {
                     .map(|arg| Type::from_ast(arg).substitute(mapping))
                     .collect::<Vec<_>>();
                 let has_impl = self.has_trait_impl(&trait_name, &bounded, &args, 0);
-                if !has_impl {
+                if !has_impl && trait_name == crate::traits::BUILTIN_COPY && args.is_empty() {
+                    self.error(msg::bound_requires_copy(&bounded), span);
+                    ok = false;
+                } else if !has_impl {
                     self.error(
                         format!("missing impl for bound '{}' on {:?}", trait_name, bounded),
                         span,
@@ -6224,6 +6275,9 @@ impl TypeChecker {
     fn has_trait_impl(&self, trait_name: &str, ty: &Type, args: &[Type], depth: usize) -> bool {
         if depth >= MAX_TYPE_CHECK_DEPTH {
             return false;
+        }
+        if trait_name == crate::traits::BUILTIN_COPY && args.is_empty() {
+            return self.type_is_copy(ty);
         }
         self.source_trait_impls
             .get(trait_name)
@@ -9363,7 +9417,32 @@ mod tests {
     use super::{TypeChecker, msg};
     use crate::{lexer, parser::Parser, symbol_table::CompilerSymbolTable};
 
-    fn type_errors(source: &str) -> Vec<String> {
+    /// `Tok` has a destructor, so it is not Copy. Stage0 converts between
+    /// `bool` and `i64` arguments, so `read` and `pick` fit both overloads
+    /// and `look` and `keep` fit only the bounded one.
+    const OVERLOADS: &str = "trait Drop { void drop(*self); }\n\
+         struct Tok { i64 n; }\n\
+         impl Drop for Tok { void drop(*self) {} }\n\
+         trait Peek { i64 read(self, i64 i); i64 look(self, i64 i); }\n\
+         struct Cell<T> { T value; i64 tag; }\n\
+         impl<T> Cell<T> {\n\
+             i64 read(&self, bool more) { return self.tag; }\n\
+             i64 look(&self, &Tok other) { return self.tag; }\n\
+         }\n\
+         impl<T: Copy> Peek for Cell<T>* {\n\
+             i64 read(self, i64 i) { return i; }\n\
+             i64 look(self, i64 i) { return i; }\n\
+         }\n\
+         i64 pick<T: Copy>(T value, i64 i) { return i; }\n\
+         i64 pick(Tok value, bool more) { return 0; }\n\
+         i64 keep<T: Copy>(T value, i64 i) { return i; }\n\
+         i64 keep(Tok value, &Tok other) { return 0; }\n";
+
+    fn type_errors(body: &str) -> Vec<String> {
+        type_errors_in(&format!("{OVERLOADS}i32 main() {{\nCell<Tok> c;\nTok t;\n{body}\nreturn 0;\n}}\n"))
+    }
+
+    fn type_errors_in(source: &str) -> Vec<String> {
         let tokens = lexer::lex(source).expect("probe should lex");
         let (mut program, errors) = Parser::new(tokens).parse_program();
         assert!(errors.is_empty(), "probe should parse: {errors:?}");
@@ -9371,6 +9450,60 @@ mod tests {
         let (errors, _) =
             TypeChecker::new().check_program_with_table(&program, &mut CompilerSymbolTable::new());
         errors.into_iter().map(|error| error.message).collect()
+    }
+
+    /// An overload whose bound fails is skipped for one that fits; the bound
+    /// is reported only when no overload fits.
+    #[test]
+    fn an_unmet_bound_skips_an_overload_without_reporting_it() {
+        for accepted in ["(&c).read(true);", "pick(t, true);"] {
+            let errors = type_errors(accepted);
+            assert!(errors.is_empty(), "{accepted} {errors:?}");
+        }
+        let copy = crate::diagnostics::messages::bound_requires_copy(&"Tok");
+        for rejected in ["(&c).look(5);", "keep(t, 5);"] {
+            let errors = type_errors(rejected);
+            assert!(errors.iter().any(|message| message.contains(&copy)), "{rejected} {errors:?}");
+        }
+    }
+
+    /// A named variant field of a precompiled enum owns its value, and a task
+    /// handle is never Copy, whatever its payload.
+    #[test]
+    fn a_copy_bound_rejects_imported_named_variants_and_tasks() {
+        let dir = std::env::temp_dir().join(format!("agc-enum-import-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("msgs.ag");
+        std::fs::write(
+            &path,
+            "trait Drop { void drop(*self); }\n\
+             struct Text { u8* bytes; }\n\
+             impl Drop for Text { void drop(*self) {} }\n\
+             enum Msg { Note { Text body; }; Empty; }\n\
+             enum Mode { On; Off; }\n",
+        )
+        .expect("write module");
+        let module = crate::module_artifact::ModuleArtifact::from_source(&path).expect("module");
+        std::fs::remove_dir_all(&dir).ok();
+        let check = |target: &str| {
+            let source = format!(
+                "i64 pick<T: Copy>(T value) {{ return 0; }}\ni64 run({target} value) {{ return pick(value); }}\n"
+            );
+            let tokens = lexer::lex(&source).expect("probe should lex");
+            let (mut program, errors) = Parser::new(tokens).parse_program();
+            assert!(errors.is_empty(), "probe should parse: {errors:?}");
+            TypeChecker::resolve_type_aliases_in_program(&mut program);
+            let (errors, _) = TypeChecker::new()
+                .with_imported_modules(&[module.clone()])
+                .check_program_with_table(&program, &mut CompilerSymbolTable::new());
+            errors.into_iter().map(|error| error.message).collect::<Vec<_>>()
+        };
+        for owner in ["Msg", "Task<i64>"] {
+            let copy = crate::diagnostics::messages::bound_requires_copy(&owner);
+            let errors = check(owner);
+            assert!(errors.iter().any(|message| message.contains(&copy)), "{owner} {errors:?}");
+        }
+        assert!(check("Mode").is_empty(), "{:?}", check("Mode"));
     }
 
     #[test]
@@ -9385,9 +9518,9 @@ mod tests {
         ];
         let contains = |kind: &str, name: &str| msg::type_contains_itself(kind, name);
         for (source, kind, name) in cases {
-            assert_eq!(type_errors(source), [contains(kind, name)], "{source}");
+            assert_eq!(type_errors_in(source), [contains(kind, name)], "{source}");
         }
-        let mut mutual = type_errors("struct A { B b; }\nstruct B { A a; }");
+        let mut mutual = type_errors_in("struct A { B b; }\nstruct B { A a; }");
         mutual.sort();
         assert_eq!(mutual, [contains("struct", "A"), contains("struct", "B")]);
     }
@@ -9403,6 +9536,6 @@ mod tests {
                       struct T { Wrap<i64> value; }\n\
                       struct Wrap<T> { T value; }\n\
                       struct Ref<T> { Wrap<T*> field; }";
-        assert!(type_errors(source).is_empty(), "{:?}", type_errors(source));
+        assert!(type_errors_in(source).is_empty(), "{:?}", type_errors_in(source));
     }
 }

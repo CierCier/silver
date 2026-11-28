@@ -55,23 +55,6 @@ impl Vec<T> {
 
     // -- Element access -------------------------------------------------
 
-    /// Read element at `index`.  Returns a COPY — for owned-element types
-    /// this creates a shallow copy that shares resources with the backing
-    /// buffer.  Prefer `get_ptr` or `take` for owned types.
-    /// Out-of-bounds indices abort deterministically in every build profile.
-    T get(&self, i64 index) {
-        if (index < 0 || index >= self.len) { abort(); }
-        return self.data[index];
-    }
-
-    /// Read element at `index`, returning None when out of bounds.
-    Optional<T> try_get(&self, i64 index) {
-        if (index < 0 || index >= self.len) {
-            return Optional<T>.none();
-        }
-        return Optional<T>.some(self.data[index]);
-    }
-
     /// Pointer to element at `index`.
     /// Out-of-bounds indices abort deterministically in every build profile.
     T* get_ptr(&self, i64 index) {
@@ -302,7 +285,7 @@ impl<T> IntoIterator for VecIter<T> {
     }
 }
 
-impl<T> IntoIterator for Vec<T>* {
+impl<T: Copy> IntoIterator for Vec<T>* {
     type Item = T;
     type IntoIter = SliceIter<T>;
     SliceIter<T> into_iter(self) {
@@ -333,6 +316,27 @@ impl<T> Vec<T> {
     Slice<T> __slice_get(&self, i64 start, i64 end) {
         Slice<T> s = self.as_slice();
         return s.__slice_get(start, end);
+    }
+}
+
+/// Accessors that return copies of elements. A copy of an owned element
+/// would be dropped twice, so these need a Copy element type. Borrow an owned
+/// element with `get_ref` or `get_mut`, or take it with `pop`, `take`, or
+/// `swap_remove`.
+impl<T: Copy> Vec<T> {
+    /// Copy of the element at `index`.
+    /// Out-of-bounds indices abort deterministically in every build profile.
+    T get(&self, i64 index) {
+        if (index < 0 || index >= self.len) { abort(); }
+        return self.data[index];
+    }
+
+    /// Copy of the element at `index`, or None when out of bounds.
+    Optional<T> try_get(&self, i64 index) {
+        if (index < 0 || index >= self.len) {
+            return Optional<T>.none();
+        }
+        return Optional<T>.some(self.data[index]);
     }
 
     /// Borrows the Vec and yields element copies without consuming it.

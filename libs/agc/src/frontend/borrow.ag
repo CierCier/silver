@@ -456,6 +456,23 @@ bool borrow_function_returns_indirect(SyntaxNode* function, SymbolTable* symbols
             function_return_type_id(&symbols.types, function), 0);
 }
 
+/// Returns true when the function returns a scalar, which cannot carry a
+/// borrow of an argument. A returned `str` is a view and can.
+bool borrow_function_returns_primitive(SyntaxNode* function) {
+    SyntaxNode* name = function_identifier(function);
+    if (name == (SyntaxNode*)0) { return false; }
+    Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+    collect_borrow_leaves(function, &leaves);
+    i64 name_index = 0;
+    while (name_index < leaves.len() && leaves.get(name_index) != name) {
+        name_index += 1;
+    }
+    TypeProjection return_type = projection_parse_type(&leaves, 0, name_index);
+    leaves.drop();
+    return return_type.kind == ProjectionTypeKind.Primitive
+        && !borrow_text_equals(return_type.name, "str");
+}
+
 /// Returns true when `node` is inside a `return` expression.
 bool borrow_in_return_expression(SyntaxNode* node) {
     SyntaxNode* child = node;
@@ -975,7 +992,7 @@ bool borrow_call_returns_argument(Vec<BorrowReturnOrigin>* origins,
     while (entry >= 0) {
         SyntaxNode* function = index.item(entry);
         entry = index.after(entry);
-        if (function.kind == NodeKind.Function) {
+        if (function.kind == NodeKind.Function && !borrow_function_returns_primitive(function)) {
             Vec<Binding> parameters = Vec<Binding>.new();
             collect_parameter_bindings(borrow_function_parameters(function), &parameters);
             bool matches = parameters.len() == argument_count

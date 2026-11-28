@@ -545,23 +545,116 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(true)
     }
 
+    /// Releases a moved field of an rvalue's spilled temporary, such as
+    /// `make().leaf`, so the temporary drops only the fields it still owns.
+    /// A Copy field leaves the temporary whole.
+    pub(crate) fn release_rvalue_field(
+        &mut self,
+        expression: &ast::Expression,
+    ) -> CodegenResult<bool> {
+        let mut path = Vec::new();
+        let mut root = expression;
+        loop {
+            match root.kind.as_ref() {
+                ast::ExpressionKind::FieldAccess { object, field } => {
+                    path.push(field.name.clone());
+                    root = object;
+                }
+                ast::ExpressionKind::Index { object, index } => {
+                    let ast::ExpressionKind::Literal(ast::Literal::Integer(i)) =
+                        index.kind.as_ref()
+                    else {
+                        return Ok(false);
+                    };
+                    path.push(i.to_string());
+                    root = object;
+                }
+                _ => break,
+            }
+        }
+        if path.is_empty() {
+            return Ok(false);
+        }
+        let Some(data) = self.rvalue_temporaries.get(&root.span.into()).copied() else {
+            return Ok(false);
+        };
+        let Some(owner) = self.owner_states.get(&data).cloned() else {
+            return Ok(false);
+        };
+        let Some(ty) = self.resolve_argument_type(expression) else {
+            return Ok(false);
+        };
+        if !self.type_needs_drop_glue(&ty, &mut Vec::new())? {
+            return Ok(false);
+        }
+        path.reverse();
+        let node = owner.plan.node_for_path(&path.join(".")).map_err(|e| {
+            CodegenError::new(crate::diagnostics::messages::owner_init_plan_error(
+                &format!("{e:?}"),
+            ))
+        })?;
+        let Some(node) = node else {
+            return Ok(false);
+        };
+        let mut ancestor = owner.plan.nodes[node].parent;
+        while let Some(index) = ancestor {
+            let ancestor_ty = &owner.plan.nodes[index].ty;
+            if let ast::TypeKind::Named(named) = ancestor_ty.kind.as_ref()
+                && self.get_drop_function_name(ancestor_ty)?.is_some()
+            {
+                return Err(CodegenError::with_span(
+                    crate::diagnostics::messages::cannot_move_field_out_of_drop_type(
+                        &path.join("."),
+                        &Self::named_type_name(named),
+                    ),
+                    expression.span,
+                ));
+            }
+            ancestor = owner.plan.nodes[index].parent;
+        }
+        self.emit_owner_transition(self.owner_node_ptr(&owner, node)?, false)?;
+        Ok(true)
+    }
+
     pub(crate) fn transfer_owner_value(
         &mut self,
         expression: &ast::Expression,
     ) -> CodegenResult<()> {
-        let transfer = self
-            .owner_function
+        if !self.records_move(expression) {
+            self.release_rvalue_field(expression)?;
+            return Ok(());
+        }
+        self.transition_owner_expr(expression, false)?;
+        // A moved name's drop flags clear here too, so a reinitialization
+        // later in the same expression stays owned.
+        if let ast::ExpressionKind::Identifier(ident) = expression.kind.as_ref() {
+            if let Some(flag) = self
+                .lookup_variable(&ident.name)
+                .and_then(|var| var.drop_flag)
+            {
+                self.builder
+                    .build_store(flag, self.context.bool_type().const_int(0, false))
+                    .map_err(|e| {
+                        CodegenError::new(
+                            crate::diagnostics::messages::clear_moved_value_drop_flag(e),
+                        )
+                    })?;
+            }
+            self.clear_field_flags(&ident.name)?;
+        }
+        Ok(())
+    }
+
+    /// Whether the move checker recorded `expression` as moving its value.
+    pub(crate) fn records_move(&self, expression: &ast::Expression) -> bool {
+        self.owner_function
             .as_ref()
             .and_then(|id| self.ownership.functions.get(id))
             .is_some_and(|f| {
                 f.transitions.iter().any(|t| {
                     t.site == expression.span.into() && t.state == InitState::Uninitialized
                 })
-            });
-        if transfer {
-            self.transition_owner_expr(expression, false)?;
-        }
-        Ok(())
+            })
     }
 
     pub(crate) fn transition_owner_path(

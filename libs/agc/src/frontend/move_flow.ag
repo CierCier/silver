@@ -1,0 +1,1351 @@
+// Flow-sensitive move and initialization checking over one lowered,
+// type-checked body.
+//
+// Every owned (non-Copy) local is a tree of places: the local, its fields,
+// and the array elements a body names. Each path through the body carries
+// whether each place holds a value. Branches, loops, `break`, `continue`,
+// `return` and `defer` merge their path states explicitly, so a place emptied
+// on any incoming path is only "maybe" initialized afterwards. Reading,
+// borrowing or consuming a place that is not initialized on every path is an
+// error. Copy locals are not tracked: copying never empties them.
+import std.mem.vec;
+import std.string;
+import std.collections.bitset;
+import frontend.ast;
+import frontend.ast_expr;
+import frontend.diagnostics;
+import frontend.lexer;
+import frontend.messages;
+import frontend.symbols;
+import frontend.types;
+import frontend.typecheck_expr;
+
+/// Field nesting the check tracks below one local; deeper paths share the
+/// state of their tracked ancestor.
+const u32 MAX_FLOW_PLACE_DEPTH = 8;
+/// Element places tracked below one array; later elements share the array's
+/// state for unnamed elements.
+const u32 MAX_FLOW_ARRAY_ELEMENTS = 64;
+/// The lattice has height two per place, so loop states stabilise within a
+/// few passes; the bound only protects against a checker bug.
+const u32 MAX_FLOW_LOOP_PASSES = 32;
+
+/// Whether a place holds a value on the paths reaching a point.
+enum FlowInit { Init; Empty; Maybe; }
+
+/// Why a place may be empty: it was moved, or declared without a value.
+enum FlowCause { Moved; Declared; }
+
+/// How an expression uses the place it names.
+enum FlowUse { Read; Consume; BorrowMut; }
+
+/// One tracked place. Children of a struct or tuple place are created all at
+/// once; children of an array place are created per constant index, and the
+/// array's own entry stands for every element without a place.
+struct FlowPlace {
+    u32 name_id;
+    i64 parent;
+    i64 first_child;
+    i64 next_sibling;
+    u32 member;
+    u32 type_id;
+    u32 depth;
+    bool expanded;
+    bool is_array;
+    bool is_copy;
+}
+
+/// The place states on one path. A place created after this state was taken
+/// has no entry; it reads its parent's entry, which held for it then.
+struct FlowState {
+    Vec<FlowInit> init;
+    Vec<FlowCause> cause;
+    Vec<Span> origin;
+    bool reachable;
+}
+
+impl FlowState {
+    /// An unreachable state with no entries.
+    FlowState new() {
+        FlowState state;
+        state.init = Vec<FlowInit>.new();
+        state.cause = Vec<FlowCause>.new();
+        state.origin = Vec<Span>.new();
+        state.reachable = false;
+        return move state;
+    }
+
+    /// An independent copy for a branch.
+    FlowState clone(&self) {
+        FlowState copy = FlowState.new();
+        i64 i = 0;
+        while (i < self.init.len()) {
+            copy.init.push(self.init.get(i));
+            copy.cause.push(self.cause.get(i));
+            copy.origin.push(self.origin.get(i));
+            i += 1;
+        }
+        copy.reachable = self.reachable;
+        return move copy;
+    }
+}
+
+/// A local in scope: its name and root place.
+struct FlowLocal {
+    u32 name_id;
+    i64 place;
+}
+
+/// A block scope: where its locals and defers start.
+struct FlowScope {
+    i64 locals_start;
+    i64 defers_start;
+}
+
+/// An enclosing loop: the scope depth of its body, and the joined states
+/// that leave it through `break` and return to its head through `continue`.
+struct FlowLoop {
+    i64 scope_depth;
+    FlowState breaks;
+    FlowState continues;
+}
+
+/// A registered `defer` and the number of locals visible where it was
+/// written. Locals declared after it cannot be the names it refers to.
+struct FlowDefer {
+    u32 stmt_id;
+    i64 locals_len;
+}
+
+/// Locals hidden from name lookup while a defer runs: those declared after
+/// the defer was registered.
+struct FlowRange {
+    i64 start;
+    i64 end;
+}
+
+/// The root place a `let` statement declared, reused when a loop pass walks
+/// the statement again so loop states can converge.
+struct FlowDeclaration {
+    u32 stmt_id;
+    i64 place;
+}
+
+/// Checks one body. Places, locals, scopes and loops describe the current
+/// walk; `reported` keeps re-walked loop bodies from repeating a diagnostic.
+struct MoveFlow {
+    AstPool* pool;
+    TypeTable* types;
+    SymbolTable* symbols;
+    SyntaxNode* root;
+    DiagnosticBag* diagnostics;
+    Vec<FlowPlace> places;
+    Vec<FlowDeclaration> declarations;
+    /// Places of owned match bindings, keyed by `arm_bindings` slot in
+    /// `stmt_id`, so each loop pass reuses them.
+    Vec<FlowDeclaration> binding_places;
+    Vec<FlowLocal> locals;
+    Vec<FlowScope> scopes;
+    Vec<FlowDefer> defers;
+    Vec<FlowRange> hidden;
+    Vec<FlowLoop> loops;
+    Vec<Span> reported;
+    bool failed;
+}
+
+impl MoveFlow {
+    MoveFlow new(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode* root,
+                 DiagnosticBag* diagnostics) {
+        MoveFlow flow;
+        flow.pool = pool;
+        flow.types = types;
+        flow.symbols = symbols;
+        flow.root = root;
+        flow.diagnostics = diagnostics;
+        flow.places = Vec<FlowPlace>.new();
+        flow.declarations = Vec<FlowDeclaration>.new();
+        flow.binding_places = Vec<FlowDeclaration>.new();
+        flow.locals = Vec<FlowLocal>.new();
+        flow.scopes = Vec<FlowScope>.new();
+        flow.defers = Vec<FlowDefer>.new();
+        flow.hidden = Vec<FlowRange>.new();
+        flow.loops = Vec<FlowLoop>.new();
+        flow.reported = Vec<Span>.new();
+        flow.failed = false;
+        return move flow;
+    }
+
+    /// Whether values of `type_id` copy implicitly, memoised in the pool.
+    bool is_copy(MoveFlow* self, u32 type_id) {
+        u32 resolved = self.types.resolve_subst(type_id);
+        Vec<u8>* cache = &self.pool.copy_by_type;
+        while (cache.len() <= (i64)resolved) { cache.push(0); }
+        u8 known = cache.get((i64)resolved);
+        if (known != 0) { return known == 1; }
+        bool copy = typecheck_type_is_copy(self.root, self.types, resolved);
+        cache.set((i64)resolved, copy ? 1 : 2);
+        return copy;
+    }
+
+    /// Whether a local of `type_id` is tracked: a known, owned, non-reference type.
+    bool tracks(MoveFlow* self, u32 type_id) {
+        u32 resolved = self.types.resolve_subst(type_id);
+        if (resolved == TYPE_UNKNOWN || resolved == 0 || resolved == TYPE_VOID) { return false; }
+        TypeKind kind = self.types.get(resolved).kind;
+        if (kind == TypeKind.Unknown || kind == TypeKind.Pointer || kind == TypeKind.Reference
+            || kind == TypeKind.Function || kind == TypeKind.Slice) { return false; }
+        return !self.is_copy(resolved);
+    }
+
+    i64 add_place(MoveFlow* self, u32 name_id, i64 parent, u32 member, u32 type_id) {
+        FlowPlace place;
+        place.name_id = name_id;
+        place.parent = parent;
+        place.first_child = -1;
+        place.next_sibling = -1;
+        place.member = member;
+        place.type_id = self.types.resolve_subst(type_id);
+        place.depth = parent < 0 ? 0 : self.places.get(parent).depth + 1;
+        place.expanded = false;
+        place.is_array = self.types.get(place.type_id).kind == TypeKind.Array;
+        place.is_copy = self.is_copy(place.type_id);
+        self.places.push(place);
+        i64 index = self.places.len() - 1;
+        if (parent >= 0) {
+            FlowPlace* owner = self.places.get_ptr(parent);
+            if (owner.first_child < 0) {
+                owner.first_child = index;
+            } else {
+                i64 last = owner.first_child;
+                while (self.places.get(last).next_sibling >= 0) {
+                    last = self.places.get(last).next_sibling;
+                }
+                self.places.get_ptr(last).next_sibling = index;
+            }
+        }
+        return index;
+    }
+
+    /// The index of the struct named `name_id` in `struct_properties` when
+    /// all its field names are known, or -1.
+    i64 struct_definition(MoveFlow* self, u32 name_id) {
+        i64 index = 0;
+        while (index < self.types.struct_properties.len()) {
+            TypeStructProperties* definition = self.types.struct_properties.get_ptr(index);
+            if (definition.name_id == name_id) {
+                return definition.field_count == definition.field_name_count ? index : -1;
+            }
+            index += 1;
+        }
+        return -1;
+    }
+
+    /// Whether a value of `type_id` holds an array of owned elements, itself
+    /// or in a field at any depth.
+    bool holds_owned_array(MoveFlow* self, u32 type_id) {
+        Vec<u32> enclosing = Vec<u32>.new();
+        return self.type_holds_owned_array(type_id, &enclosing);
+    }
+
+    /// `holds_owned_array` below the struct types in `enclosing`. A struct
+    /// that contains itself by value has no size, so the walk skips it.
+    bool type_holds_owned_array(MoveFlow* self, u32 type_id, Vec<u32>* enclosing) {
+        u32 resolved = self.types.resolve_subst(type_id);
+        TypeEntry entry = *self.types.get(resolved);
+        if (entry.kind == TypeKind.Array) { return !self.is_copy(resolved); }
+        if (entry.kind == TypeKind.Tuple) {
+            i64 index = 0;
+            while (index < entry.count) {
+                if (self.type_holds_owned_array(self.types.type_args.get(entry.inner + (u32)index),
+                                                enclosing)) {
+                    return true;
+                }
+                index += 1;
+            }
+            return false;
+        }
+        if (entry.kind != TypeKind.Named || self.is_copy(resolved)) { return false; }
+        i64 definition_index = self.struct_definition(entry.name_id);
+        if (definition_index < 0) { return false; }
+        i64 seen = 0;
+        while (seen < enclosing.len()) {
+            if (enclosing.get(seen) == resolved) { return false; }
+            seen += 1;
+        }
+        enclosing.push(resolved);
+        TypeStructProperties definition = self.types.struct_properties.get(definition_index);
+        bool holds = false;
+        u32 offset = 0;
+        while (!holds && offset < definition.field_count) {
+            str field = self.types.names.get(
+                self.types.struct_field_names.get(definition.field_name_start + offset));
+            u32 field_type = typecheck_struct_field_type(self.types, self.root, resolved, field);
+            holds = field_type != TYPE_UNKNOWN && self.type_holds_owned_array(field_type, enclosing);
+            offset += 1;
+        }
+        enclosing.pop();
+        return holds;
+    }
+
+    /// Creates the field places of a struct or tuple place. Returns false when
+    /// its fields are unknown, so the place stays a single unit.
+    bool expand(MoveFlow* self, i64 place) {
+        FlowPlace owner = self.places.get(place);
+        if (owner.expanded) { return true; }
+        if (owner.depth >= MAX_FLOW_PLACE_DEPTH) { return false; }
+        if (owner.is_array) {
+            self.places.get_ptr(place).expanded = true;
+            return true;
+        }
+        TypeEntry entry = *self.types.get(owner.type_id);
+        if (entry.kind == TypeKind.Tuple) {
+            i64 index = 0;
+            while (index < entry.count) {
+                self.add_place(owner.name_id, place, (u32)index,
+                    self.types.type_args.get(entry.inner + (u32)index));
+                index += 1;
+            }
+            self.places.get_ptr(place).expanded = true;
+            return true;
+        }
+        if (entry.kind != TypeKind.Named) { return false; }
+        i64 definition_index = self.struct_definition(entry.name_id);
+        if (definition_index < 0) { return false; }
+        TypeStructProperties definition = self.types.struct_properties.get(definition_index);
+        u32 offset = 0;
+        while (offset < definition.field_count) {
+            str field = self.types.names.get(
+                self.types.struct_field_names.get(definition.field_name_start + offset));
+            u32 field_type = typecheck_struct_field_type(self.types, self.root, owner.type_id, field);
+            if (field_type == TYPE_UNKNOWN) { return false; }
+            offset += 1;
+        }
+        offset = 0;
+        while (offset < definition.field_count) {
+            str field = self.types.names.get(
+                self.types.struct_field_names.get(definition.field_name_start + offset));
+            self.add_place(owner.name_id, place, self.symbols.names.intern(field),
+                typecheck_struct_field_type(self.types, self.root, owner.type_id, field));
+            offset += 1;
+        }
+        self.places.get_ptr(place).expanded = true;
+        return true;
+    }
+
+    /// The child of `place` for `member`, creating an array element on demand.
+    i64 child(MoveFlow* self, i64 place, u32 member, bool create) {
+        i64 cursor = self.places.get(place).first_child;
+        i64 count = 0;
+        while (cursor >= 0) {
+            if (self.places.get(cursor).member == member) { return cursor; }
+            cursor = self.places.get(cursor).next_sibling;
+            count += 1;
+        }
+        FlowPlace owner = self.places.get(place);
+        if (!create || !owner.is_array || count >= (i64)MAX_FLOW_ARRAY_ELEMENTS) { return -1; }
+        return self.add_place(owner.name_id, place, member,
+            self.types.get(owner.type_id).inner);
+    }
+
+    // ---- State entries ----------------------------------------------------
+
+    /// The entry holding `place`'s state: its own or its nearest ancestor's.
+    /// -1 means the place's local was declared after `state` was taken.
+    i64 entry_of(MoveFlow* self, FlowState* state, i64 place) {
+        while (place >= 0 && place >= state.init.len()) {
+            place = self.places.get(place).parent;
+        }
+        return place;
+    }
+
+    FlowInit init_at(MoveFlow* self, FlowState* state, i64 place) {
+        i64 entry = self.entry_of(state, place);
+        return entry < 0 ? FlowInit.Empty : state.init.get(entry);
+    }
+
+    FlowCause cause_at(MoveFlow* self, FlowState* state, i64 place) {
+        i64 entry = self.entry_of(state, place);
+        return entry < 0 ? FlowCause.Declared : state.cause.get(entry);
+    }
+
+    Span origin_at(MoveFlow* self, FlowState* state, i64 place) {
+        i64 entry = self.entry_of(state, place);
+        return entry < 0 ? Span.synthetic() : state.origin.get(entry);
+    }
+
+    /// Gives `state` its own entry for every place up to `place`.
+    void materialize(MoveFlow* self, FlowState* state, i64 place) {
+        while (state.init.len() <= place) {
+            i64 index = state.init.len();
+            i64 source = self.places.get(index).parent;
+            if (source < 0) {
+                state.init.push(FlowInit.Empty);
+                state.cause.push(FlowCause.Declared);
+                state.origin.push(Span.synthetic());
+            } else {
+                state.init.push(state.init.get(source));
+                state.cause.push(state.cause.get(source));
+                state.origin.push(state.origin.get(source));
+            }
+        }
+    }
+
+    void set_entry(MoveFlow* self, FlowState* state, i64 place, FlowInit init,
+                   FlowCause cause, Span origin) {
+        self.materialize(state, place);
+        state.init.set(place, init);
+        state.cause.set(place, cause);
+        state.origin.set(place, origin);
+    }
+
+    /// Sets `place` and every tracked place below it.
+    void set_tree(MoveFlow* self, FlowState* state, i64 place, FlowInit init,
+                  FlowCause cause, Span origin) {
+        self.set_entry(state, place, init, cause, origin);
+        i64 child = self.places.get(place).first_child;
+        while (child >= 0) {
+            self.set_tree(state, child, init, cause, origin);
+            child = self.places.get(child).next_sibling;
+        }
+    }
+
+    /// Marks `place` and its subtree possibly moved, keeping entries that are
+    /// already empty.
+    void weaken_tree(MoveFlow* self, FlowState* state, i64 place, Span origin) {
+        if (self.init_at(state, place) == FlowInit.Init) {
+            self.set_entry(state, place, FlowInit.Maybe, FlowCause.Moved, origin);
+        }
+        i64 child = self.places.get(place).first_child;
+        while (child >= 0) {
+            self.weaken_tree(state, child, origin);
+            child = self.places.get(child).next_sibling;
+        }
+    }
+
+    /// Whether `place`'s own entry holds state: a single value's does, and an
+    /// array's does while some element has no place of its own.
+    bool own_counts(MoveFlow* self, i64 place) {
+        FlowPlace info = self.places.get(place);
+        if (!info.expanded) { return true; }
+        if (!info.is_array) { return false; }
+        i64 elements = 0;
+        i64 child = info.first_child;
+        while (child >= 0) {
+            elements += 1;
+            child = self.places.get(child).next_sibling;
+        }
+        return elements < self.types.get(info.type_id).count;
+    }
+
+    /// The first place at or below `place` that is not initialized on every
+    /// path, or -1 when the whole subtree holds a value.
+    /// With `moved_only`, only places a move may have emptied count: storage
+    /// declared without a value is zeroed and may be initialized in place.
+    i64 first_gap(MoveFlow* self, FlowState* state, i64 place, bool moved_only) {
+        FlowPlace info = self.places.get(place);
+        bool own_counts = self.own_counts(place);
+        if (own_counts && self.init_at(state, place) != FlowInit.Init
+            && (!moved_only || self.cause_at(state, place) == FlowCause.Moved)) { return place; }
+        i64 child = info.first_child;
+        while (child >= 0) {
+            i64 gap = self.first_gap(state, child, moved_only);
+            if (gap >= 0) { return gap; }
+            child = self.places.get(child).next_sibling;
+        }
+        return -1;
+    }
+
+    /// The effective state of `place`'s subtree: Init, Empty when nothing in it
+    /// holds a value, otherwise Maybe.
+    FlowInit summary(MoveFlow* self, FlowState* state, i64 place) {
+        FlowPlace info = self.places.get(place);
+        bool own_counts = self.own_counts(place);
+        bool any_init = own_counts && self.init_at(state, place) == FlowInit.Init;
+        bool any_gap = own_counts && self.init_at(state, place) != FlowInit.Init;
+        bool all_empty = !own_counts || self.init_at(state, place) == FlowInit.Empty;
+        i64 child = info.first_child;
+        while (child >= 0) {
+            FlowInit part = self.summary(state, child);
+            if (part == FlowInit.Init) { any_init = true; } else { any_gap = true; }
+            if (part != FlowInit.Empty) { all_empty = false; }
+            child = self.places.get(child).next_sibling;
+        }
+        if (!any_gap) { return FlowInit.Init; }
+        if (all_empty && !any_init) { return FlowInit.Empty; }
+        return FlowInit.Maybe;
+    }
+
+    // ---- Joins --------------------------------------------------------------
+
+    /// Joins `other` into `into`: a place keeps its state when both agree and
+    /// is Maybe otherwise. Unreachable states contribute nothing.
+    void join(MoveFlow* self, FlowState* into, FlowState* other) {
+        if (!other.reachable) { return; }
+        if (!into.reachable) {
+            FlowState copy = other.clone();
+            *into = move copy;
+            return;
+        }
+        i64 count = into.init.len();
+        if (other.init.len() > count) { count = other.init.len(); }
+        if (count > 0) {
+            self.materialize(into, count - 1);
+        }
+        i64 i = 0;
+        while (i < count) {
+            FlowInit mine = into.init.get(i);
+            FlowInit theirs = self.init_at(other, i);
+            if (mine != theirs) {
+                if (mine == FlowInit.Init) {
+                    into.cause.set(i, self.cause_at(other, i));
+                    into.origin.set(i, self.origin_at(other, i));
+                }
+                into.init.set(i, FlowInit.Maybe);
+            }
+            // A move on either path outranks a place merely left unset.
+            if (mine != FlowInit.Init && theirs != FlowInit.Init
+                && into.cause.get(i) == FlowCause.Declared
+                && self.cause_at(other, i) == FlowCause.Moved) {
+                into.cause.set(i, FlowCause.Moved);
+                into.origin.set(i, self.origin_at(other, i));
+            }
+            i += 1;
+        }
+    }
+
+    /// Whether every place has the same state in both, including why a place
+    /// without a value lacks one: a move outranks a declaration, so a loop
+    /// whose body moves a zero-valued field needs another pass.
+    bool same(MoveFlow* self, FlowState* left, FlowState* right) {
+        if (left.reachable != right.reachable) { return false; }
+        i64 count = self.places.len();
+        i64 i = 0;
+        while (i < count) {
+            FlowInit init = self.init_at(left, i);
+            if (init != self.init_at(right, i)) { return false; }
+            if (init != FlowInit.Init && self.cause_at(left, i) != self.cause_at(right, i)) {
+                return false;
+            }
+            i += 1;
+        }
+        return true;
+    }
+
+    // ---- Diagnostics ------------------------------------------------------
+
+    /// Writes the source path of `place` (`pair.left`, `items[2]`).
+    void place_text(MoveFlow* self, i64 place, String* out) {
+        FlowPlace info = self.places.get(place);
+        if (info.parent < 0) {
+            out.push_str(self.symbols.names.get(info.name_id));
+            return;
+        }
+        self.place_text(info.parent, out);
+        if (self.places.get(info.parent).is_array
+            || self.types.get(self.places.get(info.parent).type_id).kind == TypeKind.Tuple) {
+            out.push('[');
+            String index = String.from_i64((i64)info.member);
+            out.push_str(index.to_str());
+            index.drop();
+            out.push(']');
+        } else {
+            out.push('.');
+            out.push_str(self.symbols.names.get(info.member));
+        }
+    }
+
+    bool already_reported(MoveFlow* self, Span span) {
+        i64 i = 0;
+        while (i < self.reported.len()) {
+            Span seen = self.reported.get(i);
+            if (seen.file == span.file && seen.start == span.start && seen.end == span.end) {
+                return true;
+            }
+            i += 1;
+        }
+        self.reported.push(span);
+        return false;
+    }
+
+    /// Reports a use at `span` of `place` that is not initialized on every path.
+    void report_gap(MoveFlow* self, FlowState* state, i64 used, i64 gap, Span span) {
+        self.failed = true;
+        if (self.already_reported(span)) { return; }
+        FlowCause cause = self.cause_at(state, gap);
+        Span origin = self.origin_at(state, gap);
+        bool maybe = self.init_at(state, gap) == FlowInit.Maybe;
+        String name = String.new();
+        self.place_text(used, &name);
+        String part = String.new();
+        self.place_text(gap, &part);
+        // An array's own entry stands for the elements without a place.
+        FlowPlace gap_info = self.places.get(gap);
+        if (gap_info.is_array && gap_info.first_child >= 0) { part.push_str("[...]"); }
+        String message = String.new();
+        String note = String.new();
+        if (cause == FlowCause.Moved) {
+            if (gap != used && self.summary(state, used) != FlowInit.Empty) {
+                message = use_of_partially_moved_value(name.to_str(), part.to_str(), maybe);
+            } else if (maybe) {
+                message = use_of_possibly_moved_value(name.to_str());
+            } else {
+                message = use_of_moved_value(name.to_str());
+            }
+            note.push_str(note_value_moved_here());
+        } else {
+            message = maybe ? use_of_possibly_uninitialized_value(name.to_str(), part.to_str())
+                            : use_of_uninitialized_value(name.to_str(), part.to_str());
+            note.push_str(note_declared_without_value());
+        }
+        if (origin.end > origin.start) {
+            self.diagnostics.error_with_note(span, move message, origin, move note);
+        } else {
+            self.diagnostics.error(span, move message);
+            note.drop();
+        }
+        part.drop();
+        name.drop();
+    }
+
+    void report(MoveFlow* self, Span span, String message) {
+        self.failed = true;
+        if (self.already_reported(span)) {
+            message.drop();
+            return;
+        }
+        self.diagnostics.error(span, move message);
+    }
+
+    /// Whether `place` counts as assigned: a single value must hold one on
+    /// every path, and every element of an array must count as assigned; a
+    /// struct needs some field assigned on some path, its other fields keeping
+    /// the zero value of declared storage.
+    bool assigned(MoveFlow* self, FlowState* state, i64 place) {
+        FlowPlace info = self.places.get(place);
+        if (!info.expanded) { return self.init_at(state, place) == FlowInit.Init; }
+        if (!info.is_array) {
+            return self.summary(state, place) != FlowInit.Empty
+                && self.owned_array_gap(state, place) < 0;
+        }
+        if (self.own_counts(place) && self.init_at(state, place) != FlowInit.Init) { return false; }
+        i64 child = info.first_child;
+        while (child >= 0) {
+            if (!self.assigned(state, child)) { return false; }
+            child = self.places.get(child).next_sibling;
+        }
+        return true;
+    }
+
+    /// The first unassigned part of an array of owned elements among
+    /// `place`'s fields, at any depth, or -1. A struct built field by field
+    /// zero-fills its other fields, but not such an array. A field never
+    /// expanded into places is a gap when its type holds such an array.
+    i64 owned_array_gap(MoveFlow* self, FlowState* state, i64 place) {
+        FlowPlace owner = self.places.get(place);
+        if (!owner.expanded) {
+            bool missing = self.init_at(state, place) != FlowInit.Init
+                && self.holds_owned_array(owner.type_id);
+            return missing ? place : -1;
+        }
+        i64 child = owner.first_child;
+        while (child >= 0) {
+            FlowPlace info = self.places.get(child);
+            i64 gap = -1;
+            if (!info.is_array) {
+                gap = self.owned_array_gap(state, child);
+            } else if (!self.is_copy(info.type_id) && !self.assigned(state, child)) {
+                gap = self.first_gap(state, child, false);
+                if (gap < 0) { gap = child; }
+            }
+            if (gap >= 0) { return gap; }
+            child = info.next_sibling;
+        }
+        return -1;
+    }
+
+    /// Whether `place` keeps the zero value of declared storage: it, or a
+    /// struct value that holds it with no array in between, has some field
+    /// assigned. An array of owned elements is never zero-filled.
+    bool zero_filled(MoveFlow* self, FlowState* state, i64 place) {
+        FlowPlace info = self.places.get(place);
+        if (info.is_array && !self.is_copy(info.type_id)) { return false; }
+        while (place >= 0) {
+            info = self.places.get(place);
+            if (!info.is_array && info.expanded && self.summary(state, place) != FlowInit.Empty) {
+                return true;
+            }
+            place = info.parent;
+            if (place >= 0 && self.places.get(place).is_array) { return false; }
+        }
+        return false;
+    }
+
+    /// Whether `place` counts as assigned, directly or by zero-fill. Only
+    /// owned arrays inside `place` itself must be complete; an incomplete
+    /// one elsewhere in the struct does not block this read.
+    bool assigned_in_struct(MoveFlow* self, FlowState* state, i64 place) {
+        if (self.assigned(state, place)) { return true; }
+        return self.zero_filled(state, place) && self.owned_array_gap(state, place) < 0;
+    }
+
+    /// Requires `place` to be usable: nothing in it may be moved out on any
+    /// path, and it must have been assigned. A zero-filled value is reported
+    /// by the owned array it is missing.
+    void require(MoveFlow* self, FlowState* state, i64 place, Span span) {
+        if (!state.reachable) { return; }
+        i64 gap = self.first_gap(state, place, true);
+        if (gap < 0 && !self.assigned_in_struct(state, place)) {
+            if (self.zero_filled(state, place)) { gap = self.owned_array_gap(state, place); }
+            if (gap < 0) { gap = self.first_gap(state, place, false); }
+        }
+        if (gap >= 0) { self.report_gap(state, place, gap, span); }
+    }
+
+    // ---- Locals and places ------------------------------------------------
+
+    i64 lookup(MoveFlow* self, u32 name_id) {
+        i64 i = self.locals.len() - 1;
+        while (i >= 0) {
+            FlowLocal local = self.locals.get(i);
+            if (local.name_id == name_id && !self.is_hidden(i)) { return local.place; }
+            i -= 1;
+        }
+        return -1;
+    }
+
+    /// Whether a visible local or parameter, tracked or not, is named `name_id`.
+    bool names_local(MoveFlow* self, u32 name_id) {
+        i64 i = self.locals.len() - 1;
+        while (i >= 0) {
+            if (self.locals.get(i).name_id == name_id && !self.is_hidden(i)) { return true; }
+            i -= 1;
+        }
+        return false;
+    }
+
+    bool is_hidden(MoveFlow* self, i64 local) {
+        i64 i = 0;
+        while (i < self.hidden.len()) {
+            FlowRange range = self.hidden.get(i);
+            if (local >= range.start && local < range.end) { return true; }
+            i += 1;
+        }
+        return false;
+    }
+
+    /// Walks `deferred` with the names it saw where it was written.
+    void walk_defer(MoveFlow* self, FlowState* state, FlowDefer deferred) {
+        FlowRange range;
+        range.start = deferred.locals_len;
+        range.end = self.locals.len();
+        self.hidden.push(range);
+        self.walk_stmt(state, deferred.stmt_id);
+        self.hidden.len = self.hidden.len() - 1;
+    }
+
+    /// Declares `name_id` of `type_id`, shadowing any outer local. Returns its
+    /// place, or -1 when the type is not tracked.
+    i64 declare(MoveFlow* self, FlowState* state, u32 stmt_id, u32 name_id, u32 type_id,
+                bool initialized, Span span) {
+        i64 place = -1;
+        i64 i = 0;
+        while (stmt_id != 0 && i < self.declarations.len()) {
+            if (self.declarations.get(i).stmt_id == stmt_id) {
+                place = self.declarations.get(i).place;
+                break;
+            }
+            i += 1;
+        }
+        if (place < 0 && self.tracks(type_id)) {
+            place = self.add_place(name_id, -1, 0, type_id);
+            FlowDeclaration declaration;
+            declaration.stmt_id = stmt_id;
+            declaration.place = place;
+            self.declarations.push(declaration);
+        }
+        if (place >= 0) {
+            self.set_tree(state, place, initialized ? FlowInit.Init : FlowInit.Empty,
+                          FlowCause.Declared, span);
+        }
+        FlowLocal local;
+        local.name_id = name_id;
+        local.place = place;
+        self.locals.push(local);
+        return place;
+    }
+
+    /// Resolves expression `id` to a tracked place. `*unknown_element` is set
+    /// when the place is only part of the result: an array element with a
+    /// non-constant index, or a path deeper than the tracked depth. `create`
+    /// builds field and element places for a write or move; a read resolves
+    /// to the deepest existing place, except that a constant element of an
+    /// array with tracked elements gets its own place.
+    i64 resolve(MoveFlow* self, u32 id, bool create, bool* unknown_element) {
+        AstExpr expr = *self.pool.get_expr(id);
+        if (expr.kind == ExprKind.Var) {
+            return self.lookup(expr.aux);
+        }
+        if (expr.kind == ExprKind.Field) {
+            i64 owner = self.resolve(expr.inner0, create, unknown_element);
+            if (owner < 0 || *unknown_element) { return owner; }
+            TypeKind kind = self.types.get(self.places.get(owner).type_id).kind;
+            if (kind == TypeKind.Pointer || kind == TypeKind.Reference) { return -1; }
+            if (create && !self.expand(owner)) {
+                *unknown_element = true;
+                return owner;
+            }
+            i64 field = self.child(owner, expr.aux, false);
+            return field < 0 ? owner : field;
+        }
+        if (expr.kind == ExprKind.Index) {
+            AstExpr target = *self.pool.get_expr(expr.inner0);
+            TypeKind target_kind = self.types.get(self.types.resolve_subst(target.inferred_type)).kind;
+            if (target_kind != TypeKind.Array && target_kind != TypeKind.Tuple) { return -1; }
+            i64 owner = self.resolve(expr.inner0, create, unknown_element);
+            if (owner < 0 || *unknown_element) { return owner; }
+            AstExpr index = *self.pool.get_expr(expr.inner1);
+            if (index.kind != ExprKind.Literal) {
+                *unknown_element = true;
+                return owner;
+            }
+            i64 value = typecheck_literal_index(self.symbols.names.get(index.inner0));
+            if (value < 0) {
+                *unknown_element = true;
+                return owner;
+            }
+            if (create && !self.expand(owner)) {
+                *unknown_element = true;
+                return owner;
+            }
+            // A sibling of a moved element reads its own state, not the
+            // array's gap.
+            FlowPlace array = self.places.get(owner);
+            i64 element = self.child(owner, (u32)value,
+                create || (array.is_array && array.expanded));
+            if (element < 0 && array.is_array && create) {
+                *unknown_element = true;
+            }
+            return element < 0 ? owner : element;
+        }
+        return -1;
+    }
+
+    // ---- Expressions ------------------------------------------------------
+
+    /// Applies `use` of tracked `place` at `span`. A mutable or raw borrow
+    /// may initialize its target, so the place holds a value afterwards; the
+    /// runtime state records what the callee actually did.
+    void use_place(MoveFlow* self, FlowState* state, i64 place, FlowUse use,
+                   bool unknown_element, Span span) {
+        if (!state.reachable) { return; }
+        if (use == FlowUse.BorrowMut) {
+            i64 moved = self.first_gap(state, place, true);
+            if (moved >= 0) { self.report_gap(state, place, moved, span); }
+            if (!unknown_element) {
+                self.set_tree(state, place, FlowInit.Init, FlowCause.Declared, span);
+            }
+            return;
+        }
+        self.require(state, place, span);
+        if (use != FlowUse.Consume || self.places.get(place).is_copy) { return; }
+        if (unknown_element) {
+            self.weaken_tree(state, place, span);
+        } else {
+            self.set_tree(state, place, FlowInit.Empty, FlowCause.Moved, span);
+        }
+    }
+
+    /// Walks `count` argument ids stored in `pool.args` from `start`.
+    void walk_args(MoveFlow* self, FlowState* state, i64 start, i64 count) {
+        i64 i = 0;
+        while (i < count && start + i < self.pool.args.len()) {
+            u32 arg = self.pool.args.get(start + i);
+            self.walk_expr(state, arg, self.argument_use(arg));
+            i += 1;
+        }
+    }
+
+    /// How type checking found the argument or receiver `id` passed.
+    FlowUse argument_use(MoveFlow* self, u32 id) {
+        if (self.pool.consumed.test((i64)id)) { return FlowUse.Consume; }
+        return self.pool.mutable_borrows.test((i64)id) ? FlowUse.BorrowMut : FlowUse.Read;
+    }
+
+    /// Walks the subscripts of the field and index chain `id`, innermost
+    /// first, when `id` itself resolved to a place.
+    void walk_subscripts(MoveFlow* self, FlowState* state, u32 id) {
+        AstExpr expr = *self.pool.get_expr(id);
+        if (expr.kind != ExprKind.Field && expr.kind != ExprKind.Index) { return; }
+        self.walk_subscripts(state, expr.inner0);
+        if (expr.kind == ExprKind.Index) { self.walk_expr(state, expr.inner1, FlowUse.Read); }
+    }
+
+    /// Walks `id` on a branch of `state` and joins the result back.
+    void walk_branch(MoveFlow* self, FlowState* state, u32 id, FlowUse use) {
+        FlowState branch = state.clone();
+        self.walk_expr(&branch, id, use);
+        self.join(state, &branch);
+    }
+
+    void walk_expr(MoveFlow* self, FlowState* state, u32 id, FlowUse use) {
+        if (id == 0 || !state.reachable) { return; }
+        AstExpr expr = *self.pool.get_expr(id);
+        if (expr.kind == ExprKind.Var || expr.kind == ExprKind.Field || expr.kind == ExprKind.Index) {
+            bool unknown_element = false;
+            // A mutable borrow may initialize only the place it names.
+            i64 place = self.resolve(id, use == FlowUse.Consume || use == FlowUse.BorrowMut,
+                                     &unknown_element);
+            if (place >= 0) {
+                self.walk_subscripts(state, id);
+                bool copy = expr.inferred_type != TYPE_UNKNOWN && self.is_copy(expr.inferred_type);
+                self.use_place(state, place, copy && use == FlowUse.Consume ? FlowUse.Read : use,
+                               unknown_element, expr.span);
+                return;
+            }
+            if (expr.kind == ExprKind.Field) {
+                // Moving an owned field out of a container element moves out
+                // of that element, which the Index case below rejects.
+                ExprKind base = self.pool.get_expr(expr.inner0).kind;
+                bool owned_field = use == FlowUse.Consume && expr.inferred_type != TYPE_UNKNOWN
+                    && !self.is_copy(expr.inferred_type)
+                    && (base == ExprKind.Field || base == ExprKind.Index);
+                self.walk_expr(state, expr.inner0, owned_field || use == FlowUse.BorrowMut ? use : FlowUse.Read);
+            } else if (expr.kind == ExprKind.Index) {
+                self.walk_expr(state, expr.inner0, FlowUse.Read);
+                self.walk_expr(state, expr.inner1, FlowUse.Read);
+                if (use == FlowUse.Consume) { self.check_element_move(expr); }
+            }
+            return;
+        }
+        if (expr.kind == ExprKind.Move) {
+            self.walk_expr(state, expr.inner0, FlowUse.Consume);
+        } else if (expr.kind == ExprKind.Unary) {
+            if (expr.aux == (u32)TokenKind.BitwiseAnd) {
+                TypeEntry* reference = self.types.get(self.types.resolve_subst(expr.inferred_type));
+                bool mutable = expr.inner1 != 0 || reference.kind == TypeKind.Pointer
+                    || (reference.kind == TypeKind.Reference && reference.is_mut)
+                    || self.pool.mutable_borrows.test((i64)id);
+                self.walk_expr(state, expr.inner0, mutable ? FlowUse.BorrowMut : FlowUse.Read);
+            } else {
+                self.walk_expr(state, expr.inner0, FlowUse.Read);
+            }
+        } else if (expr.kind == ExprKind.Binary) {
+            self.walk_expr(state, expr.inner0, FlowUse.Read);
+            if (expr.aux == (u32)TokenKind.And || expr.aux == (u32)TokenKind.Or) {
+                self.walk_branch(state, expr.inner1, FlowUse.Read);
+            } else {
+                self.walk_expr(state, expr.inner1, FlowUse.Read);
+            }
+        } else if (expr.kind == ExprKind.Call) {
+            self.walk_expr(state, expr.inner0, FlowUse.Read);
+            self.walk_args(state, (i64)expr.inner1, (i64)expr.aux);
+            // Nothing after a call that never returns runs on this path.
+            if (self.never_returns(expr.inner0)) { state.reachable = false; }
+        } else if (expr.kind == ExprKind.MethodCall) {
+            self.walk_expr(state, expr.inner0, self.argument_use(expr.inner0));
+            if ((i64)expr.inner1 < self.pool.args.len()) {
+                self.walk_args(state, (i64)expr.inner1 + 1, (i64)self.pool.args.get((i64)expr.inner1));
+            }
+        } else if (expr.kind == ExprKind.Cast) {
+            // A cast converts or views its operand (`(str)text`); it never moves it.
+            self.walk_expr(state, expr.inner0, FlowUse.Read);
+        } else if (expr.kind == ExprKind.Slice) {
+            self.walk_expr(state, expr.inner0, FlowUse.Read);
+            self.walk_expr(state, expr.inner1, FlowUse.Read);
+            self.walk_expr(state, expr.aux, FlowUse.Read);
+        } else if (expr.kind == ExprKind.Ternary) {
+            // A conditional, `match`, `?` fallback, or value block yields a
+            // new value that owns what its taken arm names, whatever the
+            // result is used for. Consuming a Copy value only reads it.
+            self.walk_expr(state, expr.inner0, FlowUse.Read);
+            FlowState other = state.clone();
+            self.walk_expr(state, expr.inner1, FlowUse.Consume);
+            self.walk_expr(&other, expr.aux, FlowUse.Consume);
+            self.join(state, &other);
+        } else if (expr.kind == ExprKind.Block) {
+            self.push_scope();
+            i64 i = 0;
+            while (i < (i64)expr.inner1) {
+                self.walk_stmt(state, self.pool.block_stmts.get((i64)expr.inner0 + i));
+                i += 1;
+            }
+            // The block hands its result out before its defers run, so a
+            // defer cannot consume it.
+            self.walk_expr(state, expr.aux, FlowUse.Consume);
+            self.pop_scope(state);
+        } else if (expr.kind == ExprKind.UnwrapOr) {
+            // `value ? fallback` consumes an owned value whatever its result
+            // is used for; a pointer or reference is only read.
+            TypeKind source = self.types.get(self.types.resolve_subst(
+                self.pool.get_expr(expr.inner0).inferred_type)).kind;
+            bool borrowed = source == TypeKind.Pointer || source == TypeKind.Reference;
+            self.walk_expr(state, expr.inner0, borrowed ? FlowUse.Read : FlowUse.Consume);
+            self.walk_branch(state, expr.inner1, FlowUse.Consume);
+        } else if (expr.kind == ExprKind.Match) {
+            self.walk_match(state, expr);
+        } else if (expr.kind == ExprKind.ArrayLit) {
+            i64 i = 0;
+            while (i < (i64)expr.aux) {
+                self.walk_expr(state, self.pool.args.get((i64)expr.inner1 + 1 + i), FlowUse.Consume);
+                i += 1;
+            }
+        } else if (expr.kind == ExprKind.StructLit) {
+            i64 i = 0;
+            while (i < (i64)expr.aux) {
+                self.walk_expr(state, self.pool.args.get((i64)expr.inner1 + i * 2 + 1),
+                               FlowUse.Consume);
+                i += 1;
+            }
+        } else if (expr.kind == ExprKind.Format) {
+            // `inner0` names the format string; only the arguments are expressions.
+            i64 i = 0;
+            while (i < (i64)expr.aux) {
+                self.walk_expr(state, self.pool.args.get((i64)expr.inner1 + i), FlowUse.Read);
+                i += 1;
+            }
+        } else if (expr.kind == ExprKind.Asm && (i64)expr.aux < self.pool.asms.len()) {
+            AstAsm item = self.pool.asms.get((i64)expr.aux);
+            i64 i = 0;
+            while (i < (i64)item.args_count) {
+                self.walk_expr(state, self.pool.args.get((i64)item.args_start + i), FlowUse.Read);
+                i += 1;
+            }
+        } else if (expr.kind == ExprKind.Assert) {
+            // A disabled assertion (`aux` 0) runs nothing. An enabled one runs
+            // its message only when it fails, which aborts.
+            if (expr.aux == 0) { return; }
+            self.walk_expr(state, expr.inner0, FlowUse.Read);
+            FlowState failure = state.clone();
+            self.walk_expr(&failure, expr.inner1, FlowUse.Read);
+        } else if (expr.kind == ExprKind.Fprint || expr.kind == ExprKind.DropInPlace) {
+            self.walk_expr(state, expr.inner0, FlowUse.Read);
+            self.walk_expr(state, expr.inner1, FlowUse.Read);
+        } else if (expr.kind == ExprKind.MemoryBuiltin) {
+            i64 i = 0;
+            while (i < 3 && (i64)expr.inner0 + i < self.pool.args.len()) {
+                self.walk_expr(state, self.pool.args.get((i64)expr.inner0 + i), FlowUse.Read);
+                i += 1;
+            }
+        } else if (expr.kind == ExprKind.Hash || expr.kind == ExprKind.Launch) {
+            self.walk_expr(state, expr.inner0, FlowUse.Read);
+        } else if (expr.kind == ExprKind.Wait) {
+            self.walk_expr(state, expr.inner0, FlowUse.Consume);
+        }
+    }
+
+    /// Rejects consuming a non-Copy element of a container through indexing:
+    /// the container still owns it and would drop it again.
+    /// Whether `callee` names a function that never returns, the same set
+    /// stage0's move check knows. A local or parameter of that name, such
+    /// as a callback, shadows it whatever its type.
+    bool never_returns(MoveFlow* self, u32 callee) {
+        if (callee == 0) { return false; }
+        AstExpr* target = self.pool.get_expr(callee);
+        if (target.kind != ExprKind.Var || self.names_local(target.aux)) { return false; }
+        str name = self.symbols.names.get(target.aux);
+        return strcmp(name, "abort") == 0 || strcmp(name, "silver_rt_abort") == 0
+            || strcmp(name, "exit") == 0 || strcmp(name, "sys_exit") == 0
+            || strcmp(name, "sys_exit_group") == 0 || strcmp(name, "__optional_abort") == 0
+            || strcmp(name, "__result_abort") == 0
+            || strcmp(name, "__silver_assert_failed") == 0;
+    }
+
+    void check_element_move(MoveFlow* self, AstExpr expr) {
+        if (expr.inferred_type == TYPE_UNKNOWN || self.is_copy(expr.inferred_type)) { return; }
+        u32 target_type = self.types.resolve_subst(self.pool.get_expr(expr.inner0).inferred_type);
+        TypeKind kind = self.types.get(target_type).kind;
+        if (kind == TypeKind.Pointer || kind == TypeKind.Array || kind == TypeKind.Tuple
+            || target_type == TYPE_UNKNOWN) { return; }
+        self.report(expr.span, cannot_move_out_of_indexed_element(self.types.type_name(target_type)));
+    }
+
+    /// The place of owned match binding `slot`, or -1 when its type is not
+    /// tracked.
+    i64 binding_place(MoveFlow* self, u32 slot, u32 name_id) {
+        i64 i = 0;
+        while (i < self.binding_places.len()) {
+            if (self.binding_places.get(i).stmt_id == slot) { return self.binding_places.get(i).place; }
+            i += 1;
+        }
+        u32 type_id = (i64)slot < self.pool.arm_binding_types.len()
+            ? self.pool.arm_binding_types.get((i64)slot) : TYPE_UNKNOWN;
+        i64 place = -1;
+        if (type_id != TYPE_UNKNOWN && self.tracks(type_id)) {
+            place = self.add_place(name_id, -1, 0, type_id);
+        }
+        FlowDeclaration declaration;
+        declaration.stmt_id = slot;
+        declaration.place = place;
+        self.binding_places.push(declaration);
+        return place;
+    }
+
+    /// Each arm starts from the state in which the arms before it missed. A
+    /// guard runs only after its pattern matched, so a refutable arm misses
+    /// with the state before or after its guard. A `move` payload binding
+    /// consumes the scrutinee on its arm and owns the payload there.
+    void walk_match(MoveFlow* self, FlowState* state, AstExpr expr) {
+        self.walk_expr(state, expr.inner0, FlowUse.Read);
+        bool unknown_element = false;
+        i64 scrutinee = self.resolve(expr.inner0, true, &unknown_element);
+        FlowState merged = FlowState.new();
+        i64 i = 0;
+        while (i < (i64)expr.aux) {
+            MatchArm arm = *self.pool.get_arm(expr.inner1 + (u32)i);
+            if (arm.guard_id != 0 && arm.moves_payload) {
+                self.report(arm.span, String.from_str(move_in_guarded_match_arm()));
+            }
+            self.push_scope();
+            bool refutable = arm.pattern == MatchPatternKind.Variant
+                || arm.pattern == MatchPatternKind.Literal;
+            FlowState missed = FlowState.new();
+            if (refutable && arm.guard_id != 0) { missed = state.clone(); }
+            i64 binding = 0;
+            while (binding < (i64)arm.bindings_count) {
+                u32 slot = arm.bindings_start + (u32)binding;
+                FlowLocal local;
+                local.name_id = self.pool.arm_bindings.get((i64)slot);
+                local.place = -1;
+                if (arm.moves_payload) { local.place = self.binding_place(slot, local.name_id); }
+                if (local.place >= 0) {
+                    self.set_tree(state, local.place, FlowInit.Init, FlowCause.Declared, arm.span);
+                }
+                self.locals.push(local);
+                binding += 1;
+            }
+            self.walk_expr(state, arm.guard_id, FlowUse.Read);
+            FlowState branch = state.clone();
+            self.join(state, &missed);
+            if (arm.moves_payload && scrutinee >= 0) {
+                self.use_place(&branch, scrutinee, FlowUse.Consume, unknown_element,
+                               self.pool.get_expr(expr.inner0).span);
+            }
+            if (arm.body_stmt_id != 0) {
+                self.walk_stmt(&branch, arm.body_stmt_id);
+            } else {
+                self.walk_expr(&branch, arm.value_id, FlowUse.Consume);
+            }
+            self.pop_scope(&branch);
+            self.join(&merged, &branch);
+            i += 1;
+        }
+        if (expr.aux > 0) { *state = move merged; }
+    }
+
+    // ---- Statements -------------------------------------------------------
+
+    void push_scope(MoveFlow* self) {
+        FlowScope scope;
+        scope.locals_start = self.locals.len();
+        scope.defers_start = self.defers.len();
+        self.scopes.push(scope);
+    }
+
+    /// Runs the defers of scopes deeper than `depth`, innermost first, on `state`.
+    void run_defers(MoveFlow* self, FlowState* state, i64 depth) {
+        i64 scope_index = self.scopes.len() - 1;
+        while (scope_index >= depth && scope_index >= 0) {
+            FlowScope scope = self.scopes.get(scope_index);
+            i64 end = scope_index + 1 < self.scopes.len()
+                ? self.scopes.get(scope_index + 1).defers_start : self.defers.len();
+            i64 i = end - 1;
+            while (i >= scope.defers_start) {
+                self.walk_defer(state, self.defers.get(i));
+                i -= 1;
+            }
+            scope_index -= 1;
+        }
+    }
+
+    /// Ends the innermost scope: its defers run on the fall-through path.
+    void pop_scope(MoveFlow* self, FlowState* state) {
+        FlowScope scope = self.scopes.get(self.scopes.len() - 1);
+        if (state.reachable) {
+            i64 i = self.defers.len() - 1;
+            while (i >= scope.defers_start) {
+                // A defer's own defers belong to the deferred statement.
+                FlowDefer deferred = self.defers.get(i);
+                self.defers.len = i;
+                self.walk_defer(state, deferred);
+                i -= 1;
+            }
+        }
+        self.defers.len = scope.defers_start;
+        self.locals.len = scope.locals_start;
+        self.scopes.len = self.scopes.len() - 1;
+    }
+
+    void walk_block(MoveFlow* self, FlowState* state, u32 stmt_id) {
+        AstStmt stmt = *self.pool.get_stmt(stmt_id);
+        if (stmt.kind != StmtKind.Block) {
+            self.push_scope();
+            self.walk_stmt(state, stmt_id);
+            self.pop_scope(state);
+            return;
+        }
+        self.walk_stmt(state, stmt_id);
+    }
+
+    void walk_loop(MoveFlow* self, FlowState* state, AstStmt stmt) {
+        AstExpr condition = *self.pool.get_expr(stmt.inner0);
+        bool literal = condition.kind == ExprKind.Literal && condition.aux == TYPE_BOOL;
+        bool endless = literal && strcmp(self.symbols.names.get(condition.inner0), "true") == 0;
+        if (literal && !endless) {
+            self.walk_expr(state, stmt.inner0, FlowUse.Read);
+            return;
+        }
+        FlowState head = state.clone();
+        FlowState exit = FlowState.new();
+        u32 pass = 0;
+        while (pass < MAX_FLOW_LOOP_PASSES) {
+            FlowState body = head.clone();
+            self.walk_expr(&body, stmt.inner0, FlowUse.Read);
+            exit = endless ? FlowState.new() : body.clone();
+            FlowLoop frame;
+            frame.scope_depth = self.scopes.len();
+            frame.breaks = FlowState.new();
+            frame.continues = FlowState.new();
+            self.loops.push(move frame);
+            self.walk_block(&body, stmt.inner1);
+            FlowLoop done = self.loops.pop();
+            self.join(&body, &done.continues);
+            if (stmt.aux != 0) { self.walk_stmt(&body, stmt.aux); }
+            self.join(&exit, &done.breaks);
+            FlowState next = head.clone();
+            self.join(&next, &body);
+            bool stable = self.same(&next, &head);
+            head = move next;
+            if (stable) { break; }
+            pass += 1;
+        }
+        *state = move exit;
+    }
+
+    void walk_stmt(MoveFlow* self, FlowState* state, u32 stmt_id) {
+        if (stmt_id == 0) { return; }
+        AstStmt stmt = *self.pool.get_stmt(stmt_id);
+        if (stmt.kind == StmtKind.Defer) {
+            if (state.reachable) {
+                FlowDefer deferred;
+                deferred.stmt_id = stmt.inner0;
+                deferred.locals_len = self.locals.len();
+                self.defers.push(deferred);
+            }
+            return;
+        }
+        if (!state.reachable) {
+            if (stmt.kind == StmtKind.Let) {
+                FlowLocal local;
+                local.name_id = stmt.aux;
+                local.place = -1;
+                self.locals.push(local);
+            }
+            return;
+        }
+        if (stmt.kind == StmtKind.Let) {
+            u32 type_id = stmt.inner0;
+            if (stmt.inner1 != 0) {
+                self.walk_expr(state, stmt.inner1, FlowUse.Consume);
+                if (type_id == TYPE_UNKNOWN) { type_id = self.pool.get_expr(stmt.inner1).inferred_type; }
+            }
+            if (stmt.is_static) { type_id = TYPE_UNKNOWN; }
+            self.declare(state, stmt_id, stmt.aux, type_id, stmt.inner1 != 0, stmt.span);
+        } else if (stmt.kind == StmtKind.ResetLocal) {
+            i64 place = self.lookup(stmt.aux);
+            if (place >= 0) {
+                self.set_tree(state, place, FlowInit.Init, FlowCause.Declared, stmt.span);
+            }
+        } else if (stmt.kind == StmtKind.Assign) {
+            self.walk_expr(state, stmt.inner1, FlowUse.Consume);
+            self.assign(state, stmt.inner0, stmt.aux != 0);
+        } else if (stmt.kind == StmtKind.Expr) {
+            self.walk_expr(state, stmt.inner0, FlowUse.Read);
+        } else if (stmt.kind == StmtKind.Return) {
+            self.walk_expr(state, stmt.inner0, self.argument_use(stmt.inner0));
+            self.run_defers(state, 0);
+            state.reachable = false;
+        } else if (stmt.kind == StmtKind.If) {
+            self.walk_expr(state, stmt.inner0, FlowUse.Read);
+            FlowState other = state.clone();
+            self.walk_block(state, stmt.inner1);
+            self.walk_block(&other, stmt.aux);
+            self.join(state, &other);
+        } else if (stmt.kind == StmtKind.While) {
+            self.walk_loop(state, stmt);
+        } else if (stmt.kind == StmtKind.Break || stmt.kind == StmtKind.Continue) {
+            if (self.loops.len() > 0) {
+                FlowLoop* frame = self.loops.get_ptr(self.loops.len() - 1);
+                self.run_defers(state, frame.scope_depth);
+                frame = self.loops.get_ptr(self.loops.len() - 1);
+                if (stmt.kind == StmtKind.Break) {
+                    self.join(&frame.breaks, state);
+                } else {
+                    self.join(&frame.continues, state);
+                }
+            }
+            state.reachable = false;
+        } else if (stmt.kind == StmtKind.Block) {
+            self.push_scope();
+            i64 i = 0;
+            while (i < (i64)stmt.aux) {
+                self.walk_stmt(state, self.pool.block_stmts.get((i64)stmt.inner0 + i));
+                i += 1;
+            }
+            self.pop_scope(state);
+        }
+    }
+
+    /// Records a store into `target`: a tracked place becomes initialized;
+    /// any other target is an expression the store reads through. A
+    /// `compound` assignment's value already read the target, which codegen
+    /// evaluates once, so its subscripts are not walked again.
+    void assign(MoveFlow* self, FlowState* state, u32 target, bool compound) {
+        bool unknown_element = false;
+        i64 place = self.resolve(target, true, &unknown_element);
+        AstExpr expr = *self.pool.get_expr(target);
+        if (compound && place < 0) { return; }
+        if (!compound) {
+            if (place >= 0) {
+                self.walk_subscripts(state, target);
+            } else if (expr.kind == ExprKind.Index) {
+                self.walk_expr(state, expr.inner1, FlowUse.Read);
+            }
+        }
+        if (place < 0) {
+            if (expr.kind == ExprKind.Field || expr.kind == ExprKind.Index) {
+                self.walk_expr(state, expr.inner0, FlowUse.Read);
+            } else if (expr.kind != ExprKind.Var) {
+                self.walk_expr(state, target, FlowUse.Read);
+            }
+            return;
+        }
+        // An element store with an unknown index initializes no particular element.
+        if (unknown_element) { return; }
+        self.set_tree(state, place, FlowInit.Init, FlowCause.Declared, expr.span);
+    }
+}
+
+/// Checks moves and initialization in one body. `parameters` holds the
+/// body's parameters as name/type pairs; `stmt_ids` are its lowered
+/// statements. Returns false when it reported an error.
+bool move_flow_check(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode* root,
+                     Vec<LocalVar>* parameters, Vec<u32>* stmt_ids, DiagnosticBag* diagnostics) {
+    MoveFlow flow = MoveFlow.new(pool, types, symbols, root, diagnostics);
+    FlowState state = FlowState.new();
+    state.reachable = true;
+    flow.push_scope();
+    i64 i = 0;
+    while (i < parameters.len()) {
+        LocalVar parameter = parameters.get(i);
+        flow.declare(&state, 0, parameter.name_id, parameter.type_id, true, Span.synthetic());
+        i += 1;
+    }
+    i = 0;
+    while (i < stmt_ids.len()) {
+        flow.walk_stmt(&state, stmt_ids.get(i));
+        i += 1;
+    }
+    flow.pop_scope(&state);
+    bool ok = !flow.failed;
+    return ok;
+}

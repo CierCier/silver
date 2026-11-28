@@ -267,14 +267,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     else { self.emit_value_with_target(argument, param_ty)? };
                 if let Some(signature) = &signature {
                     if signature.linkage.is_none() && !semantic_reference {
-                        let arg_drops = if let Some(arg_ty) = self.resolve_argument_type(argument) {
-                            self.param_type_drops_on_exit(&arg_ty).unwrap_or(false)
-                        } else if index < signature.params.len() {
-                            self.param_type_drops_on_exit(&signature.params[index])
-                                .unwrap_or(false)
-                        } else {
-                            false
-                        };
+                        let arg_drops =
+                            self.argument_moves_to_callee(argument, signature.params.get(index));
                         if arg_drops {
                             self.clear_drop_flag_of(argument)?;
                         }
@@ -323,15 +317,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         // ownership. Clear the caller's flag to avoid a
                         // double free; extern functions never drop params.
                         if signature.linkage.is_none() && !semantic_reference {
-                            let arg_drops =
-                                if let Some(arg_ty) = self.resolve_argument_type(argument) {
-                                    self.param_type_drops_on_exit(&arg_ty).unwrap_or(false)
-                                } else if index < signature.params.len() {
-                                    self.param_type_drops_on_exit(&signature.params[index])
-                                        .unwrap_or(false)
-                                } else {
-                                    false
-                                };
+                            let arg_drops = self
+                                .argument_moves_to_callee(argument, signature.params.get(index));
                             if arg_drops {
                                 self.clear_drop_flag_of(argument)?;
                             }
@@ -544,6 +531,25 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// Clear the tracked drop flag of `expr` when it names a local or
     /// parameter: ownership of the value is being transferred to a by-value
     /// callee that will run the destructor on its copy.
+    /// Whether a by-value `argument` for parameter `param` passes ownership
+    /// to the callee, which drops it. A `Slice` parameter only views a `Vec`
+    /// or array argument, which keeps its owner.
+    fn argument_moves_to_callee(&mut self, argument: &ast::Expression, param: Option<&ast::Type>) -> bool {
+        if param.is_some_and(|param| match param.kind.as_ref() {
+            ast::TypeKind::Named(named) => named.path.last().is_some_and(|seg| seg.name == "Slice"),
+            _ => false,
+        }) {
+            return false;
+        }
+        match self.resolve_argument_type(argument) {
+            Some(arg_ty) => self.param_type_drops_on_exit(&arg_ty).unwrap_or(false),
+            None => match param {
+                Some(param) => self.param_type_drops_on_exit(param).unwrap_or(false),
+                None => false,
+            },
+        }
+    }
+
     pub(crate) fn clear_drop_flag_of(&mut self, expr: &ast::Expression) -> CodegenResult<()> {
         if let ast::ExpressionKind::Identifier(ident) = expr.kind.as_ref() {
             if let Some(flag_ptr) = self.lookup_variable(&ident.name).and_then(|v| v.drop_flag) {
@@ -554,6 +560,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             self.clear_field_flags(&ident.name)?;
         } else if let Some((root_name, path)) = self.lvalue_root_and_path(expr) {
             self.clear_field_flags_for_path(&root_name, &path)?;
+        } else {
+            self.release_rvalue_field(expr)?;
         }
         Ok(())
     }
@@ -946,6 +954,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         let internal = signature.as_ref().is_some_and(|sig| Self::internal_abi(sig.linkage.as_ref()));
         let mut args = Vec::with_capacity(arguments.len() + usize::from(inject_receiver));
+        // The drop flag of a spilled receiver temporary, cleared by an explicit `drop()`.
+        let mut receiver_temporary_flag = None;
         if inject_receiver {
             let semantic_reference = signature.as_ref().and_then(|sig| sig.params.first())
                 .is_some_and(|ty| matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_)));
@@ -1045,11 +1055,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         {
                             let flag_name = format!("method.recv.tmp.{}.drop", self.temp_counter);
                             self.temp_counter += 1;
-                            let flag_alloca = self.create_entry_alloca(
-                                function_ctx,
-                                &flag_name,
-                                self.context.bool_type().as_basic_type_enum(),
-                            )?;
+                            let flag_alloca =
+                                self.create_entry_drop_flag(function_ctx, &flag_name)?;
                             self.builder
                                 .build_store(
                                     flag_alloca,
@@ -1064,6 +1071,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                     flag: Some(flag_alloca),
                                 });
                             }
+                            receiver_temporary_flag = Some(flag_alloca);
                         }
 
                         if semantic_reference {
@@ -1223,16 +1231,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 };
                 if let Some(signature) = &signature {
                     if signature.linkage.is_none() {
-                        let arg_drops = if expects_ref {
-                            false
-                        } else if let Some(arg_ty) = self.resolve_argument_type(argument) {
-                            self.param_type_drops_on_exit(&arg_ty).unwrap_or(false)
-                        } else if param_index < signature.params.len() {
-                            self.param_type_drops_on_exit(&signature.params[param_index])
-                                .unwrap_or(false)
-                        } else {
-                            false
-                        };
+                        let arg_drops = !expects_ref
+                            && self.argument_moves_to_callee(
+                                argument,
+                                signature.params.get(param_index),
+                            );
                         if arg_drops {
                             self.clear_drop_flag_of(argument)?;
                         }
@@ -1327,16 +1330,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         // ownership. Clear the caller's flag to avoid a
                         // double free; extern functions never drop params.
                         if signature.linkage.is_none() {
-                            let arg_drops = if expects_ref {
-                                false
-                            } else if let Some(arg_ty) = self.resolve_argument_type(argument) {
-                                self.param_type_drops_on_exit(&arg_ty).unwrap_or(false)
-                            } else if param_index < signature.params.len() {
-                                self.param_type_drops_on_exit(&signature.params[param_index])
-                                    .unwrap_or(false)
-                            } else {
-                                false
-                            };
+                            let arg_drops = !expects_ref
+                                && self.argument_moves_to_callee(
+                                    argument,
+                                    signature.params.get(param_index),
+                                );
                             if arg_drops {
                                 self.clear_drop_flag_of(argument)?;
                             }
@@ -1396,6 +1394,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         // the implicit destructor at scope exit doesn't double-free.
         if method.name == "drop" {
             self.clear_drop_flag_of(receiver)?;
+            if let Some(flag) = receiver_temporary_flag {
+                self.builder
+                    .build_store(flag, self.context.bool_type().const_int(0, false))
+                    .map_err(|e| CodegenError::new(format!("failed to clear temp drop flag: {e}")))?;
+            }
         }
 
         if let Some(value) = value {
