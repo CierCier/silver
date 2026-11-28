@@ -996,6 +996,17 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 self.register_enum_metadata(enum_item)?;
             }
         }
+        // Constant initializers may name a constant declared later.
+        for item in &program.items {
+            if let ast::ItemKind::GlobalVariable(global) = &item.kind
+                && !global.is_mutable
+                && !global.is_volatile
+                && let Some(init) = &global.initializer
+            {
+                self.const_global_initializers
+                    .insert(global.name.name.clone(), (global.var_type.clone(), init.clone()));
+            }
+        }
         // Pass 0b: lay out struct and enum bodies (field types resolve now).
         for item in &program.items {
             match &item.kind {
@@ -1881,7 +1892,8 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 // emit_defers (Bug A).
                 let saved_value = if let Some(expr) = expr {
                     let expr_span = expr.span;
-                    let mut value = self.emit_expression_value(expr)?;
+                    let return_type = self.current_return_type.clone();
+                    let mut value = self.emit_value_with_target(expr, return_type.as_ref())?;
                     self.transfer_owner_value(expr)?;
                     // Implicit move: `return x;` for a droppable local transfers
                     // ownership to the caller. Clear x's drop flag so the defers
@@ -1902,7 +1914,6 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                         }
                         self.clear_field_flags(&ident.name)?;
                     }
-                    let return_type = self.current_return_type.clone();
                     if let Some(return_ty) = &return_type {
                         value =
                             self.cast_expr_to_ast_type(value, Some(expr), return_ty, &expr_span)?;
