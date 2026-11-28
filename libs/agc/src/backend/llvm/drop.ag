@@ -1360,10 +1360,60 @@ bool llvm_enum_type_owns_payloads(LlvmContext* ctx, u32 type_id) {
 }
 
 /// Does moving a value of `type_id` move a drop with it? Either drop
-/// tracking covers the type or it is an enum whose payloads cleanup drops.
+/// tracking covers the type, it is an enum whose payloads cleanup drops, or
+/// it is an array, tuple, or struct that holds such an enum inline.
 bool llvm_value_transfers_ownership(LlvmContext* ctx, u32 type_id) {
-    return llvm_type_needs_tracking(ctx, type_id)
-        || llvm_enum_type_owns_payloads(ctx, type_id);
+    Vec<u32> active = Vec<u32>.new();
+    bool owns = llvm_value_transfers_ownership_inner(ctx, type_id, &active);
+    active.drop();
+    return owns;
+}
+
+bool llvm_value_transfers_ownership_inner(LlvmContext* ctx, u32 type_id, Vec<u32>* active) {
+    if (llvm_type_needs_tracking(ctx, type_id) || llvm_enum_type_owns_payloads(ctx, type_id)) {
+        return true;
+    }
+    u32 resolved = ctx.types.resolve_subst(type_id);
+    if (resolved == TYPE_UNKNOWN || resolved == 0) { return false; }
+    TypeEntry* entry = ctx.types.get(resolved);
+    if (entry.kind == TypeKind.Array) {
+        return entry.count > 0 && llvm_value_transfers_ownership_inner(ctx, entry.inner, active);
+    }
+    if (entry.kind == TypeKind.Tuple) {
+        i64 i = 0;
+        while (i < entry.count) {
+            if (llvm_value_transfers_ownership_inner(ctx,
+                    ctx.types.type_args.get(entry.inner + (u32)i), active)) {
+                return true;
+            }
+            i += 1;
+        }
+        return false;
+    }
+    if (entry.kind != TypeKind.Named) { return false; }
+    str type_name = ctx.types.names.get(entry.name_id);
+    if (find_enum_item(ctx.root, type_name) != (SyntaxNode*)0) { return false; }
+    i64 ai = 0;
+    while (ai < active.len()) {
+        if (active.get(ai) == resolved) { return false; }
+        ai += 1;
+    }
+    LlvmStructDef* def = ctx.find_struct_by_str(type_name);
+    if (def == (LlvmStructDef*)0) { return false; }
+    active.push(resolved);
+    i64 i = 0;
+    while (i < def.fields.len()) {
+        LlvmFieldInfo* field = def.fields.get_ptr(i);
+        u32 field_ty = mono_resolve_struct_field_type(ctx, resolved, field.type_id);
+        if (field_ty != TYPE_UNKNOWN && field_ty != 0
+            && llvm_value_transfers_ownership_inner(ctx, field_ty, active)) {
+            active.pop();
+            return true;
+        }
+        i += 1;
+    }
+    active.pop();
+    return false;
 }
 
 /// Whether the value `src_id` reads is drop-tracked. A local registered for
