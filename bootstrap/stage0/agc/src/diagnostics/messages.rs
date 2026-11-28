@@ -101,6 +101,11 @@ pub fn duplicate_symbol(name: &str) -> String {
     format!("duplicate symbol '{name}'")
 }
 
+/// `kind` is `struct` or `enum`.
+pub fn type_contains_itself(kind: &str, name: &str) -> String {
+    format!("{kind} '{name}' contains itself by value; use a pointer")
+}
+
 pub fn inherent_drop_not_trait_impl() -> &'static str {
     "inherent method 'drop' is not a Drop trait impl; consider 'impl Drop<T> for T' instead"
 }
