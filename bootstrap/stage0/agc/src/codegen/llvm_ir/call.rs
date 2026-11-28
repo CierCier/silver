@@ -70,7 +70,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             let semantic_reference = func_type.parameters.get(index)
                 .is_some_and(|ty| matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_)));
             let mut value = if semantic_reference { self.emit_reference_argument(argument)? }
-                else { self.emit_expression_value(argument)? };
+                else { self.emit_value_with_target(argument, func_type.parameters.get(index))? };
             if index < declared_param_count {
                 if let Some(casted) = self.try_apply_user_cast(
                     value,
@@ -260,10 +260,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         if is_slice_variadic {
             let fixed_count = declared_param_count.saturating_sub(1);
             for (index, argument) in arguments.iter().take(fixed_count).enumerate() {
-                let semantic_reference = signature.as_ref().and_then(|sig| sig.params.get(index))
+                let param_ty = signature.as_ref().and_then(|sig| sig.params.get(index));
+                let semantic_reference = param_ty
                     .is_some_and(|ty| matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_)));
                 let mut value = if semantic_reference { self.emit_reference_argument(argument)? }
-                    else { self.emit_expression_value(argument)? };
+                    else { self.emit_value_with_target(argument, param_ty)? };
                 if let Some(signature) = &signature {
                     if signature.linkage.is_none() && !semantic_reference {
                         let arg_drops =
@@ -304,10 +305,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         } else {
             for (index, argument) in arguments.iter().enumerate() {
                 let source_type = self.resolve_argument_type(argument);
-                let semantic_reference = signature.as_ref().and_then(|sig| sig.params.get(index))
+                let param_ty = signature.as_ref().and_then(|sig| sig.params.get(index));
+                let semantic_reference = param_ty
                     .is_some_and(|ty| matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_)));
                 let mut value = if semantic_reference { self.emit_reference_argument(argument)? }
-                    else { self.emit_expression_value(argument)? };
+                    else { self.emit_value_with_target(argument, param_ty)? };
                 if index < declared_param_count {
                     if let Some(signature) = &signature {
                         // By-value argument of a Drop type: the callee's
@@ -595,7 +597,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             let arr_alloca =
                 self.create_entry_alloca(function_ctx, "variadic.pack", arr_llvm_ty.into())?;
             for (i, arg) in arguments.iter().enumerate() {
-                let mut arg_val = self.emit_expression_value(arg)?;
+                let mut arg_val = self.emit_value_with_target(arg, Some(elem_ast_ty))?;
                 if let Some(casted) =
                     self.try_apply_user_cast(arg_val, arg, elem_ast_ty, &arg.span)?
                 {
@@ -1224,7 +1226,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         temp.as_basic_value_enum()
                     }
                 } else {
-                    self.emit_expression_value(argument)?
+                    let param_ty = signature.as_ref().and_then(|sig| sig.params.get(param_index));
+                    self.emit_value_with_target(argument, param_ty)?
                 };
                 if let Some(signature) = &signature {
                     if signature.linkage.is_none() {
@@ -1317,7 +1320,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         temp.as_basic_value_enum()
                     }
                 } else {
-                    self.emit_expression_value(argument)?
+                    let param_ty = signature.as_ref().and_then(|sig| sig.params.get(param_index));
+                    self.emit_value_with_target(argument, param_ty)?
                 };
                 if param_index < declared_param_count {
                     if let Some(signature) = &signature {

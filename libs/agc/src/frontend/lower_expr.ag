@@ -1824,24 +1824,9 @@ impl ExprLowerer {
         }
         temp_args.drop();
 
-        String constraints = String.from_str("={rax}");
-        str reg_names[7];
-        reg_names[0] = "{rax}";
-        reg_names[1] = "{rdi}";
-        reg_names[2] = "{rsi}";
-        reg_names[3] = "{rdx}";
-        reg_names[4] = "{r10}";
-        reg_names[5] = "{r8}";
-        reg_names[6] = "{r9}";
-
-        i64 r = 0;
-        while (r < (i64)args_count && r < 7) {
-            constraints.push((u8)',');
-            constraints.push_str(reg_names[r]);
-            r += 1;
-        }
-        constraints.push_str(",~{rcx},~{r11}");
-
+        // Only the caller's clobbers: codegen adds the target's fixed register
+        // model (result, input and always-clobbered registers).
+        String constraints = String.new();
         if (cursor != (SyntaxNode*)0 && cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Comma) {
             cursor = cursor.next_sibling;
         }
@@ -1859,7 +1844,7 @@ impl ExprLowerer {
                         pattern.push_str(cstr);
                         pattern.push((u8)'}');
                         if (!constraints.contains(pattern.to_str())) {
-                            constraints.push((u8)',');
+                            if (constraints.len() > 0) { constraints.push((u8)','); }
                             constraints.push_str(pattern.to_str());
                         }
                         pattern.drop();
@@ -2279,7 +2264,10 @@ impl ExprLowerer {
 
     /// Lowers a `{ .field = value, ... }` or positional `{ value, ... }`
     /// struct literal of `struct_name`. Mixing the two forms is an error,
-    /// as in stage0.
+    /// as in stage0. With no `struct_name` the literal is untyped: its
+    /// target (a return type or parameter type) names it during type
+    /// checking, and a positional entry records field name 0 for the
+    /// backend to place by position.
     u32 lower_struct_lit(ExprLowerer* self, str struct_name, SyntaxNode* block) {
         // Lower each entry into a name/expr pair; a positional entry takes
         // the next declared field. Malformed entries fail closed.
@@ -2316,18 +2304,25 @@ impl ExprLowerer {
                 positional = true;
             }
             position += 1;
+            bool untyped_positional = positional && struct_name == (str)0;
             if (named && positional) {
                 self.record_error(String.from_str(struct_initializer_mixed_entries()), cur.span);
                 name_node = (SyntaxNode*)0;
+                untyped_positional = false;
             }
-            if (name_node == (SyntaxNode*)0) {
+            if (name_node == (SyntaxNode*)0 && !untyped_positional) {
                 pairs.drop();
                 self.unsupported = true;
                 return 0;
             }
             SyntaxNode* after = (SyntaxNode*)0;
             u32 val_id = 0;
-            if (value_start != (SyntaxNode*)0 && value_start.kind == NodeKind.Block) {
+            if (value_start != (SyntaxNode*)0 && value_start.kind == NodeKind.Block
+                && struct_name == (str)0) {
+                // The enclosing target's field type names a nested literal.
+                val_id = self.lower_struct_lit((str)0, value_start);
+                after = value_start.next_sibling;
+            } else if (value_start != (SyntaxNode*)0 && value_start.kind == NodeKind.Block) {
                 u32 field_type = self.struct_field_type(struct_name, name_node.text);
                 TypeEntry* field_entry = self.types.get(field_type);
                 if (field_entry.kind == TypeKind.Named) {
@@ -2337,7 +2332,8 @@ impl ExprLowerer {
                 }
             } else {
                 u32 saved_expected_type = self.expected_type_id;
-                self.expected_type_id = self.struct_field_type(struct_name, name_node.text);
+                self.expected_type_id = struct_name == (str)0 ? TYPE_UNKNOWN
+                    : self.struct_field_type(struct_name, name_node.text);
                 val_id = self.lower_sequence_until_comma(value_start, &after);
                 self.expected_type_id = saved_expected_type;
             }
@@ -2346,7 +2342,7 @@ impl ExprLowerer {
                 self.unsupported = true;
                 return 0;
             }
-            pairs.push(self.names.intern(name_node.text));
+            pairs.push(untyped_positional ? (u32)0 : self.names.intern(name_node.text));
             pairs.push(val_id);
             cur = after;
         }
@@ -2880,7 +2876,7 @@ impl ExprLowerer {
                 && strcmp(name_node.text, "cfg") == 0) {
                 SyntaxNode* paren = name_node.next_sibling;
                 if (paren != (SyntaxNode*)0 && paren.kind == NodeKind.Parenthesized) {
-                    CfgSet defaults = linux_defaults();
+                    CfgSet defaults = cfg_lowering_defaults();
                     i64 val = self.cfg == (CfgSet*)0 ? cfg_argument_value(paren, &defaults)
                         : cfg_argument_value(paren, self.cfg);
                     *next_out = paren.next_sibling;
@@ -3040,7 +3036,7 @@ impl ExprLowerer {
                 while (arg != (SyntaxNode*)0) {
                     if (arg.kind != NodeKind.Token || arg.token_kind != TokenKind.Comma) {
                         SyntaxNode* next_arg = (SyntaxNode*)0;
-                        u32 arg_id = self.lower_sequence_until_comma(arg, &next_arg);
+                        u32 arg_id = self.lower_call_argument(arg, &next_arg);
                         if (arg_id != 0) {
                             temp_args.push(arg_id);
                         }
@@ -3106,7 +3102,7 @@ impl ExprLowerer {
                     while (arg != (SyntaxNode*)0) {
                         if (arg.kind != NodeKind.Token || arg.token_kind != TokenKind.Comma) {
                             SyntaxNode* next_arg = (SyntaxNode*)0;
-                            u32 arg_id = self.lower_sequence_until_comma(arg, &next_arg);
+                            u32 arg_id = self.lower_call_argument(arg, &next_arg);
                             if (arg_id != 0) {
                                 temp_args.push(arg_id);
                             }
@@ -3142,7 +3138,7 @@ impl ExprLowerer {
                 while (arg != (SyntaxNode*)0) {
                     if (arg.kind != NodeKind.Token || arg.token_kind != TokenKind.Comma) {
                         SyntaxNode* next_arg = (SyntaxNode*)0;
-                        u32 arg_id = self.lower_sequence_until_comma(arg, &next_arg);
+                        u32 arg_id = self.lower_call_argument(arg, &next_arg);
                         if (arg_id != 0) {
                             temp_args.push(arg_id);
                         }
@@ -3176,7 +3172,7 @@ impl ExprLowerer {
                         while (arg != (SyntaxNode*)0) {
                             if (arg.kind != NodeKind.Token || arg.token_kind != TokenKind.Comma) {
                                 SyntaxNode* next_arg = (SyntaxNode*)0;
-                                u32 arg_id = self.lower_sequence_until_comma(arg, &next_arg);
+                                u32 arg_id = self.lower_call_argument(arg, &next_arg);
                                 if (arg_id != 0) {
                                     temp_args.push(arg_id);
                                 }
@@ -3373,6 +3369,20 @@ impl ExprLowerer {
     }
 
     /// Lowers one expression up to the next top-level `,`.
+    /// Lowers one call argument from `start` up to the next comma. A lone
+    /// brace initializer lowers as an untyped struct literal, which the
+    /// parameter type names during type checking.
+    u32 lower_call_argument(ExprLowerer* self, SyntaxNode* start, SyntaxNode** next_out) {
+        SyntaxNode* after = start.next_sibling;
+        if (start.kind == NodeKind.Block
+            && (after == (SyntaxNode*)0
+                || (after.kind == NodeKind.Token && after.token_kind == TokenKind.Comma))) {
+            *next_out = after;
+            return self.lower_struct_lit((str)0, start);
+        }
+        return self.lower_sequence_until_comma(start, next_out);
+    }
+
     u32 lower_sequence_until_comma(ExprLowerer* self, SyntaxNode* start, SyntaxNode** next_out) {
         SyntaxNode* cursor = start;
         i64 generic_depth = 0;
@@ -3536,8 +3546,12 @@ impl ExprLowerer {
 
         if (start.kind == NodeKind.Token && start.token_kind == TokenKind.Return) {
             u32 expr_id = 0;
-            if (start.next_sibling != end) {
-                expr_id = self.lower_sequence(start.next_sibling, end);
+            SyntaxNode* value = start.next_sibling;
+            if (value != end && value.kind == NodeKind.Block && value.next_sibling == end) {
+                // `return { ... };` takes the function's return type.
+                expr_id = self.lower_struct_lit((str)0, value);
+            } else if (value != end) {
+                expr_id = self.lower_sequence(value, end);
             }
             u32 id = self.pool.add_stmt_return(expr_id, start.span);
             stmt_ids.push(id);
@@ -4080,7 +4094,7 @@ impl ExprLowerer {
             return 0;
         }
 
-        CfgSet defaults = linux_defaults();
+        CfgSet defaults = cfg_lowering_defaults();
         i64 cfg_val = self.cfg == (CfgSet*)0 ? cfg_condition_value(cond_node, &defaults)
             : cfg_condition_value(cond_node, self.cfg);
 

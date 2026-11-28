@@ -2,8 +2,68 @@
 import std.test;
 import std.math_int;
 
+// Constants defined from other constants fold at compile time, in any
+// declaration order, wrapping to the declared type.
+const i64 DERIVED_SIZE = BASE_SIZE * 4 + 1;
+const i64 BASE_SIZE = 10;
+const u8 WRAPPED_SIZE = (u8)(BASE_SIZE * 30);
+const i32 LOW_MASK = (1 << 12) - 1;
+const i8 SMALL_STEP = 3;
+const i8 WRAPPED_STEP = -SMALL_STEP - 126;
+const bool SIZES_VALID = BASE_SIZE > 5 && LOW_MASK == 4095;
+const u64 HIGH_BIT = (u64)1 << 63;
+const u64 HALF_HIGH_BIT = HIGH_BIT / 2;
+const bool HIGH_BIT_POSITIVE = HIGH_BIT > (u64)0;
+const u8 HALF_OF_WIDE = (u8)(WIDE_BASE / 2);
+const i32 WIDE_BASE = 256;
+const u64 ALL_ONES = 18446744073709551615;
+const u64 ALL_ONES_SQUARED = ALL_ONES * ALL_ONES;
+const bool ALL_ONES_MATCH = ALL_ONES == 18446744073709551615;
+const i8 NARROW_TERM = 100;
+const i32 WIDENED_SUM = NARROW_TERM + WIDE_BASE;
+const bool LITERALS_EQUAL = (1 + 1) == 2;
+const i32 MINUS_ONE = -1;
+const u32 PLUS_ONE = 1;
+const bool MIXED_SIGN_LESS = MINUS_ONE < PLUS_ONE;
+const bool MIXED_SIGN_GREATER = PLUS_ONE > MINUS_ONE;
+const u8 BYTE_ZERO = 0;
+const bool MIXED_SUM_NEGATIVE = (MINUS_ONE + BYTE_ZERO) < (i32)0;
+const u8 BYTE_MAX = 255;
+const i32 BYTE_COMPLEMENT = ~BYTE_MAX;
+const u8 HALF_OF_LITERAL = (u8)(256 / 2);
+
 i32 main() {
     STDOUT.write_str("=== Math Int Tests ===\n\n");
+
+    // --- constant initializers ---
+    STDOUT.write_str("--- constant initializers ---\n");
+    {
+        assert_eq_i64(41, DERIVED_SIZE, "constant defined from a later constant");
+        assert_eq_i64(44, (i64)WRAPPED_SIZE, "cast constant wraps to u8");
+        assert_eq_i32(4095, LOW_MASK, "shift and subtract fold");
+        assert_eq_i64(127, (i64)WRAPPED_STEP, "i8 constant wraps on overflow");
+        assert_true(SIZES_VALID, "comparisons fold to bool");
+        assert_eq_u64(9223372036854775808, HIGH_BIT, "u64 high bit");
+        assert_eq_u64(4611686018427387904, HALF_HIGH_BIT, "unsigned division of the high bit");
+        assert_true(HIGH_BIT_POSITIVE, "u64 comparison is unsigned");
+        assert_eq_i64(128, (i64)HALF_OF_WIDE, "i32 division happens before the u8 cast");
+        assert_eq_u64(1, ALL_ONES_SQUARED, "u64 multiplication wraps");
+        assert_true(ALL_ONES_MATCH, "wide literal compares at the u64 width beside it");
+        assert_eq_i32(356, WIDENED_SUM, "i8 + i32 widens to i32");
+        assert_true(LITERALS_EQUAL, "literal arithmetic inside a comparison");
+        i32 minus_one = MINUS_ONE;
+        u32 plus_one = PLUS_ONE;
+        assert_true(MIXED_SIGN_LESS == (minus_one < plus_one),
+                    "mixed-sign constant comparison matches runtime");
+        assert_true(MIXED_SIGN_GREATER == (plus_one > minus_one),
+                    "mixed-sign constant comparison matches runtime (reversed)");
+        u8 byte_zero = BYTE_ZERO;
+        assert_true(MIXED_SUM_NEGATIVE == ((minus_one + byte_zero) < (i32)0),
+                    "mixed-sign constant sum keeps its runtime type");
+        assert_eq_i32(0, BYTE_COMPLEMENT, "u8 complement happens before widening");
+        assert_eq_i64(128, (i64)HALF_OF_LITERAL, "literal division happens before the u8 cast");
+    }
+
 
     // --- abs_i64 ---
     STDOUT.write_str("--- abs_i64 ---\n");

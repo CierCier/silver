@@ -713,6 +713,16 @@ impl MoveFlow {
         return -1;
     }
 
+    /// Whether a visible local or parameter, tracked or not, is named `name_id`.
+    bool names_local(MoveFlow* self, u32 name_id) {
+        i64 i = self.locals.len() - 1;
+        while (i >= 0) {
+            if (self.locals.get(i).name_id == name_id && !self.is_hidden(i)) { return true; }
+            i -= 1;
+        }
+        return false;
+    }
+
     bool is_hidden(MoveFlow* self, i64 local) {
         i64 i = 0;
         while (i < self.hidden.len()) {
@@ -929,6 +939,8 @@ impl MoveFlow {
         } else if (expr.kind == ExprKind.Call) {
             self.walk_expr(state, expr.inner0, FlowUse.Read);
             self.walk_args(state, (i64)expr.inner1, (i64)expr.aux);
+            // Nothing after a call that never returns runs on this path.
+            if (self.never_returns(expr.inner0)) { state.reachable = false; }
         } else if (expr.kind == ExprKind.MethodCall) {
             self.walk_expr(state, expr.inner0, self.argument_use(expr.inner0));
             if ((i64)expr.inner1 < self.pool.args.len()) {
@@ -1023,6 +1035,21 @@ impl MoveFlow {
 
     /// Rejects consuming a non-Copy element of a container through indexing:
     /// the container still owns it and would drop it again.
+    /// Whether `callee` names a function that never returns, the same set
+    /// stage0's move check knows. A local or parameter of that name, such
+    /// as a callback, shadows it whatever its type.
+    bool never_returns(MoveFlow* self, u32 callee) {
+        if (callee == 0) { return false; }
+        AstExpr* target = self.pool.get_expr(callee);
+        if (target.kind != ExprKind.Var || self.names_local(target.aux)) { return false; }
+        str name = self.symbols.names.get(target.aux);
+        return strcmp(name, "abort") == 0 || strcmp(name, "silver_rt_abort") == 0
+            || strcmp(name, "exit") == 0 || strcmp(name, "sys_exit") == 0
+            || strcmp(name, "sys_exit_group") == 0 || strcmp(name, "__optional_abort") == 0
+            || strcmp(name, "__result_abort") == 0
+            || strcmp(name, "__silver_assert_failed") == 0;
+    }
+
     void check_element_move(MoveFlow* self, AstExpr expr) {
         if (expr.inferred_type == TYPE_UNKNOWN || self.is_copy(expr.inferred_type)) { return; }
         u32 target_type = self.types.resolve_subst(self.pool.get_expr(expr.inner0).inferred_type);

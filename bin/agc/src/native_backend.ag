@@ -23,7 +23,9 @@ import agc;
 import frontend.serialize;
 import frontend.lint;
 import frontend.messages;
+import backend.llvm.bt_lines;
 import backend.llvm.optimization;
+import backend.llvm.target;
 
 #[link(c)]
 #[link(pthread)]
@@ -337,9 +339,22 @@ void native_set_tool(String* tool, str environment_name) {
     }
 }
 
+/// The glibc dynamic loader of `triple` as (file name, standard path).
+str native_dynamic_linker_name(str triple) {
+    return llvm_target_arch(triple) == LlvmTargetArch.Aarch64
+        ? "ld-linux-aarch64.so.1" : "ld-linux-x86-64.so.2";
+}
+
+/// The standard install path of the glibc dynamic loader of `triple`.
+str native_dynamic_linker_standard_path(str triple) {
+    return llvm_target_arch(triple) == LlvmTargetArch.Aarch64
+        ? "/lib/ld-linux-aarch64.so.1" : "/lib64/ld-linux-x86-64.so.2";
+}
+
 /// Asks the C compiler (`SILVER_STAGE1_CC`, default `cc`) for the path of
-/// `ld-linux-x86-64.so.2`. Forks a child process. Returns false when unknown.
-bool native_discover_dynamic_linker(String* output) {
+/// the host's glibc loader `loader_name`. Forks a child process. Returns
+/// false when unknown.
+bool native_discover_dynamic_linker(String* output, str loader_name) {
     String compiler = String.from_str("cc");
     native_set_tool(&compiler, "SILVER_STAGE1_CC");
 
@@ -359,9 +374,11 @@ bool native_discover_dynamic_linker(String* output) {
         sys_close((i64)fds[0]);
         if (sys_dup2((i64)fds[1], 1) < 0) { sys_exit_group(127); }
         if (fds[1] != 1) { sys_close((i64)fds[1]); }
+        String query = String.from_str("-print-file-name=");
+        query.push_str(loader_name);
         str argv[3];
         argv[0] = compiler.to_str();
-        argv[1] = "-print-file-name=ld-linux-x86-64.so.2";
+        argv[1] = query.to_str();
         argv[2] = (str)0;
         i8** envp = silver_envp();
         sys_execve((i64)compiler.to_str(), (i64)&argv[0], (i64)envp);
@@ -1116,33 +1133,91 @@ i32 native_cache_command(CliMatches* cli, bool color) {
     return 2;
 }
 
-/// Returns true for the `run` command.
-bool native_is_run(Vec<String>* arguments) {
-    i64 i = 1;
-    while (i < arguments.len()) {
-        String* argument = arguments.get_ptr(i);
-        if (argument.equals("--")) { return false; }
-        if (argument.equals("run") || argument.equals("r")) { return true; }
-        i += 1;
-    }
-    return false;
+/// Returns true for the `run` command. Reads the parsed command so that an
+/// option value such as `-o run` is not mistaken for it.
+bool native_is_run(CliMatches* cli) {
+    return cli.command.equals("run");
 }
 
-/// Returns true when only an object file is requested (`--emit object`).
-bool native_emit_object_requested(Vec<String>* arguments) {
-    i64 i = 1;
-    while (i < arguments.len()) {
-        String* argument = arguments.get_ptr(i);
-        if (argument.equals("--emit=object")) { return true; }
-        if (argument.equals("--emit") && i + 1 < arguments.len()
-            && arguments.get_ptr(i + 1).equals("object")) {
-            return true;
+/// What a native build writes at its output path. Every kind but
+/// `Executable` compiles one LLVM module and skips the link step.
+enum NativeOutputKind {
+    Executable;
+    Object;
+    Assembly;
+    LlvmIr;
+}
+
+/// Returns the `--emit` spelling of `kind`, for diagnostics.
+str native_output_kind_name(NativeOutputKind kind) {
+    if (kind == NativeOutputKind.Object) { return "obj"; }
+    if (kind == NativeOutputKind.Assembly) { return "asm"; }
+    if (kind == NativeOutputKind.LlvmIr) { return "llvm-ir"; }
+    return "exe";
+}
+
+/// Returns the default output extension for a non-executable `kind`.
+str native_output_extension(NativeOutputKind kind) {
+    if (kind == NativeOutputKind.Assembly) { return "s"; }
+    if (kind == NativeOutputKind.LlvmIr) { return "ll"; }
+    return "o";
+}
+
+/// Reads the output kind from `--emit`, `-c`, `-S`, and `--emit-llvm`,
+/// following stage0: `--emit` wins over the short flags, and more than one
+/// short flag is a conflict. Module emission (`module_object`) always
+/// writes an object. Prints a diagnostic and returns false for a conflict
+/// or a kind the native backend cannot produce.
+bool native_output_kind(CliMatches* cli, bool module_object, NativeOutputKind* kind) {
+    *kind = NativeOutputKind.Executable;
+    if (module_object) {
+        *kind = NativeOutputKind.Object;
+        return true;
+    }
+    Optional<String> emit = cli.value("emit");
+    if (emit.is_some()) {
+        String value = emit.unwrap();
+        bool known = true;
+        if (value.equals("obj") || value.equals("object")) {
+            *kind = NativeOutputKind.Object;
+        } else if (value.equals("asm")) {
+            *kind = NativeOutputKind.Assembly;
+        } else if (value.equals("llvm-ir")) {
+            *kind = NativeOutputKind.LlvmIr;
+        } else if (!value.equals("exe")) {
+            known = false;
+            String message = unsupported_native_output_kind(value.to_str());
+            STDERR.write_str("agc: error: ");
+            STDERR.write_str(message.to_str());
+            STDERR.write_str("\n");
+            message.drop();
         }
-        i += 1;
+        value.drop();
+        return known;
     }
-    return false;
+    i32 flag_count = 0;
+    if (cli.has("compile-only")) {
+        *kind = NativeOutputKind.Object;
+        flag_count += 1;
+    }
+    if (cli.has("emit-asm")) {
+        *kind = NativeOutputKind.Assembly;
+        flag_count += 1;
+    }
+    if (cli.has("emit-llvm")) {
+        *kind = NativeOutputKind.LlvmIr;
+        flag_count += 1;
+    }
+    if (flag_count > 1) {
+        String message = conflicting_output_kind_flags();
+        STDERR.write_str("agc: error: ");
+        STDERR.write_str(message.to_str());
+        STDERR.write_str("\n");
+        message.drop();
+        return false;
+    }
+    return true;
 }
-
 
 /// Returns true when a static link is requested.
 bool native_static_link_requested(Vec<String>* arguments) {
@@ -1194,31 +1269,44 @@ void native_append_run_args(Vec<String>* arguments, Command* command) {
     }
 }
 
-/// Returns false, reporting an error, for a target the native backend does
-/// not support.
-bool native_validate_target(CliMatches* cli) {
-    str host_triple_raw = LLVMGetDefaultTargetTriple();
-    String host_triple = String.from_str(host_triple_raw);
-    LLVMDisposeMessage(host_triple_raw);
+/// Returns true when the native backend emits code for `triple`: x86_64 or
+/// aarch64 Linux.
+bool native_triple_supported(str triple) {
+    return llvm_target_arch(triple) != LlvmTargetArch.Unsupported && llvm_target_is_linux(triple);
+}
 
-    bool supported_host = host_triple.starts_with("x86_64-")
-        && host_triple.contains("-linux-");
-    Optional<String> requested_target = cli.value("target");
-    bool supported_target = true;
-    if (requested_target.is_some()) {
-        String target = requested_target.unwrap();
-        supported_target = target.equals(host_triple.to_str());
-        target.drop();
-    }
+/// The triple a native build targets: `--target`, else the LLVM host triple.
+String native_target_triple(CliMatches* cli) {
+    Optional<String> requested = cli.value("target");
+    if (requested.is_some()) { return requested.unwrap(); }
+    return llvm_host_triple();
+}
+
+/// Returns true when binaries for `triple` cannot run directly on the host.
+bool native_target_is_foreign(str triple) {
+    String host = llvm_host_triple();
+    bool foreign = llvm_target_arch(triple) != llvm_target_arch(host.to_str());
+    host.drop();
+    return foreign;
+}
+
+/// Returns false, reporting an error, for a host or target the native
+/// backend does not support.
+bool native_validate_target(CliMatches* cli) {
+    String host_triple = llvm_host_triple();
+    bool supported_host = native_triple_supported(host_triple.to_str());
+    String target = native_target_triple(cli);
+    bool supported_target = native_triple_supported(target.to_str());
 
     if (!supported_host) {
-        STDERR.write_str("agc: error: stage1 native backend requires an x86_64 Linux host\n");
+        STDERR.write_str("agc: error: stage1 native backend requires an x86_64 or aarch64 Linux host\n");
     } else if (!supported_target) {
-        STDERR.write_str("agc: error: stage1 native backend supports only the host target triple (");
-        STDERR.write_str(host_triple.to_str());
-        STDERR.write_str(")\n");
+        STDERR.write_str("agc: error: stage1 native backend supports only x86_64 and aarch64 Linux targets, not ");
+        STDERR.write_str(target.to_str());
+        STDERR.write_str("\n");
     }
     host_triple.drop();
+    target.drop();
     return supported_host && supported_target;
 }
 
@@ -2380,12 +2468,14 @@ void native_print_diagnostic(Diagnostic* diagnostic, str root_path, String* root
     STDERR.write_str(rendered.to_str());
 }
 
-/// Compiles one module to an object file at `object_path`. Returns false
-/// when codegen, verification, or emission fails.
+/// Compiles one module and writes it to `object_path` as `output_kind`
+/// (an object unless the build emits assembly or IR). Returns false when
+/// codegen, verification, or emission fails.
 bool native_compile_module_object(SyntaxTree* tree, TypeTable* types, Interner* names,
                                  SymbolTable* symbols, Vec<String>* source_paths,
                                  str root_path, String* root_source,
-                                 bool debug_mode, bool module_object, LlvmOptimization optimization,
+                                 bool debug_mode, bool module_object, str target_triple,
+                                 LlvmOptimization optimization, NativeOutputKind output_kind,
                                  u32 source_file_id, Vec<u32>* owned_source_ids,
                                  Vec<u32>* standalone_source_ids, str object_path,
                                  String* cache_path, NativeBuildProgress* progress,
@@ -2408,7 +2498,7 @@ bool native_compile_module_object(SyntaxTree* tree, TypeTable* types, Interner* 
         native_progress_start(progress, progress_target);
         Instant t0 = now();
         AstPool ast_pool = AstPool.new();
-        LlvmGenerator gen = LlvmGenerator.new("silver_native", optimization);
+        LlvmGenerator gen = LlvmGenerator.new("silver_native", target_triple, optimization);
         bool compile_ok = gen.compile(tree, &ast_pool, types, names, symbols,
             source_paths, debug_mode, module_object, source_file_id,
             owned_source_ids, standalone_source_ids);
@@ -2477,9 +2567,18 @@ bool native_compile_module_object(SyntaxTree* tree, TypeTable* types, Interner* 
         }
         Instant t_e0 = now();
         String emit_err = String.new();
-        bool emitted = gen.emit_object_file(object_path, &emit_err);
+        bool emitted = false;
+        if (output_kind == NativeOutputKind.LlvmIr) {
+            emitted = gen.emit_ir_file(object_path, &emit_err);
+        } else if (output_kind == NativeOutputKind.Assembly) {
+            emitted = gen.emit_assembly_file(object_path, &emit_err);
+        } else {
+            emitted = gen.emit_object_file(object_path, &emit_err);
+        }
         if (!emitted) {
-            STDERR.write_str("agc: error: failed to emit object file: ");
+            STDERR.write_str("agc: error: failed to write ");
+            STDERR.write_str(object_path);
+            STDERR.write_str(": ");
             STDERR.write_str(emit_err.to_str());
             STDERR.write_str("\n");
             emit_err.drop();
@@ -2535,7 +2634,9 @@ struct NativeCompilePool {
     String* root_source;
     bool debug_mode;
     bool module_object;
+    str target_triple;
     LlvmOptimization optimization;
+    NativeOutputKind output_kind;
 }
 
 /// One compile worker with its own symbol table copy.
@@ -2573,7 +2674,8 @@ bool native_compile_one(NativeCompileWorker* worker) {
     result.compiled = native_compile_module_object(pool.tree,
         &worker.symbols.types, &worker.symbols.names, &worker.symbols,
         pool.source_paths, pool.root_path, pool.root_source, pool.debug_mode,
-        pool.module_object, pool.optimization, job.source_file_id, &job.owned_source_ids,
+        pool.module_object, pool.target_triple, pool.optimization, pool.output_kind,
+        job.source_file_id, &job.owned_source_ids,
         pool.standalone_source_ids, job.object_path.to_str(),
         &job.cache_path, &quiet, job.module_name.to_str(), &result.cached,
         &result.result, &result.ir_gen_ms, &result.verify_ms, &result.optimize_ms,
@@ -2602,7 +2704,8 @@ bool native_compile_jobs(SyntaxTree* tree, SymbolTable* symbols,
                          Vec<String>* source_paths, str root_path,
                          Vec<u32>* standalone_source_ids,
                          String* root_source, NativeBuildProgress* progress,
-                         bool debug_mode, bool module_object, LlvmOptimization optimization,
+                         bool debug_mode, bool module_object, str target_triple,
+                         LlvmOptimization optimization, NativeOutputKind output_kind,
                          i64 requested_jobs,
                          Vec<NativeCompileJob>* jobs,
                          Vec<NativeCompileResult>* results) {
@@ -2619,7 +2722,9 @@ bool native_compile_jobs(SyntaxTree* tree, SymbolTable* symbols,
     pool.root_source = root_source;
     pool.debug_mode = debug_mode;
     pool.module_object = module_object;
+    pool.target_triple = target_triple;
     pool.optimization = optimization;
+    pool.output_kind = output_kind;
 
     i64 worker_count = thread_available_parallelism();
     if (requested_jobs > 0 && requested_jobs < worker_count) {
@@ -2776,11 +2881,38 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         requested_jobs = parsed_jobs.unwrap();
         value.drop();
     }
-    bool emit_object = native_emit_object_requested(arguments);
-    NativeBuildProgress progress = native_build_progress(cli, !emit_object && !module_object);
+    NativeOutputKind output_kind = NativeOutputKind.Executable;
+    if (!native_output_kind(cli, module_object, &output_kind)) {
+        *result = 2;
+        return true;
+    }
+    bool links = output_kind == NativeOutputKind.Executable;
+    if (!links && native_is_run(cli)) {
+        String message = run_needs_executable(native_output_kind_name(output_kind));
+        STDERR.write_str("agc: error: ");
+        STDERR.write_str(message.to_str());
+        STDERR.write_str("\n");
+        message.drop();
+        *result = 2;
+        return true;
+    }
+    NativeBuildProgress progress = native_build_progress(cli, links);
     str progress_target = strlen(default_name) > 0 ? default_name : source_path;
+    // Like stage0, unlinked output defaults to `<source stem>.<ext>`.
+    String default_output = String.new();
+    if (links || module_object) {
+        default_output.push_str(default_name);
+    } else {
+        String stem = native_source_module_name(source_path);
+        default_output.push_str(stem.to_str());
+        default_output.push_str(".");
+        default_output.push_str(native_output_extension(output_kind));
+        stem.drop();
+    }
     String output = String.new();
-    if (!native_output_path(arguments, default_name, &output)) {
+    bool has_output = native_output_path(arguments, default_output.to_str(), &output);
+    default_output.drop();
+    if (!has_output) {
         output.drop();
         return false;
     }
@@ -2856,12 +2988,9 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     CfgSet cfg = linux_defaults();
     if (optimization != LlvmOptimization.Unspecified
         && optimization != LlvmOptimization.O0) { cfg.set_release(); }
-    Optional<String> requested_target = cli.value("target");
-    if (requested_target.is_some()) {
-        String target = requested_target.unwrap();
-        cfg_apply_target(&cfg, target.to_str());
-        target.drop();
-    }
+    String target_triple = native_target_triple(cli);
+    cfg_apply_target(&cfg, target_triple.to_str());
+    cfg_set_lowering_target(target_triple.to_str());
     Vec<String> includes = Vec<String>.new();
     i64 ei = 0;
     while (ei < extra_includes.len()) {
@@ -2948,7 +3077,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     Vec<NativeUnitPlan> unit_plans = Vec<NativeUnitPlan>.new();
     Vec<u32> standalone_source_ids = Vec<u32>.new();
     String root_module_name = native_source_module_name(source_path);
-    bool split_modules = !emit_object && !module_object;
+    bool split_modules = links && !module_object;
     if (split_modules) {
         native_make_unit_plans(&source_paths, &source_imports, &source_aliases,
             root_module_name.to_str(), &unit_plans, &standalone_source_ids);
@@ -3129,7 +3258,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         progress.codegen_items += split_modules
             ? plan.raw_item_count : progress.current_items;
         String object_path;
-        if (emit_object) {
+        if (!links) {
             object_path = output.clone();
         } else {
             String suffix = String.from_str(".");
@@ -3138,9 +3267,14 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
             object_path = native_temp_path(suffix.to_str(), pid);
             suffix.drop();
         }
-        String cache_path = native_object_cache_path(arguments, cli, source_path,
-            &source_paths, &link_objects, default_name, module_object,
-            source_file_id, &plan.owned_source_ids);
+        // The cache holds objects only; assembly and IR are always regenerated.
+        String cache_path = String.new();
+        if (links || output_kind == NativeOutputKind.Object) {
+            cache_path.drop();
+            cache_path = native_object_cache_path(arguments, cli, source_path,
+                &source_paths, &link_objects, default_name, module_object,
+                source_file_id, &plan.owned_source_ids);
+        }
         NativeCompileJob job;
         job.source_file_id = source_file_id;
         job.owned_source_ids = native_copy_source_ids(&plan.owned_source_ids);
@@ -3170,7 +3304,8 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     bool modules_ok = native_compile_jobs(&tree, &symbols, &source_paths,
         source_path, &standalone_source_ids, &source_copy, &progress,
         cfg.contains("debug"),
-        module_object, optimization, requested_jobs, &jobs, &results);
+        module_object, target_triple.to_str(), optimization, output_kind, requested_jobs,
+        &jobs, &results);
     if (profiler_verbose()) {
         i64 total_ir_gen = 0;
         i64 total_verify = 0;
@@ -3208,7 +3343,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         module_index += 1;
     }
     if (!modules_ok) {
-        if (!emit_object) {
+        if (links) {
             i64 i = 0;
             while (i < object_paths.len()) {
                 remove_file(object_paths.get_ptr(i).to_str());
@@ -3238,7 +3373,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     native_destroy_units(&pools, &streams);
     pool.destroy();
 
-    if (emit_object) {
+    if (!links) {
         native_progress_complete(&progress);
         profiler_print_report();
         object_paths.drop();
@@ -3248,6 +3383,27 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         *result = 0;
         return true;
     }
+
+    profiler_begin_phase("backtrace line table");
+    String bt_lines_path = native_temp_path(".bt_lines.o", pid);
+    String bt_lines_error = String.new();
+    if (!llvm_write_bt_line_object(&object_paths, target_triple.to_str(),
+            bt_lines_path.to_str(), &bt_lines_error)) {
+        STDERR.write_str("agc: error: failed to emit the backtrace line table: ");
+        STDERR.write_str(bt_lines_error.to_str());
+        STDERR.write_str("\n");
+        bt_lines_error.drop();
+        bt_lines_path.drop();
+        native_dispose_object_paths(&object_paths, true);
+        link_libs.drop();
+        link_objects.drop();
+        output.drop();
+        *result = 2;
+        return true;
+    }
+    bt_lines_error.drop();
+    object_paths.push(move bt_lines_path);
+    profiler_end_phase("backtrace line table");
 
     String linker = String.new();
     bool direct_linker = false;
@@ -3301,6 +3457,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         native_set_tool(&linker, "SILVER_STAGE1_CC");
     }
     Command cc_command = Command.new(linker.to_str());
+    bool foreign_target = native_target_is_foreign(target_triple.to_str());
     bool static_link = native_static_link_requested(arguments);
     bool has_dynamic_link_inputs = native_has_link_inputs(arguments) || link_libs.len() > 0;
     if (direct_linker && (linker.equals("lld") || linker.ends_with("/lld"))) {
@@ -3315,6 +3472,12 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         cc_command.arg(output.to_str());
         cc_command.arg("-nostdlib");
         cc_command.arg("-no-pie");
+        if (foreign_target) {
+            String target_flag = String.from_str("--target=");
+            target_flag.push_str(target_triple.to_str());
+            cc_command.arg(target_flag.to_str());
+            target_flag.drop();
+        }
     }
     i64 generated_index = 0;
     while (generated_index < object_paths.len()) {
@@ -3342,7 +3505,12 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
             String configured = dynamic_linker.unwrap();
             dl.push_str(configured.to_str());
             configured.drop();
-        } else if (direct_linker && !native_discover_dynamic_linker(&dl)) {
+        } else if (direct_linker && foreign_target) {
+            // ld.lld takes the machine from the objects; only the loader
+            // path is per architecture.
+            dl.push_str(native_dynamic_linker_standard_path(target_triple.to_str()));
+        } else if (direct_linker && !native_discover_dynamic_linker(&dl,
+                native_dynamic_linker_name(target_triple.to_str()))) {
             STDERR.write_str("agc: error: could not discover the dynamic linker; set SILVER_DYNAMIC_LINKER\n");
             dl.drop();
             linker.drop();
@@ -3503,8 +3671,18 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     native_progress_complete(&progress);
     profiler_print_report();
     i32 exit_code = 0;
-    if (native_is_run(arguments)) {
+    if (native_is_run(cli)) {
         Command run_command = Command.new(output.to_str());
+        if (foreign_target) {
+            // A Linux binary for another architecture runs under qemu user mode.
+            String runner = String.from_str("qemu-");
+            runner.push_str(llvm_target_arch(target_triple.to_str()) == LlvmTargetArch.Aarch64
+                ? "aarch64" : "x86_64");
+            native_set_tool(&runner, "SILVER_TEST_RUNNER");
+            run_command = Command.new(runner.to_str());
+            run_command.arg(output.to_str());
+            runner.drop();
+        }
         native_append_run_args(arguments, &run_command);
         Result<ExitStatus, i64> run_result = run_command.status();
         if (run_result.is_err()) {
