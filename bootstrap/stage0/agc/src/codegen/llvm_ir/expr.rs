@@ -38,10 +38,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             matches!(&arm.pattern.kind, ast::PatternKind::Enum { data: Some(data), .. }
                 if Self::match_payload_bindings(data, 0).1)
         });
-        if moves
-            && Self::is_named_place(expression)
-            && let Ok(place) = self.resolve_lvalue_place(expression)
-        {
+        // A field of a call result is read through a spilled, owned
+        // temporary, exactly as a plain read would: resolving its place
+        // evaluates the call once, and keeping that place lets the arm
+        // release the field so the temporary does not drop it again.
+        let rvalue_field = moves && Self::is_rvalue_field_place(expression);
+        let place = if rvalue_field {
+            Some(self.resolve_lvalue_place(expression)?)
+        } else if moves && Self::is_named_place(expression) {
+            self.resolve_lvalue_place(expression).ok()
+        } else {
+            None
+        };
+        if let Some(place) = place {
             let llvm_ty = self.lower_basic_type(&place.ty)?;
             let value = if self.lvalue_is_volatile(expression) {
                 self.emit_volatile_load(llvm_ty, place.ptr, "match.scrutinee")?
@@ -53,6 +62,18 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok((value, Some((place.ptr, place.ty, place.state))));
         }
         Ok((self.emit_expression_value(expression)?, None))
+    }
+
+    /// A field path whose root is a call result, such as
+    /// `make_holder().twin`.
+    fn is_rvalue_field_place(expression: &ast::Expression) -> bool {
+        match expression.kind.as_ref() {
+            ast::ExpressionKind::FieldAccess { object, .. } => match object.kind.as_ref() {
+                ast::ExpressionKind::Call { .. } | ast::ExpressionKind::MethodCall { .. } => true,
+                _ => Self::is_rvalue_field_place(object),
+            },
+            _ => false,
+        }
     }
 
     /// A place rooted at a named variable, so resolving its address

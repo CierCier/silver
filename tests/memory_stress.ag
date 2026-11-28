@@ -457,6 +457,14 @@ struct TwinHolder {
     LeafTwin twin;
 }
 
+/// A holder whose twin owns two fresh leaves.
+TwinHolder make_twin_holder(i32 left, i32 right) {
+    TwinHolder holder;
+    holder.id = 1;
+    holder.twin = LeafTwin.Both(OwnedLeaf.new(left, 1), OwnedLeaf.new(right, 2));
+    return move holder;
+}
+
 /// Refills `place` with a fresh leaf and yields `id`, so a later element of
 /// an aggregate can reinitialize what an earlier element moved.
 macro refill_leaf(place, id) {
@@ -725,6 +733,18 @@ void stress_conditional_and_borrowed_transfers() {
     }
     assert_eq_i32(leaf_drop_count, 2, "a partly moved field enum drops each payload once");
     assert_eq_i64(leaf_bytes_freed, 192, "a partly moved field enum frees each payload once");
+
+    // A field of a call result is matched through one temporary, so the arm
+    // and that temporary do not both drop the unnamed sibling.
+    reset_owner_counters();
+    {
+        match make_twin_holder(75, 76).twin {
+            Both(move left, _): { keep_leaf_id(move left); },
+            Neither: {},
+        };
+    }
+    assert_eq_i32(leaf_drop_count, 2, "a partly moved call-result field drops each payload once");
+    assert_eq_i64(leaf_bytes_freed, 3, "a partly moved call-result field frees each payload once");
 
     // A payload binding that reuses the scrutinee's name must not hide the
     // enum's own storage from the move-out, in a statement or a value match.
