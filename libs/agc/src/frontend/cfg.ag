@@ -147,6 +147,26 @@ CfgSet linux_defaults() {
     return set;
 }
 
+/// The target triple of the current native build, or null for the
+/// x86_64 Linux defaults. Set once before any lowering, then only read.
+str g_cfg_lowering_target;
+
+/// Makes expression lowering evaluate `@cfg` arch/os keys for `triple`,
+/// which must outlive every lowering.
+void cfg_set_lowering_target(str triple) {
+    g_cfg_lowering_target = triple;
+}
+
+/// Returns the key set expression lowering folds `@cfg` against: the Linux
+/// defaults, retargeted to the native build's triple when one is set.
+CfgSet cfg_lowering_defaults() {
+    CfgSet set = linux_defaults();
+    if (g_cfg_lowering_target != (str)0) {
+        cfg_apply_target(&set, g_cfg_lowering_target);
+    }
+    return move set;
+}
+
 /// Returns true when `part` equals `word`.
 bool cfg_part_equals(str part, str word) {
     return strcmp(part, word) == 0;

@@ -219,6 +219,16 @@ extern "C" {
     LLVMOpaqueType* LLVMIntTypeInContext(LLVMOpaqueContext* p0, u32 p1);
     /// Returns an array of `p1` elements of `p0`.
     LLVMOpaqueType* LLVMArrayType(LLVMOpaqueType* p0, u32 p1);
+    /// Returns a fixed vector of `p1` elements of `p0`.
+    LLVMOpaqueType* LLVMVectorType(LLVMOpaqueType* p0, u32 p1);
+    /// Returns the element type of an array, vector, or pointer type.
+    LLVMOpaqueType* LLVMGetElementType(LLVMOpaqueType* p0);
+    /// Returns an array type's element count.
+    u64 LLVMGetArrayLength2(LLVMOpaqueType* p0);
+    /// Returns a struct type's field count.
+    u32 LLVMCountStructElementTypes(LLVMOpaqueType* p0);
+    /// Returns field `p1` of a struct type.
+    LLVMOpaqueType* LLVMStructGetTypeAtIndex(LLVMOpaqueType* p0, u32 p1);
     /// Returns a function type: return `p0`, `p2` params from `p1`, variadic when
     /// `p3` is nonzero.
     LLVMOpaqueType* LLVMFunctionType(LLVMOpaqueType* p0, LLVMOpaqueType** p1, u32 p2, i32 p3);
@@ -606,6 +616,14 @@ extern "C" {
     /// Adds an attribute to a function (index -1), its return (0), or parameter i
     /// (i + 1).
     void LLVMAddAttributeAtIndex(LLVMOpaqueValue* p0, u32 p1, LLVMOpaqueAttributeRef* p2);
+    /// Adds an attribute to a call site, indexed like `LLVMAddAttributeAtIndex`.
+    void LLVMAddCallSiteAttribute(LLVMOpaqueValue* p0, u32 p1, LLVMOpaqueAttributeRef* p2);
+    /// Returns the enum attribute kind named `p0` (length `p1`), or 0.
+    u32 LLVMGetEnumAttributeKindForName(i8* p0, u64 p1);
+    /// Creates enum attribute kind `p1` with integer value `p2`.
+    LLVMOpaqueAttributeRef* LLVMCreateEnumAttribute(LLVMOpaqueContext* p0, u32 p1, u64 p2);
+    /// Creates type attribute kind `p1` (such as `sret` or `byval`) of type `p2`.
+    LLVMOpaqueAttributeRef* LLVMCreateTypeAttribute(LLVMOpaqueContext* p0, u32 p1, LLVMOpaqueType* p2);
 }
 
 /// Registers target info for every target this binding supports (x86,

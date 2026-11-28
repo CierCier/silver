@@ -531,9 +531,10 @@ impl BtLineTable {
 
 /// Writes an object defining `__silver_bt_lines` and its count from the
 /// line programs of `object_paths`, given in link order. The units define
-/// both weakly as empty, so this table replaces them when linked. Returns
-/// false with `*out_error` set when the object cannot be emitted.
-bool llvm_write_bt_line_object(Vec<String>* object_paths, str output_path,
+/// both weakly as empty, so this table replaces them when linked. The object
+/// is built for `target_triple`, the triple of the units it links with.
+/// Returns false with `*out_error` set when the object cannot be emitted.
+bool llvm_write_bt_line_object(Vec<String>* object_paths, str target_triple, str output_path,
                                String* out_error) {
     BtLineTable table = BtLineTable.new();
     i64 i = 0;
@@ -542,7 +543,7 @@ bool llvm_write_bt_line_object(Vec<String>* object_paths, str output_path,
         i += 1;
     }
 
-    LlvmGenerator generator = LlvmGenerator.new("__silver_bt_lines", LlvmOptimization.O0);
+    LlvmGenerator generator = LlvmGenerator.new("__silver_bt_lines", target_triple, LlvmOptimization.O0);
     LLVMOpaqueContext* ctx = generator.ctx;
     LLVMOpaqueModule* module = generator.module;
     LLVMOpaqueType* i64_type = LLVMInt64TypeInContext(ctx);
