@@ -932,6 +932,91 @@ class NativeLsp(unittest.TestCase):
                           (30, "cannot move 'leaf' out of 'Guard' because it implements Drop"),
                           (30, "cannot move 'leaf' out of 'Guard' because it implements Drop")])
 
+    def test_a_generic_body_is_move_checked_for_each_instantiation(self):
+        # A value of type `T` or `GW<T>` is owned only once `T` is bound, so
+        # each call is checked with its type arguments. A Copy instantiation of
+        # the same body, and a body whose own check already rejects it, report
+        # nothing new; a second call with the same owned type reports nothing again.
+        # A generic call inside an instance is checked with its own binding, and
+        # a recursive call is not checked again inside its own instance.
+        text = ("trait Drop { void drop(*self); }\n"
+                "struct Tok { i64 id; }\n"
+                "impl Drop for Tok { void drop(*self) { } }\n"
+                "struct GW<T> { T inner; }\n"
+                "struct Crate<T> { T* data; }\n"
+                "impl<T> Crate<T> { T __index_get(*self, i64 i) { return self.data[i]; } }\n"
+                "void dup<T>(T a) { T b = a; T c = a; }\n"
+                "void g<T>(GW<T> a) { GW<T> b = a; GW<T> c = a; }\n"
+                "void b4<T>(Crate<T> c) { GW<T> w = { .inner = c[0] }; }\n"
+                "void once<T>(T a) { T b = a; }\n"
+                "void both<T>(Tok t, T a) { Tok u = t; Tok v = t; }\n"
+                "Tok mk(i64 id) { Tok t; t.id = id; return move t; }\n"
+                "void twice<T>(T a) { T b = a; T c = a; }\n"
+                "void outer<T>(T a) { twice(a); }\n"
+                "void fan<T>(T a, i64 n) { if (n > 0) { fan(a, n - 1); fan(a, n - 2); } }\n"
+                "T back<T>(T a) { T b = a; T c = a; return move a; }\n"
+                "i32 main() {\n"
+                "    dup(mk(1)); dup(mk(2)); dup(3);\n"
+                "    GW<Tok> w = { .inner = mk(4) }; g(w);\n"
+                "    GW<i64> n = { .inner = 5 }; g(n);\n"
+                "    Crate<Tok> c; b4(c); Crate<i64> d; b4(d);\n"
+                "    once(mk(6)); both(mk(7), mk(8));\n"
+                "    outer(mk(9)); outer(10); fan(mk(11), 40); fan(12, 40);\n"
+                "    Tok r = back(mk(13)); i64 k = back(14);\n"
+                "    return 0;\n"
+                "}\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
+                         [(10, "use of moved value 't'"),
+                          (6, "use of moved value 'a'"),
+                          (7, "use of moved value 'a'"),
+                          (8, "cannot move an element out of 'Crate<Tok>' by indexing: the container still owns it; "
+                              "use take, pop, swap_remove, or a reference"),
+                          (12, "use of moved value 'a'"),
+                          (14, "use of moved value 'a'"),
+                          (15, "use of moved value 'a'"),
+                          (15, "use of moved value 'a'")])
+
+    def test_an_assignment_in_a_generic_instance_is_move_checked(self):
+        # `b = a` compares `T` with the bound `Tok`, so the instance's
+        # bindings apply there as they do for `let` and `return`.
+        text = ("trait Drop { void drop(*self); }\n"
+                "struct Tok { i64 id; }\n"
+                "impl Drop for Tok { void drop(*self) { } }\n"
+                "Tok mk(i64 id) { Tok t; t.id = id; return move t; }\n"
+                "void bad<T>(T a) { T b; b = a; T c = a; }\n"
+                "i32 main() { bad(mk(1)); bad(2); return 0; }\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
+                         [(4, "use of moved value 'a'")])
+
+    def test_a_type_named_like_a_type_parameter_does_not_loop_the_instance_check(self):
+        # Binding `T` to `GW<T>`, where the inner `T` is the struct, would
+        # substitute into itself without end.
+        text = ("struct T { i64 n; }\n"
+                "struct GW<X> { X inner; }\n"
+                "void once<T>(T a) { T b = a; }\n"
+                "i32 main() { T t = { .n = 1 }; GW<T> w = { .inner = t }; once(w); once(t); return 0; }\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual(diagnostics, [])
+
+    def test_a_caller_type_named_like_a_callee_parameter_keeps_its_own_type(self):
+        # In `two`, the bound of `B` is the caller's Copy struct `A`, which must
+        # not read as the callee's `A` (bound to the owned `Tok`), so `two`
+        # reports nothing.
+        text = ("trait Drop { void drop(*self); }\n"
+                "struct Tok { i64 id; }\nimpl Drop for Tok { void drop(*self) { } }\n"
+                "struct A { i64 n; }\n"
+                "void two<A, B>(A x, B y) { B p = y; B q = y; }\n"
+                "i32 main() {\n Tok u = { .id = 2 };\n A a = { .n = 1 };\n"
+                " two(move u, a);\n return 0;\n}\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual([item["message"] for item in diagnostics if item["severity"] == 1], [])
+
     def test_a_call_that_never_returns_ends_its_path(self):
         # The branch that moves `t` aborts, so the read after the `if` only
         # sees `t` intact. Without the abort the read is still rejected.
