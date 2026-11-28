@@ -3815,9 +3815,14 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                                                        arg_id, diagnostics, ok);
                 }
                 // Types still naming a generic parameter are checked at
-                // instantiation.
+                // instantiation; stage1 spells the item's own type
+                // parameters as plain named types.
                 if (!typecheck_type_is_unresolved(types, parameter_type, 0)
                     && !typecheck_type_is_unresolved(types, actual_type, 0)
+                    && !mono_mentions_type_param(types, parameter_type,
+                                                 &types.scope_type_params, 0)
+                    && !mono_mentions_type_param(types, actual_type,
+                                                 &types.scope_type_params, 0)
                     && !typecheck_call_argument_matches(types, parameter_type, actual_type,
                         expr_is_literal(pool, arg_id))
                     && !typecheck_implicit_borrow(types, parameter_type, actual_type,
