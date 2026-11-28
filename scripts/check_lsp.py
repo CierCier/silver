@@ -1003,6 +1003,20 @@ class NativeLsp(unittest.TestCase):
         diagnostics = self.session.published(uri, 1)["diagnostics"]
         self.assertEqual(diagnostics, [])
 
+    def test_a_caller_type_named_like_a_callee_parameter_keeps_its_own_type(self):
+        # In `two`, the bound of `B` is the caller's Copy struct `A`, which must
+        # not read as the callee's `A` (bound to the owned `Tok`), so `two`
+        # reports nothing.
+        text = ("trait Drop { void drop(*self); }\n"
+                "struct Tok { i64 id; }\nimpl Drop for Tok { void drop(*self) { } }\n"
+                "struct A { i64 n; }\n"
+                "void two<A, B>(A x, B y) { B p = y; B q = y; }\n"
+                "i32 main() {\n Tok u = { .id = 2 };\n A a = { .n = 1 };\n"
+                " two(move u, a);\n return 0;\n}\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual([item["message"] for item in diagnostics if item["severity"] == 1], [])
+
     def test_a_call_that_never_returns_ends_its_path(self):
         # The branch that moves `t` aborts, so the read after the `if` only
         # sees `t` intact. Without the abort the read is still rejected.

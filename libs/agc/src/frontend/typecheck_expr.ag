@@ -5392,18 +5392,32 @@ void typecheck_generic_call_drop_ownership(
         i += 1;
     }
     // The body is checked as this instantiation: its type parameters name
-    // the call's type arguments.
-    i64 pushed = 0;
+    // the call's type arguments. A type argument that names a type spelled
+    // like one of the callee's parameters, as `GW<T>` for a struct `T`, can't
+    // be told apart from that parameter, since both intern as one named type.
+    // Binding it would substitute into itself without end, or read a caller's
+    // value as the parameter's binding, so such an instance isn't bound.
+    bool mentions_parameter = false;
     i = 0;
     while (i < type_args.params.len()) {
+        u32 bound = types.resolve_subst(type_args.bound.get(i));
+        i64 p = 0;
+        while (p < type_args.params.len()) {
+            if (typecheck_type_mentions_name(types, bound, type_args.params.get(p), 0)) {
+                mentions_parameter = true;
+            }
+            p += 1;
+        }
+        i += 1;
+    }
+    i64 pushed = 0;
+    i = 0;
+    while (!mentions_parameter && i < type_args.params.len()) {
         // A bound written in terms of an enclosing instance's `T` names its type.
         u32 bound = types.resolve_subst(type_args.bound.get(i));
         TypeKind bound_kind = types.get(bound).kind;
-        // A bound that names a type spelled like the parameter, as `GW<T>`
-        // for a struct `T`, would substitute into itself without end.
         if (bound != TYPE_UNKNOWN && bound_kind != TypeKind.TypeParam
-            && bound_kind != TypeKind.Unknown
-            && !typecheck_type_mentions_name(types, bound, type_args.params.get(i), 0)) {
+            && bound_kind != TypeKind.Unknown) {
             types.push_subst(type_args.params.get(i), bound);
             pushed += 1;
         }
