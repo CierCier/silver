@@ -978,6 +978,17 @@ class NativeLsp(unittest.TestCase):
                           (15, "use of moved value 'a'"),
                           (15, "use of moved value 'a'")])
 
+    def test_a_type_named_like_a_type_parameter_does_not_loop_the_instance_check(self):
+        # Binding `T` to `GW<T>`, where the inner `T` is the struct, would
+        # substitute into itself without end.
+        text = ("struct T { i64 n; }\n"
+                "struct GW<X> { X inner; }\n"
+                "void once<T>(T a) { T b = a; }\n"
+                "i32 main() { T t = { .n = 1 }; GW<T> w = { .inner = t }; once(w); once(t); return 0; }\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual(diagnostics, [])
+
     def test_a_local_callable_is_checked_against_its_own_signature(self):
         # The parameter `f` shadows the function `f`, so its signature rules.
         text = ("void f(i64 a, i64 b) { }\n"

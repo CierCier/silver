@@ -5177,6 +5177,44 @@ bool typecheck_is_shared_value_error(str message) {
         || typecheck_str_contains(message, ", not shared: declare it `shared ");
 }
 
+/// True when `type_id` is, or contains, a named type or type parameter
+/// whose name is `name_id`.
+bool typecheck_type_mentions_name(TypeTable* types, u32 type_id, u32 name_id, i64 depth) {
+    if (depth > 32 || (i64)type_id >= types.types.len()) { return false; }
+    TypeEntry* entry = types.get(type_id);
+    TypeKind kind = entry.kind;
+    u32 inner = entry.inner;
+    i64 count = entry.count;
+    if ((kind == TypeKind.TypeParam || kind == TypeKind.Named) && entry.name_id == name_id) {
+        return true;
+    }
+    if (kind == TypeKind.Pointer || kind == TypeKind.Reference || kind == TypeKind.Array) {
+        return typecheck_type_mentions_name(types, inner, name_id, depth + 1);
+    }
+    if (kind == TypeKind.Tuple || (kind == TypeKind.Named && count > 0)) {
+        i64 i = 0;
+        while (i < count) {
+            if (typecheck_type_mentions_name(types, types.type_args.get(inner + (u32)i),
+                                             name_id, depth + 1)) {
+                return true;
+            }
+            i += 1;
+        }
+        return false;
+    }
+    if (kind == TypeKind.Function) {
+        i64 i = 0;
+        while (i <= count) {
+            if (typecheck_type_mentions_name(types, types.type_args.get(inner + (u32)i),
+                                             name_id, depth + 1)) {
+                return true;
+            }
+            i += 1;
+        }
+    }
+    return false;
+}
+
 /// True for a message of the move-flow check.
 bool typecheck_is_move_flow_error(str message) {
     return typecheck_str_starts_with(message, "use of ")
@@ -5355,8 +5393,11 @@ void typecheck_generic_call_drop_ownership(
         // A bound written in terms of an enclosing instance's `T` names its type.
         u32 bound = types.resolve_subst(type_args.bound.get(i));
         TypeKind bound_kind = types.get(bound).kind;
+        // A bound that names a type spelled like the parameter, as `GW<T>`
+        // for a struct `T`, would substitute into itself without end.
         if (bound != TYPE_UNKNOWN && bound_kind != TypeKind.TypeParam
-            && bound_kind != TypeKind.Unknown) {
+            && bound_kind != TypeKind.Unknown
+            && !typecheck_type_mentions_name(types, bound, type_args.params.get(i), 0)) {
             types.push_subst(type_args.params.get(i), bound);
             pushed += 1;
         }
