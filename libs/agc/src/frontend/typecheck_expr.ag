@@ -5191,6 +5191,12 @@ void typecheck_impl_methods(AstPool* pool, SymbolTable* symbols, SyntaxNode* roo
                 bool unsupported = false;
                 types.scope_type_params.clear();
                 mono_impl_type_parameters(item, types, &types.scope_type_params);
+                // `impl Box<T>` names the struct's parameters without
+                // declaring them, as `mono_impl_matches` also assumes.
+                if (types.scope_type_params.len() == 0) {
+                    mono_collect_struct_parameters(root, target.text, types,
+                                                   &types.scope_type_params);
+                }
                 if (!is_cast) {
                     mono_collect_generic_parameters(name.next_sibling, types,
                                                     &types.scope_type_params);
