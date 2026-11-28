@@ -163,6 +163,9 @@ pub struct LlvmIrGenerator<'ctx> {
     pub(crate) enum_payload_layouts: HashMap<String, StructType<'ctx>>,
     pub(crate) enum_variant_payload_types: HashMap<String, HashMap<String, Vec<ast::Type>>>,
     pub(crate) defers: Vec<Vec<DeferredEntry<'ctx>>>,
+    /// Variable scopes `[start, end)` that name lookup skips while a defer
+    /// runs: scopes opened after the defer was registered.
+    pub(crate) hidden_scopes: Vec<(usize, usize)>,
     pub(crate) volatile_globals: HashSet<String>,
     /// Names declared as `type X = ...` aliases; consulted by the generic-
     /// placeholder classifier so an alias may share a generic-param name.
@@ -210,6 +213,10 @@ pub struct LlvmIrGenerator<'ctx> {
     /// By-value C struct classification; `None` on a target without one.
     pub(crate) abi_handler: Option<Box<dyn AbiHandler>>,
     pub(crate) temp_counter: u64,
+    /// The spilled temporary that holds each rvalue whose field was read, so
+    /// moving that field out releases it in the temporary.
+    pub(crate) rvalue_temporaries:
+        rustc_hash::FxHashMap<crate::semantic::init_plan::SpanId, PointerValue<'ctx>>,
     /// Monotonic counter for per-launch-site trampoline function names.
     pub(crate) task_trampoline_counter: u64,
     pub(crate) leak_check: bool,

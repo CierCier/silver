@@ -58,11 +58,6 @@ impl<T> Queue<T> {
         return self.inner.pop_front();
     }
 
-    /// Return a copy of the front element without removing it. Aborts if empty.
-    T front(&self) {
-        return self.inner.front();
-    }
-
     // -- Fallible accessors (None instead of abort) -----------------------
 
     /// Remove and return the front element, or None when empty.
@@ -70,14 +65,23 @@ impl<T> Queue<T> {
         return self.inner.try_pop_front();
     }
 
-    /// Copy of the front element, or None when empty.
-    Optional<T> try_front(&self) {
-        return self.inner.try_front();
-    }
-
     /// Remove all elements without freeing the backing buffer.
     void clear(&mut self) {
         self.inner.clear();
+    }
+}
+
+/// Accessors that return copies of elements. A copy of an owned element
+/// would be dropped twice, so these need a Copy element type.
+impl<T: Copy> Queue<T> {
+    /// Return a copy of the front element without removing it. Aborts if empty.
+    T front(&self) {
+        return self.inner.front();
+    }
+
+    /// Copy of the front element, or None when empty.
+    Optional<T> try_front(&self) {
+        return self.inner.try_front();
     }
 }
 

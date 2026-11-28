@@ -142,6 +142,9 @@ struct ExprLowerer {
     SyntaxNode* unit_root;
     bool unsupported;
     bool debug_mode;
+    /// The active build configuration for `@cfg`, or null for the debug
+    /// Linux defaults.
+    CfgSet* cfg;
     u32 macro_depth;
     u32 expected_type_id;
     String error;
@@ -983,6 +986,7 @@ impl ExprLowerer {
         lowerer.unit_root = (SyntaxNode*)0;
         lowerer.unsupported = false;
         lowerer.debug_mode = true;
+        lowerer.cfg = (CfgSet*)0;
         lowerer.macro_depth = 0;
         lowerer.expected_type_id = TYPE_UNKNOWN;
         lowerer.error = String.new();
@@ -2872,8 +2876,9 @@ impl ExprLowerer {
                 && strcmp(name_node.text, "cfg") == 0) {
                 SyntaxNode* paren = name_node.next_sibling;
                 if (paren != (SyntaxNode*)0 && paren.kind == NodeKind.Parenthesized) {
-                    CfgSet cfg = cfg_lowering_defaults();
-                    i64 val = cfg_argument_value(paren, &cfg);
+                    CfgSet defaults = cfg_lowering_defaults();
+                    i64 val = self.cfg == (CfgSet*)0 ? cfg_argument_value(paren, &defaults)
+                        : cfg_argument_value(paren, self.cfg);
                     *next_out = paren.next_sibling;
                     if (val == 1) {
                         u32 val_id = self.names.intern("true");
@@ -2904,14 +2909,17 @@ impl ExprLowerer {
             || node.token_kind == TokenKind.Star || node.token_kind == TokenKind.BitwiseAnd)) {
             TokenKind op = node.token_kind;
             SyntaxNode* operand_node = node.next_sibling;
-            if (op == TokenKind.BitwiseAnd && operand_node != (SyntaxNode*)0
-                && operand_node.kind == NodeKind.Token && operand_node.token_kind == TokenKind.Mut) {
+            bool mutable = op == TokenKind.BitwiseAnd && operand_node != (SyntaxNode*)0
+                && operand_node.kind == NodeKind.Token && operand_node.token_kind == TokenKind.Mut;
+            if (mutable) {
                 operand_node = operand_node.next_sibling;
             }
             SyntaxNode* after_operand = (SyntaxNode*)0;
             u32 operand_id = self.lower_postfix(operand_node, &after_operand);
             *next_out = after_operand;
-            return self.pool.add_unary(op, operand_id, node.span);
+            u32 unary_id = self.pool.add_unary(op, operand_id, node.span);
+            if (mutable) { self.pool.get_expr(unary_id).inner1 = 1; }
+            return unary_id;
         }
 
         // Check for type cast: (type)operand
@@ -4087,7 +4095,8 @@ impl ExprLowerer {
         }
 
         CfgSet defaults = cfg_lowering_defaults();
-        i64 cfg_val = cfg_condition_value(cond_node, &defaults);
+        i64 cfg_val = self.cfg == (CfgSet*)0 ? cfg_condition_value(cond_node, &defaults)
+            : cfg_condition_value(cond_node, self.cfg);
 
         SyntaxNode* next_after_then = then_node.next_sibling;
         if (cfg_val == 0) {

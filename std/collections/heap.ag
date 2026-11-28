@@ -157,14 +157,6 @@ impl BinaryHeap<T> {
         }
     }
 
-    /// Return a copy of the greatest element without removing it.  Aborts if empty.
-    T peek(&self) {
-        if (self.len == 0) {
-            abort();
-        }
-        return self.data[0];
-    }
-
     // -- Fallible accessors (None instead of abort) -----------------------
 
     /// Remove and return the greatest element, or None when empty.
@@ -175,14 +167,6 @@ impl BinaryHeap<T> {
         return Some(self.pop());
     }
 
-    /// Copy of the greatest element, or None when empty.
-    Optional<T> try_peek(&self) {
-        if (self.len == 0) {
-            return None;
-        }
-        return Some(self.peek());
-    }
-
     /// Remove all elements without freeing the backing buffer.
     /// Drops active elements in place before resetting length.
     void clear(&mut self) {
@@ -190,6 +174,26 @@ impl BinaryHeap<T> {
             @drop_in_place(self.data, self.len);
         }
         self.len = 0;
+    }
+}
+
+/// Accessors that return copies of the greatest element. A copy of an owned
+/// element would be dropped twice, so these need a Copy element type.
+impl<T: Copy> BinaryHeap<T> {
+    /// Return a copy of the greatest element without removing it.  Aborts if empty.
+    T peek(&self) {
+        if (self.len == 0) {
+            abort();
+        }
+        return self.data[0];
+    }
+
+    /// Copy of the greatest element, or None when empty.
+    Optional<T> try_peek(&self) {
+        if (self.len == 0) {
+            return None;
+        }
+        return Some(self.peek());
     }
 }
 

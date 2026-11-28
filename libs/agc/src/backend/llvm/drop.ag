@@ -862,6 +862,37 @@ void llvm_init_tree_build(LlvmContext* ctx, LlvmLocal* local, InitOwnerPlan* pla
     ctx.builder = saved_builder;
 }
 
+/// Keeps the initialized temporary at `ptr`, which holds rvalue `expr_id`, as
+/// an unnamed local, so it drops once when the enclosing block exits. Returns
+/// that local.
+///
+/// A temporary can live in one arm of `?:` or `&&` while its block's cleanup
+/// runs on every path, so its state starts `UNINIT` at the end of the entry
+/// block and becomes live here. `ptr` must be an entry-block slot.
+LlvmLocal* llvm_add_temporary_local(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 type_id,
+                                    u32 expr_id, Span span) {
+    String name = String.from_str("__temporary_");
+    append_u32(&name, (u32)ctx.locals.len());
+    u32 name_id = ctx.names.intern(name.to_str());
+    name.drop();
+    ctx.add_local(name_id, ptr, type_id, true);
+    ctx.locals.get_ptr(ctx.locals.len() - 1).temporary_of = expr_id;
+    LLVMOpaqueValue* entry_end = LLVMGetBasicBlockTerminator(
+        LLVMGetEntryBasicBlock(ctx.current_fn));
+    if (entry_end == (LLVMOpaqueValue*)0) {
+        llvm_register_local_drops(ctx, name_id, ptr, type_id, true, span);
+        return ctx.find_local(name_id);
+    }
+    LLVMOpaqueBuilder* saved_builder = ctx.builder;
+    ctx.builder = LLVMCreateBuilderInContext(ctx.ctx);
+    LLVMPositionBuilderBefore(ctx.builder, entry_end);
+    llvm_register_local_drops(ctx, name_id, ptr, type_id, false, span);
+    LLVMDisposeBuilder(ctx.builder);
+    ctx.builder = saved_builder;
+    llvm_set_local_drop_live(ctx, name_id, true);
+    return ctx.find_local(name_id);
+}
+
 /// Every inline child has a state node, including Copy and scalar fields. The
 /// tree is fixed-size for the local and its layout is computed by LLVM.
 void llvm_register_local_drops(LlvmContext* ctx, u32 name_id, LLVMOpaqueValue* ptr,
@@ -1025,9 +1056,7 @@ void llvm_clear_transferred_arg(LlvmContext* ctx, LLVMOpaqueType* fn_type,
     LLVMOpaqueType* param_ty = param_tys.get(param_index);
     param_tys.drop();
     if (LLVMGetTypeKind(param_ty) == (u32)12 || param_ty == llvm_reference_type(ctx.ctx)) { return; }
-    u32 arg_ty = llvm_expr_type(ctx, arg_expr_id);
-    if (!llvm_type_needs_tracking(ctx, arg_ty)) { return; }
-    llvm_clear_place_drops(ctx, arg_expr_id);
+    llvm_clear_copy_source(ctx, arg_expr_id);
 }
 
 /// Root Var name of a place expression, following field/index chains and
@@ -1278,33 +1307,62 @@ void llvm_drop_active_unmoved_payloads(LlvmContext* ctx) {
     llvm_drop_active_unmoved_payloads_above(ctx, 0);
 }
 
-/// Direct Copy+Drop places can retain ownership in local bindings; aggregate
-/// construction still transfers their nested drop flags to the new value.
-void llvm_clear_copy_source(LlvmContext* ctx, u32 src_id,
-                            bool preserve_direct_copy_drop) {
-    if (src_id == 0) { return; }
-    u32 src_ty = llvm_expr_type(ctx, src_id);
-    if (!llvm_type_needs_tracking(ctx, src_ty)) { return; }
+/// Whether the value `src_id` reads is drop-tracked. A local registered for
+/// drop counts even when the type predicate cannot judge its type, as for a
+/// generic enum instance like `Maybe<Buf>`. So does an enum field whose
+/// payload its owner drops: the owner must release it to the new value.
+bool llvm_source_needs_tracking(LlvmContext* ctx, u32 src_id) {
     AstExpr* source = ctx.pool.get_expr(src_id);
-    bool source_is_place = source.kind == ExprKind.Var || source.kind == ExprKind.Field
-        || source.kind == ExprKind.Index;
-    bool source_is_match_binding = false;
-    if (source_is_place) {
-        u32 root_name = llvm_place_root_name(ctx, src_id);
-        i64 i = ctx.scrutinee_moves.len() - 1;
-        while (i >= 0) {
-            if (ctx.scrutinee_moves.get_ptr(i).binding_name == root_name) {
-                source_is_match_binding = true;
-                break;
-            }
-            i -= 1;
-        }
+    if (source.kind == ExprKind.Var) {
+        LlvmLocal* local = ctx.find_local(source.aux);
+        if (local != (LlvmLocal*)0 && local.drop_flag != (LLVMOpaqueValue*)0) { return true; }
     }
-    if (preserve_direct_copy_drop && source_is_place
-        && !source_is_match_binding
-        && ctx.types.is_copy(ctx.types.resolve_subst(src_ty))
-        && llvm_can_resolve_drop_fn(ctx, src_ty)) { return; }
+    u32 type_id = llvm_expr_type(ctx, src_id);
+    if (llvm_type_needs_tracking(ctx, type_id)) { return true; }
+    if (source.kind == ExprKind.Ternary) {
+        return llvm_source_needs_tracking(ctx, source.inner1)
+            || llvm_source_needs_tracking(ctx, source.aux);
+    }
+    if (source.kind != ExprKind.Field) { return false; }
+    u32 resolved = ctx.types.resolve_subst(type_id);
+    if (resolved == TYPE_UNKNOWN || resolved == 0) { return false; }
+    TypeEntry* entry = ctx.types.get(resolved);
+    return entry.kind == TypeKind.Named
+        && llvm_enum_needs_payload_drop(ctx, resolved, ctx.types.names.get(entry.name_id));
+}
+
+/// Moves drop ownership from place operand `src_id` to the value built from
+/// it: the source bits stay readable, but only the destination drops.
+void llvm_clear_copy_source(LlvmContext* ctx, u32 src_id) {
+    if (src_id == 0) { return; }
+    if (!llvm_source_needs_tracking(ctx, src_id)) { return; }
+    AstExpr* source = ctx.pool.get_expr(src_id);
+    if (source.kind == ExprKind.Ternary) {
+        llvm_clear_ternary_sources(ctx, src_id, source.inner1, source.aux);
+        return;
+    }
     llvm_clear_place_drops(ctx, src_id);
+}
+
+/// Releases the source of whichever arm of ternary `ternary_id` produced
+/// the value, branching on the condition that ternary already computed.
+void llvm_clear_ternary_sources(LlvmContext* ctx, u32 ternary_id, u32 then_id, u32 else_id) {
+    i64 i = ctx.ternary_conditions.len() - 1;
+    while (i >= 0 && ctx.ternary_conditions.get(i).expr_id != ternary_id) { i -= 1; }
+    if (i < 0 || ctx.is_terminated()) { return; }
+    LLVMOpaqueValue* condition = LLVMBuildLoad2(ctx.builder, LLVMInt1TypeInContext(ctx.ctx),
+        ctx.ternary_conditions.get(i).slot, "tern_release_cond");
+    LLVMOpaqueBasicBlock* then_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "tern_release_then");
+    LLVMOpaqueBasicBlock* else_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "tern_release_else");
+    LLVMOpaqueBasicBlock* done_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "tern_release_done");
+    LLVMBuildCondBr(ctx.builder, condition, then_bb, else_bb);
+    LLVMPositionBuilderAtEnd(ctx.builder, then_bb);
+    llvm_clear_copy_source(ctx, then_id);
+    LLVMBuildBr(ctx.builder, done_bb);
+    LLVMPositionBuilderAtEnd(ctx.builder, else_bb);
+    llvm_clear_copy_source(ctx, else_id);
+    LLVMBuildBr(ctx.builder, done_bb);
+    LLVMPositionBuilderAtEnd(ctx.builder, done_bb);
 }
 
 /// After building an aggregate value, release any droppable place operand
@@ -1313,13 +1371,14 @@ void llvm_clear_copy_source(LlvmContext* ctx, u32 src_id,
 void llvm_clear_aggregate_sources(LlvmContext* ctx, u32 args_start, u32 args_count) {
     i64 i = 0;
     while (i < (i64)args_count) {
-        llvm_clear_copy_source(ctx, ctx.pool.args.get((i64)args_start + i), false);
+        llvm_clear_copy_source(ctx, ctx.pool.args.get((i64)args_start + i));
         i += 1;
     }
 }
 
 /// Collects the field path of place `expr_id` into `path`; returns its root
-/// local name id, or 0.
+/// local name id, or 0. A field of an rvalue is rooted in the temporary that
+/// holds it, so moving the field out releases only that field.
 u32 llvm_collect_drop_field_path(LlvmContext* ctx, u32 expr_id,
                                  Vec<Projection>* path) {
     if (expr_id == 0) { return 0; }
@@ -1328,9 +1387,11 @@ u32 llvm_collect_drop_field_path(LlvmContext* ctx, u32 expr_id,
     if (expr.kind == ExprKind.Move) {
         return llvm_collect_drop_field_path(ctx, expr.inner0, path);
     }
-    if ((expr.kind != ExprKind.Field && expr.kind != ExprKind.Index) || expr.inner0 == 0) {
-        return 0;
+    if (expr.kind != ExprKind.Field && expr.kind != ExprKind.Index) {
+        LlvmLocal* temporary = ctx.find_temporary(expr_id);
+        return temporary == (LlvmLocal*)0 ? 0 : temporary.name_id;
     }
+    if (expr.inner0 == 0) { return 0; }
     i64 old_len = path.len();
     u32 root_name = llvm_collect_drop_field_path(ctx, expr.inner0, path);
     if (root_name == 0) { return 0; }
@@ -1379,8 +1440,26 @@ bool llvm_validate_drop_field_transfer(LlvmContext* ctx, LlvmLocal* local,
     while (true) {
         u32 ancestor_type = local.init_nodes.get_ptr(ancestor).type_id;
         if (typecheck_type_has_drop_impl(ctx.root, ctx.types, ancestor_type)) {
+            // A temporary has no name, so its field path names the place.
+            String place = String.new();
+            if (local.temporary_of == 0) {
+                place.push_str(ctx.names.get(local.name_id));
+            } else {
+                i64 step = 0;
+                while (step < path.len()) {
+                    Projection projection = path.get(step);
+                    if (step > 0) { place.push('.'); }
+                    if (projection.kind == ProjectionKind.Field) {
+                        place.push_str(ctx.names.get(projection.field_name_id));
+                    } else {
+                        append_u32(&place, projection.field_name_id);
+                    }
+                    step += 1;
+                }
+            }
             String message = cannot_move_field_out_of_drop_type(
-                ctx.names.get(local.name_id), ctx.types.type_name(ancestor_type));
+                place.to_str(), ctx.types.type_name(ancestor_type));
+            place.drop();
             ctx.ownership_diagnostics.error(ctx.pool.get_expr(expr_id).span, move message);
             return false;
         }

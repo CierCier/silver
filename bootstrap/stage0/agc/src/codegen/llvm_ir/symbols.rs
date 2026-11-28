@@ -1881,6 +1881,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let saved_block = self.builder.get_insert_block();
                 let saved_defers = std::mem::take(&mut self.defers);
                 let saved_variables = std::mem::take(&mut self.variables);
+                let saved_hidden = std::mem::take(&mut self.hidden_scopes);
                 let saved_subprogram = self.debug.as_mut().and_then(|d| d.current_subprogram);
 
                 self.defers.push(Vec::new());
@@ -1902,6 +1903,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
                 self.defers = saved_defers;
                 self.variables = saved_variables;
+                self.hidden_scopes = saved_hidden;
                 self.current_fn = saved_fn;
                 self.debug_nested = saved_nested;
                 // The nested emission reset current_subprogram to None;

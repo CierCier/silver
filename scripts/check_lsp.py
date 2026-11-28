@@ -815,7 +815,8 @@ class NativeLsp(unittest.TestCase):
                          [(7, "no overload of method 'put' on type Box matches these arguments")])
 
     def test_global_and_designated_initializers_match_build(self):
-        # Each initializer that `build` cannot emit fails `check` too.
+        # Each initializer that `build` cannot emit fails `check` too. A
+        # constant expression such as `1 + 2` folds, so it is accepted.
         text = ("struct P { i64 x; i64 y; i64 z; }\n"
                 "i64 second = 3;\n"
                 "i64 first = second;\n"
@@ -833,7 +834,6 @@ class NativeLsp(unittest.TestCase):
         diagnostics = self.session.published(uri, 1)["diagnostics"]
         self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
                          [(2, "global initializer must be a compile-time constant expression"),
-                          (3, "global initializer must be a compile-time constant expression"),
                           (4, "cannot mix positional/indexed items with named struct initializer"),
                           (5, "type mismatch: expected i64, found str"),
                           (10, "array initializer index 2 is out of bounds for 2 elements"),
@@ -857,6 +857,152 @@ class NativeLsp(unittest.TestCase):
         self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
                          [(3, "type mismatch: expected str, found i32"),
                           (9, "type mismatch: expected str, found i32")])
+
+    def test_moves_and_initialization_are_checked_at_each_control_flow_boundary(self):
+        # Each function from `branch` to `rvalue_field` misuses one boundary; `controls`
+        # moves and reinitializes on every path, moves once in a compound
+        # assignment's subscript, and a compound store reinitializes its
+        # target, so it must stay accepted.
+        text = ("trait Drop { void drop(*self); }\n"
+                "struct Tok { i64 id; }\n"
+                "impl Drop for Tok { void drop(*self) { } }\n"
+                "struct Pair { Tok left; Tok right; }\n"
+                "enum Slot { Full(Tok), Empty }\n"
+                "void take(Tok t) { }\n"
+                "i64 peek(&Tok t) { return t.id; }\n"
+                "Tok mk(i64 id) { Tok t; t.id = id; return move t; }\n"
+                "i64 branch(bool f) { Tok t = mk(1); if (f) { take(t); } return peek(&t); }\n"
+                "i64 looped(i64 n) { Tok t = mk(1); while (n > 0) { take(t); n -= 1; } return 0; }\n"
+                "i64 broke() { Tok t = mk(1); while (true) { take(t); break; } return peek(&t); }\n"
+                "i64 deferred() { Tok t = mk(1); defer peek(&t); take(t); return 0; }\n"
+                "i64 maybe_init(bool f) { Tok t; if (f) { t = mk(1); } return peek(&t); }\n"
+                "i64 field(Pair p) { take(move p.left); return peek(&p.left); }\n"
+                "i64 selected(bool f) { Tok t = mk(1); Tok u = f ? t : mk(2); return peek(&t) + peek(&u); }\n"
+                "i64 bound(Slot s) { match s { Full(move x) : { take(x); return peek(&x); }, Empty : { return 0; } } }\n"
+                "struct Bag { Pair* data; }\n"
+                "impl Bag { Pair __index_get(*self, i64 i) { return self.data[i]; } }\n"
+                "i64 element(Bag b) { take(move b[0].left); return peek(&b[0].right); }\n"
+                "i64 loop_field(i64 n) { Pair p; p.right = mk(1); while (n > 0) { take(move p.left); n -= 1; } return 0; }\n"
+                "i64 read_tail(Slot s) { return (match s { Full(move x) : x, Empty : { Tok k = mk(1); defer take(k); k; } }).id; }\n"
+                "i64 read_branch(bool f) { Tok t = mk(1); i64 id = (f ? t : mk(2)).id; return peek(&t) + id; }\n"
+                "i64 read_arm(Slot s, Tok t) { i64 id = (match s { Full(x) : t, Empty : mk(2) }).id; return peek(&t) + id; }\n"
+                "struct Crate<T> { T* data; }\n"
+                "impl<T> Crate<T> { T __index_get(*self, i64 i) { return self.data[i]; } }\n"
+                "i64 generic_element(Crate<Tok> c) { take(c[0]); return 0; }\n"
+                "i64 subscript(Tok t) { Pair ps[2]; ps[slot(t)].left = mk(1); return peek(&t); }\n"
+                "struct Guard { Tok leaf; }\n"
+                "impl Drop for Guard { void drop(*self) { } }\n"
+                "Guard guard() { Guard g; g.leaf = mk(1); return g; }\n"
+                "i64 rvalue_field(bool f) { take(guard().leaf); Tok u = f ? mk(2) : guard().leaf; return 0; }\n"
+                "struct Rec { i64 n; Tok token; }\n"
+                "i64 eat(Rec r) { return 1; }\n"
+                "i64 controls(bool f) {\n"
+                "    Tok t = mk(1);\n"
+                "    if (f) { take(t); t = mk(2); }\n"
+                "    Pair p; p.left = mk(3); p.right = mk(4);\n"
+                "    take(move p.left);\n"
+                "    p.left = mk(5);\n"
+                "    Tok s = mk(6); i64 ids[2]; ids[slot(s)] += 1;\n"
+                "    Tok r = mk(7); Tok rs[1]; rs[0] = mk(8); rs[slot(r)].id += 1;\n"
+                "    Rec q; q.n = 0; q.token = mk(9); q.n += eat(move q); i64 qn = q.n;\n"
+                "    return peek(&t) + peek(&p.left);\n"
+                "}\n"
+                "i64 slot(Tok t) { return 0; }\n"
+                "i32 main() { return 0; }\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
+                         [(8, "use of possibly moved value 't'"),
+                          (9, "use of possibly moved value 't'"),
+                          (10, "use of moved value 't'"),
+                          (11, "use of moved value 't'"),
+                          (12, "use of possibly uninitialized value 't'"),
+                          (13, "use of moved value 'p.left'"),
+                          (14, "use of possibly moved value 't'"),
+                          (15, "use of moved value 'x'"),
+                          (18, "cannot move an element out of 'Bag' by indexing: the container still owns it; "
+                               "use take, pop, swap_remove, or a reference"),
+                          (19, "use of moved value 'p.left'"),
+                          (20, "use of moved value 'k'"),
+                          (21, "use of possibly moved value 't'"),
+                          (22, "use of possibly moved value 't'"),
+                          (25, "cannot move an element out of 'Crate<Tok>' by indexing: the container still owns it; "
+                               "use take, pop, swap_remove, or a reference"),
+                          (26, "use of moved value 't'"),
+                          (30, "cannot move 'leaf' out of 'Guard' because it implements Drop"),
+                          (30, "cannot move 'leaf' out of 'Guard' because it implements Drop")])
+
+    def test_a_call_that_never_returns_ends_its_path(self):
+        # The branch that moves `t` aborts, so the read after the `if` only
+        # sees `t` intact. Without the abort the read is still rejected.
+        text = ("trait Drop { void drop(*self); }\n"
+                "struct Tok { i64 id; }\n"
+                "impl Drop for Tok { void drop(*self) { } }\n"
+                "void take(Tok t) { }\ni64 peek(&Tok t) { return t.id; }\n"
+                "i64 stops(bool flag) {\n Tok t = { .id = 1 };\n"
+                " if (flag) { take(t); abort(); }\n return peek(&t);\n}\n"
+                "i64 falls(bool flag) {\n Tok t = { .id = 1 };\n"
+                " if (flag) { take(t); }\n return peek(&t);\n}\n"
+                "i64 shadowed(bool flag, void() abort) {\n Tok t = { .id = 1 };\n"
+                " if (flag) { take(t); abort(); }\n return peek(&t);\n}\n"
+                "void quiet() { }\n"
+                "i64 main() { return stops(false) + falls(false) + shadowed(false, quiet); }\n"
+                "void abort() { while (true) { } }\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        # A callback parameter named `abort` returns, so it ends no path.
+        self.assertEqual([item["range"]["start"]["line"] for item in diagnostics], [13, 18])
+
+    def test_a_local_callable_is_checked_against_its_own_signature(self):
+        # The parameter `f` shadows the function `f`, so its signature rules.
+        text = ("void f(i64 a, i64 b) { }\n"
+                "i64 run(void(str) f, i64([i64, i64]) g) {\n f(\"ok\");\n f();\n f(true);\n"
+                " return g([1, 2]);\n}\n"
+                "void print_it(str s) { }\ni64 add([i64, i64] p) { return p[0] + p[1]; }\n"
+                "i64 main() { return run(print_it, add); }\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
+                         [(3, "argument count mismatch: expected 1, found 0"),
+                          (4, "type mismatch in argument 1: expected str, found bool")])
+
+    def test_an_unassigned_field_of_a_value_built_field_by_field_reads_as_zero(self):
+        # Array elements are not zero-filled: a whole-array read needs each one,
+        # though an element built field by field counts, and so does an array
+        # field of a struct built field by field. An incomplete owned array
+        # blocks a read of the value that holds it, not of a sibling field,
+        # however deep it sits.
+        text = ("trait Drop { void drop(*self); }\nstruct Text { i64 n; }\n"
+                "impl Text { i64 len(&self) { return self.n; } }\nimpl Drop for Text { void drop(*self) { } }\n"
+                "struct Opts { i64 n; Text items; }\n"
+                "i64 built() {\n Opts o;\n o.n = 1;\n return o.items.len();\n}\n"
+                "i64 empty() {\n Opts o;\n return o.items.len();\n}\n"
+                "i64 element() {\n Text a[2];\n a[0] = { .n = 1 };\n return a[1].len();\n}\n"
+                "i64 whole() {\n Text a[2];\n a[0] = { .n = 1 };\n Text b[2] = move a;\n return b[0].len();\n}\n"
+                "i64 full() {\n Text a[2];\n a[0] = { .n = 1 };\n a[1] = { .n = 2 };\n Text b[2] = move a;\n return b[1].len();\n}\n"
+                "i64 fields() {\n Opts a[1];\n a[0].n = 1;\n Opts b[1] = move a;\n return b[0].items.len();\n}\n"
+                "struct Holder { i64 n; Text spare; Text items[2]; }\n"
+                "i64 holder() {\n Holder h;\n h.n = 1;\n h.items[0] = { .n = 1 };\n Text moved[2] = move h.items;\n return moved[1].len();\n}\n"
+                "i64 nested() {\n Holder h;\n h.n = 1;\n h.items[0] = { .n = 1 };\n Holder g = move h;\n return g.n;\n}\n"
+                "i64 sibling() {\n Holder h;\n h.n = 1;\n return h.spare.len();\n}\n"
+                "struct Shelf { i64 n; Holder inner; }\n"
+                "i64 inner() {\n Shelf s;\n s.n = 1;\n Holder h = move s.inner;\n return h.n;\n}\n"
+                "struct D8 { Holder x; } struct D7 { D8 x; } struct D6 { D7 x; } struct D5 { D6 x; }\n"
+                "struct D4 { D5 x; } struct D3 { D4 x; } struct D2 { D3 x; } struct D1 { D2 x; }\n"
+                "struct Tower { i64 n; D1 base; }\n"
+                "i64 deep() {\n Tower t;\n t.n = 1;\n Tower u = move t;\n return u.n;\n}\n"
+                "i64 main() { return built() + empty() + element() + whole() + full() + fields() + holder() + nested()\n"
+                "  + sibling() + inner() + deep(); }\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
+                         [(12, "use of uninitialized value 'o'"),
+                          (17, "use of uninitialized value 'a[1]'"),
+                          (22, "use of 'a' before 'a[...]' is initialized"),
+                          (43, "use of 'h.items' before 'h.items[...]' is initialized"),
+                          (50, "use of 'h' before 'h.items[...]' is initialized"),
+                          (62, "use of uninitialized value 's.inner'"),
+                          (71, "use of 't' before 't.base' is initialized")])
 
     def test_returned_pointee_places_and_unrelated_c_results_are_not_local_escapes(self):
         # A result of the parameter's pointee type (`i64*` from `i64**`) is a

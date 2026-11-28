@@ -1,4 +1,5 @@
 // libs/agc/src/frontend/ast_expr.ag — Lowered typed expression and statement representations.
+import std.collections.bitset;
 import std.intern;
 import std.mem.vec;
 import std.string;
@@ -11,7 +12,7 @@ import frontend.types;
 enum ExprKind {
     Literal;       // aux = literal type_id
     Var;           // aux = name_id
-    Unary;         // aux = op token kind, inner0 = operand
+    Unary;         // aux = op token kind, inner0 = operand, inner1 = 1 for `&mut`
     Binary;        // aux = op token kind, inner0 = lhs, inner1 = rhs
     Call;          // inner0 = callee_id, inner1 = args_start, aux = args_count
     MethodCall;    // inner0 = receiver_id, aux = method_name_id, inner1 = args_start
@@ -190,11 +191,22 @@ struct AstPool {
     Vec<u32> block_stmts;
     Vec<MatchArm> arms;
     Vec<u32> arm_bindings;
+    /// The type checker's type for each `arm_bindings` slot it has typed;
+    /// a slot past the end is unknown.
+    Vec<u32> arm_binding_types;
     Vec<AstAsm> asms;
     /// Names in scope in the match arms being checked on a lock block's
     /// value: their payload bindings, which the Mutex still owns, then any
     /// local that shadows one. The latest entry for a name decides.
     Vec<LockedName> locked_bindings;
+    /// Expressions type checking passed by value: move operands, by-value
+    /// arguments and receivers, initializers, stored and returned values.
+    BitSet consumed;
+    /// Arguments and receivers passed to a raw-pointer or `&mut` parameter,
+    /// which may initialize storage declared without a value.
+    BitSet mutable_borrows;
+    /// Memoised Copy answers by type id: 0 unknown, 1 Copy, 2 not Copy.
+    Vec<u8> copy_by_type;
 }
 
 /// One `AstPool.locked_bindings` entry: `name_id` names locked storage, or
@@ -215,8 +227,12 @@ impl AstPool {
         pool.block_stmts = Vec<u32>.new();
         pool.arms = Vec<MatchArm>.new();
         pool.arm_bindings = Vec<u32>.new();
+        pool.arm_binding_types = Vec<u32>.new();
         pool.locked_bindings = Vec<LockedName>.new();
         pool.asms = Vec<AstAsm>.new();
+        pool.consumed = BitSet.new();
+        pool.mutable_borrows = BitSet.new();
+        pool.copy_by_type = Vec<u8>.new();
 
         // 0: Dummy null arm
         MatchArm null_arm;

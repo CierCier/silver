@@ -69,6 +69,10 @@ pub fn clear_yielded_value_drop_flag(error: impl std::fmt::Display) -> String {
     format!("clear yielded value drop flag: {error}")
 }
 
+pub fn clear_moved_value_drop_flag(error: impl std::fmt::Display) -> String {
+    format!("clear moved value drop flag: {error}")
+}
+
 // =========================================================================
 // General & Suggestions
 // =========================================================================
@@ -250,6 +254,18 @@ pub fn single_binding_let_only() -> &'static str {
 // =========================================================================
 // Move & Escape Checker Messages
 // =========================================================================
+
+pub fn bound_requires_copy(ty: &impl std::fmt::Display) -> String {
+    format!(
+        "'{ty}' is not Copy, so a copy of a borrowed one would be dropped twice; borrow it with a reference method such as get_ref"
+    )
+}
+
+pub fn cannot_move_out_of_indexed_element(container: &str) -> String {
+    format!(
+        "cannot move an element out of '{container}' by indexing: the container still owns it; use take, pop, swap_remove, or a reference"
+    )
+}
 
 pub fn use_of_moved_value(name: &str) -> String {
     format!("use of moved value '{name}'")

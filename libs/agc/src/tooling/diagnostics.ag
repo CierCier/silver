@@ -7,7 +7,6 @@ import frontend.lower_expr;
 import frontend.names;
 import frontend.borrow;
 import frontend.send;
-import frontend.ownership;
 import frontend.lint;
 import frontend.lambdas;
 import frontend.lexer;
@@ -217,7 +216,6 @@ DiagnosticBag check_snapshot_diagnostics(SyntaxTree* source, Vec<SyntaxTree*>* d
         check_declared_types(&symbols, &scratch.tree, cfg, &declarations);
         diagnostic_append_local(&diagnostics, &declarations);
     }
-    if (diagnostics.is_empty()) { check_ownership(&scratch.tree, &symbols, &diagnostics, cfg); }
     // Expression checking chooses each launch's overload, which the borrow
     // and Send checks then judge.
     if (diagnostics.is_empty()) {
@@ -358,7 +356,7 @@ ImportOverloadSafety diagnostic_probe_import_overloads(
                 AstPool expressions = AstPool.new();
                 bool ok = true; bool unsupported = false;
                 typecheck_function_statements_scoped(&expressions, &symbols.types, &symbols,
-                    scratch.tree.root, function, &checked, &ok, &unsupported);
+                    scratch.tree.root, function, cfg, &checked, &ok, &unsupported);
                 if (unsupported) { return ImportOverloadSafety.Inconclusive; }
                 i64 diagnostic = 0;
                 while (diagnostic < checked.len()) {

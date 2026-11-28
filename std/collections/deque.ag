@@ -148,23 +148,6 @@ impl Deque<T> {
         return move result;
     }
 
-    /// Return a copy of the front element without removing it.  Aborts if empty.
-    T front(&self) {
-        if (self.len == 0) {
-            abort();
-        }
-        return self.data[self.head];
-    }
-
-    /// Return a copy of the back element without removing it.  Aborts if empty.
-    T back(&self) {
-        if (self.len == 0) {
-            abort();
-        }
-        i64 tail = (self.head + self.len - 1) & (self.cap - 1);
-        return self.data[tail];
-    }
-
     // -- Fallible accessors (None instead of abort) -----------------------
 
     /// Remove and return the front element, or None when empty.
@@ -183,22 +166,6 @@ impl Deque<T> {
         return Some(self.pop_back());
     }
 
-    /// Copy of the front element, or None when empty.
-    Optional<T> try_front(&self) {
-        if (self.len == 0) {
-            return None;
-        }
-        return Some(self.front());
-    }
-
-    /// Copy of the back element, or None when empty.
-    Optional<T> try_back(&self) {
-        if (self.len == 0) {
-            return None;
-        }
-        return Some(self.back());
-    }
-
     /// Remove all elements without freeing the backing buffer.
     /// Drops active elements in place across the ring buffer segments.
     void clear(&mut self) {
@@ -214,6 +181,43 @@ impl Deque<T> {
         }
         self.len = 0;
         self.head = 0;
+    }
+}
+
+/// Accessors that return copies of elements. A copy of an owned element
+/// would be dropped twice, so these need a Copy element type.
+impl<T: Copy> Deque<T> {
+    /// Return a copy of the front element without removing it.  Aborts if empty.
+    T front(&self) {
+        if (self.len == 0) {
+            abort();
+        }
+        return self.data[self.head];
+    }
+
+    /// Return a copy of the back element without removing it.  Aborts if empty.
+    T back(&self) {
+        if (self.len == 0) {
+            abort();
+        }
+        i64 tail = (self.head + self.len - 1) & (self.cap - 1);
+        return self.data[tail];
+    }
+
+    /// Copy of the front element, or None when empty.
+    Optional<T> try_front(&self) {
+        if (self.len == 0) {
+            return None;
+        }
+        return Some(self.front());
+    }
+
+    /// Copy of the back element, or None when empty.
+    Optional<T> try_back(&self) {
+        if (self.len == 0) {
+            return None;
+        }
+        return Some(self.back());
     }
 }
 
@@ -283,18 +287,6 @@ impl<T> IntoIterator for Deque<T> {
 }
 
 impl<T> Deque<T> {
-    /// Borrows the deque and yields element copies without consuming it.
-    /// `&self` so the deque stays live; iterator holds raw ptr copy.
-    DequeBorrowIter<T> iter(&self) {
-        DequeBorrowIter<T> it;
-        it.data = self.data;
-        it.len = self.len;
-        it.cap = self.cap;
-        it.head = self.head;
-        it.idx = 0;
-        return it;
-    }
-
     /// Drains the deque, moving its buffer into an owning iterator.
     /// `&mut self` — moves buffer out and clears deque so it is empty but live.
     DequeIter<T> drain(&mut self) {
@@ -309,6 +301,21 @@ impl<T> Deque<T> {
         self.cap = 0;
         self.head = 0;
         return d;
+    }
+}
+
+/// Borrowed iteration yields copies, so it needs a Copy element type.
+impl<T: Copy> Deque<T> {
+    /// Borrows the deque and yields element copies without consuming it.
+    /// `&self` so the deque stays live; iterator holds raw ptr copy.
+    DequeBorrowIter<T> iter(&self) {
+        DequeBorrowIter<T> it;
+        it.data = self.data;
+        it.len = self.len;
+        it.cap = self.cap;
+        it.head = self.head;
+        it.idx = 0;
+        return it;
     }
 }
 

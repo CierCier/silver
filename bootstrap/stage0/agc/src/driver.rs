@@ -2034,6 +2034,7 @@ pub fn run(cli: Cli) {
                     &ast,
                     &imported_modules,
                     checker.consuming_method_calls(),
+                    checker.indexed_elements(),
                 );
                 if !move_report.errors.is_empty() {
                     for error in &move_report.errors {

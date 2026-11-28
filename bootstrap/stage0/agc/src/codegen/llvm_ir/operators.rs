@@ -2372,7 +2372,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     }
 
     /// Resolve the type of a dotted field path from a base type.
-    fn field_type_at_path(&self, base_ty: &ast::Type, path: &str) -> CodegenResult<ast::Type> {
+    pub(crate) fn field_type_at_path(&self, base_ty: &ast::Type, path: &str) -> CodegenResult<ast::Type> {
         let mut ty = base_ty.clone();
         for segment in path.split('.') {
             if let ast::TypeKind::Tuple(types) = ty.kind.as_ref() {

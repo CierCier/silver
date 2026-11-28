@@ -386,7 +386,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let start = total.saturating_sub(levels);
         // Clone scopes to avoid borrow conflicts, emit without draining
         let scopes: Vec<Vec<DeferredEntry<'ctx>>> = self.defers[start..].to_vec();
-        for mut scope in scopes.into_iter().rev() {
+        for (offset, mut scope) in scopes.into_iter().enumerate().rev() {
+            // A deferred statement names the variables visible where it was
+            // written, not those of scopes opened after it.
+            let later_scopes = (start + offset + 1, self.variables.len());
             for entry in scope.iter_mut().rev() {
                 let function = self.current_fn.ok_or_else(|| {
                     CodegenError::new("no active function for defer emission".to_string())
@@ -420,7 +423,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         self.emit_owner_cleanup(owner, 0)?;
                     }
                     DeferAction::Statement(stmt) => {
-                        self.generate_statement(stmt)?;
+                        self.hidden_scopes.push(later_scopes);
+                        let emitted = self.generate_statement(stmt);
+                        self.hidden_scopes.pop();
+                        emitted?;
                     }
                     DeferAction::DropCall(drop_fn_name, var_ptr) => {
                         if let Some(func) = self.module.get_function(drop_fn_name) {
@@ -452,8 +458,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     pub(crate) fn lookup_variable(&self, name: &str) -> Option<VarInfo<'ctx>> {
         self.variables
             .iter()
+            .enumerate()
             .rev()
-            .find_map(|scope| scope.get(name).cloned())
+            .filter(|(index, _)| {
+                !self
+                    .hidden_scopes
+                    .iter()
+                    .any(|(start, end)| (*start..*end).contains(index))
+            })
+            .find_map(|(_, scope)| scope.get(name).cloned())
     }
 
     /// Clear every per-field drop flag of `name` (ownership of the whole

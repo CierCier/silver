@@ -121,9 +121,9 @@ impl SseStream {
                     self.line.clear();
                     return Ok(move out);
                 }
-                event.drop();
-                id.drop();
-                data.drop();
+                // An event without data dispatches nothing; start the next one empty.
+                event.clear();
+                id.clear();
                 self.line.clear();
                 continue;
             }

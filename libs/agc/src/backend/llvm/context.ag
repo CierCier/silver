@@ -27,10 +27,35 @@ struct LlvmLocal {
     LLVMOpaqueValue* init_node_map;
     LLVMOpaqueType* init_node_type;
     u32 assignment_source;
+    /// The rvalue an unnamed temporary holds, or 0 for a named local.
+    u32 temporary_of;
     Vec<LlvmFieldFlag> field_flags;
     Vec<Projection> drop_projections;
     Vec<InitNodePlan> init_nodes;
     Vec<Projection> init_projections;
+}
+
+/// A registered `defer` and the number of locals visible where it was
+/// written. Its names never refer to a local declared after it.
+struct LlvmDefer {
+    u32 stmt_id;
+    i64 locals_len;
+}
+
+/// The entry-block slot holding the condition a ternary expression branched
+/// on, so a consumer of its result can release the source of the arm that
+/// ran. A slot stays valid after the join, even for a nested ternary whose
+/// condition only one outer arm computed.
+struct LlvmTernaryCondition {
+    u32 expr_id;
+    LLVMOpaqueValue* slot;
+}
+
+/// Locals that name lookup skips while a defer is emitted: those declared
+/// after the defer was registered.
+struct LlvmLocalRange {
+    i64 start;
+    i64 end;
 }
 
 /// A drop flag for one field path of a local (by projection range).
@@ -55,6 +80,7 @@ impl LlvmLocal {
         local.init_node_map = (LLVMOpaqueValue*)0;
         local.init_node_type = (LLVMOpaqueType*)0;
         local.assignment_source = 0;
+        local.temporary_of = 0;
         local.field_flags = Vec<LlvmFieldFlag>.new();
         local.drop_projections = Vec<Projection>.new();
         local.init_nodes = Vec<InitNodePlan>.new();
@@ -150,7 +176,9 @@ struct LlvmContext {
     Vec<LlvmLocal> locals;
     Vec<LlvmStructDef> struct_defs;
     Vec<i64> scope_markers;
-    Vec<u32> deferred_statements;
+    Vec<LlvmDefer> deferred_statements;
+    Vec<LlvmLocalRange> hidden_locals;
+    Vec<LlvmTernaryCondition> ternary_conditions;
     Vec<i64> defer_scope_markers;
     Vec<LLVMOpaqueBasicBlock*> loop_breaks;
     Vec<LLVMOpaqueBasicBlock*> loop_continues;
@@ -204,7 +232,9 @@ impl LlvmContext {
         c.locals = Vec<LlvmLocal>.new();
         c.struct_defs = Vec<LlvmStructDef>.new();
         c.scope_markers = Vec<i64>.new();
-        c.deferred_statements = Vec<u32>.new();
+        c.deferred_statements = Vec<LlvmDefer>.new();
+        c.hidden_locals = Vec<LlvmLocalRange>.new();
+        c.ternary_conditions = Vec<LlvmTernaryCondition>.new();
         c.defer_scope_markers = Vec<i64>.new();
         c.loop_breaks = Vec<LLVMOpaqueBasicBlock*>.new();
         c.loop_continues = Vec<LLVMOpaqueBasicBlock*>.new();
@@ -462,12 +492,35 @@ impl LlvmContext {
         i64 i = self.locals.len() - 1;
         while (i >= 0) {
             LlvmLocal* cur = self.locals.get_ptr(i);
-            if (cur.name_id == name_id) {
+            if (cur.name_id == name_id && !self.local_is_hidden(i)) {
                 return cur;
             }
             i -= 1;
         }
         return (LlvmLocal*)0;
+    }
+
+    /// The unnamed temporary that holds rvalue `expr_id`, or null.
+    LlvmLocal* find_temporary(LlvmContext* self, u32 expr_id) {
+        i64 i = self.locals.len() - 1;
+        while (i >= 0) {
+            LlvmLocal* cur = self.locals.get_ptr(i);
+            if (cur.temporary_of == expr_id && !self.local_is_hidden(i)) {
+                return cur;
+            }
+            i -= 1;
+        }
+        return (LlvmLocal*)0;
+    }
+
+    bool local_is_hidden(LlvmContext* self, i64 index) {
+        i64 i = 0;
+        while (i < self.hidden_locals.len()) {
+            LlvmLocalRange range = self.hidden_locals.get(i);
+            if (index >= range.start && index < range.end) { return true; }
+            i += 1;
+        }
+        return false;
     }
 
     /// Adds a local to the current scope.

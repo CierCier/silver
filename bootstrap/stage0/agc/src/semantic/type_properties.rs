@@ -44,6 +44,57 @@ impl TypePropertiesContext {
         self.insert_generic_struct(name, Vec::new(), fields);
     }
 
+    /// Adds the structs, enums, and `Drop` owners that precompiled `modules`
+    /// export, so an imported owning type is not mistaken for Copy. A type
+    /// whose field key does not parse stays unknown.
+    pub fn insert_module_exports(&mut self, modules: &[crate::module_artifact::ModuleArtifact]) {
+        use crate::module_artifact::ExportKind;
+        let parse = |key: &String| {
+            crate::types::Type::from_canonical_key(key).ok().map(|ty| ty.to_ast())
+        };
+        for export in modules.iter().flat_map(|module| &module.exports) {
+            match export.kind {
+                ExportKind::Struct => {
+                    let fields: Option<Vec<_>> =
+                        export.fields.iter().map(|field| parse(&field.type_key)).collect();
+                    if let Some(fields) = fields {
+                        self.insert_generic_struct(
+                            export.name.clone(),
+                            export.type_params.clone(),
+                            fields,
+                        );
+                    }
+                }
+                ExportKind::Enum => {
+                    let payloads: Option<Vec<_>> = export
+                        .enum_variants
+                        .iter()
+                        .flat_map(|variant| {
+                            variant
+                                .payload_types
+                                .iter()
+                                .chain(variant.payload_fields.iter().map(|field| &field.type_key))
+                        })
+                        .map(parse)
+                        .collect();
+                    if let Some(payloads) = payloads {
+                        self.insert_generic_struct(
+                            export.name.clone(),
+                            export.type_params.clone(),
+                            payloads,
+                        );
+                    }
+                }
+                ExportKind::Function if export.impl_trait.as_deref() == Some("Drop") => {
+                    let owner = export.name.split("::").next().unwrap_or_default();
+                    let base = owner.split('<').next().unwrap_or_default();
+                    self.drop_bases.insert(base.to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub fn insert_generic_struct(
         &mut self,
         name: impl Into<String>,
@@ -211,6 +262,14 @@ fn is_copy_inner(
             }
             let base = &named.path[0].name;
             if context.drop_bases.contains(base) {
+                return false;
+            }
+            // `Slice<T>` is the named form of a slice: a view, not an owner.
+            if base == "Slice" {
+                return true;
+            }
+            // A task handle owns its thread; it is never Copy, whatever its payload.
+            if named.path.len() == 1 && base == "Task" {
                 return false;
             }
             if let Some(fields) = context.fields_for(named) {
