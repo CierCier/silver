@@ -4984,6 +4984,10 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
             }
             if (expected_return != TYPE_UNKNOWN && actual_type != TYPE_UNKNOWN
                 && !types_match_value(types, expected_return, actual_type, expr_is_literal(pool, expr_id))
+                // Checking a generic body as one instantiation binds its `T`.
+                && !types_match_value(types, types.resolve_subst(expected_return),
+                                      types.resolve_subst(actual_type),
+                                      expr_is_literal(pool, expr_id))
                 && !typecheck_tuple_literal_fits(pool, root, types, expected_return, expr_id)
                 && !typecheck_implicit_cast(root, types, actual_type, expected_return)) {
                 String message = String.from_str("type mismatch: expected ");

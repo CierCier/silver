@@ -954,6 +954,7 @@ class NativeLsp(unittest.TestCase):
                 "void twice<T>(T a) { T b = a; T c = a; }\n"
                 "void outer<T>(T a) { twice(a); }\n"
                 "void fan<T>(T a, i64 n) { if (n > 0) { fan(a, n - 1); fan(a, n - 2); } }\n"
+                "T back<T>(T a) { T b = a; T c = a; return move a; }\n"
                 "i32 main() {\n"
                 "    dup(mk(1)); dup(mk(2)); dup(3);\n"
                 "    GW<Tok> w = { .inner = mk(4) }; g(w);\n"
@@ -961,6 +962,7 @@ class NativeLsp(unittest.TestCase):
                 "    Crate<Tok> c; b4(c); Crate<i64> d; b4(d);\n"
                 "    once(mk(6)); both(mk(7), mk(8));\n"
                 "    outer(mk(9)); outer(10); fan(mk(11), 40); fan(12, 40);\n"
+                "    Tok r = back(mk(13)); i64 k = back(14);\n"
                 "    return 0;\n"
                 "}\n")
         uri = self.open(text)
@@ -972,7 +974,9 @@ class NativeLsp(unittest.TestCase):
                           (8, "cannot move an element out of 'Crate<Tok>' by indexing: the container still owns it; "
                               "use take, pop, swap_remove, or a reference"),
                           (12, "use of moved value 'a'"),
-                          (14, "use of moved value 'a'")])
+                          (14, "use of moved value 'a'"),
+                          (15, "use of moved value 'a'"),
+                          (15, "use of moved value 'a'")])
 
     def test_a_local_callable_is_checked_against_its_own_signature(self):
         # The parameter `f` shadows the function `f`, so its signature rules.
