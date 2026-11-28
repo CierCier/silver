@@ -815,7 +815,8 @@ class NativeLsp(unittest.TestCase):
                          [(7, "no overload of method 'put' on type Box matches these arguments")])
 
     def test_global_and_designated_initializers_match_build(self):
-        # Each initializer that `build` cannot emit fails `check` too.
+        # Each initializer that `build` cannot emit fails `check` too. A
+        # constant expression such as `1 + 2` folds, so it is accepted.
         text = ("struct P { i64 x; i64 y; i64 z; }\n"
                 "i64 second = 3;\n"
                 "i64 first = second;\n"
@@ -833,7 +834,6 @@ class NativeLsp(unittest.TestCase):
         diagnostics = self.session.published(uri, 1)["diagnostics"]
         self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
                          [(2, "global initializer must be a compile-time constant expression"),
-                          (3, "global initializer must be a compile-time constant expression"),
                           (4, "cannot mix positional/indexed items with named struct initializer"),
                           (5, "type mismatch: expected i64, found str"),
                           (10, "array initializer index 2 is out of bounds for 2 elements"),

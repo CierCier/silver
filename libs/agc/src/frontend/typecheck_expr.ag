@@ -4033,17 +4033,6 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 u32 actual_type = infer_expr(pool, types, symbols, root, env, arg_id, diagnostics, ok);
                 actual_type = typecheck_adopt_literal_target(pool, types, symbols, root, arg_id,
                     actual_type, parameter_type, diagnostics, ok);
-                bool literal = expr_is_literal(pool, arg_id);
-                if (!direct_c_call
-                    && !typecheck_call_argument_matches(types, parameter_type, actual_type, literal)
-                    && !typecheck_implicit_borrow(types, parameter_type, actual_type, literal)
-                    && !typecheck_tuple_literal_fits(pool, root, types, parameter_type, arg_id)
-                    && !typecheck_implicit_cast(root, types, actual_type, parameter_type)) {
-                    diagnostics.error(pool.get_expr(arg_id).span,
-                        argument_type_mismatch(i + 1, types.type_name(parameter_type),
-                            types.type_name(actual_type)));
-                    *ok = false;
-                }
                 typecheck_char_pointer_argument(types, parameter_type, actual_type,
                     pool.get_expr(arg_id).span, diagnostics, ok);
                 if (parameter_kind == TypeKind.Pointer) { pool.mutable_borrows.set((i64)arg_id); }
@@ -4055,8 +4044,9 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                                                        arg_id, diagnostics, ok);
                 }
                 // Types still naming a generic parameter are checked at
-                // instantiation.
-                if (!typecheck_type_is_unresolved(types, parameter_type, 0)
+                // instantiation, and a C function's arguments convert.
+                if (!direct_c_call
+                    && !typecheck_type_is_unresolved(types, parameter_type, 0)
                     && !typecheck_type_is_unresolved(types, actual_type, 0)
                     && !typecheck_call_argument_matches(types, parameter_type, actual_type,
                         expr_is_literal(pool, arg_id))
@@ -4070,15 +4060,6 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                     *ok = false;
                 }
                 i += 1;
-            }
-            if ((i64)arg_count != callable_count) {
-                String message = String.from_str("argument count mismatch: expected ");
-                message.push_display(&callable_count);
-                message.push_str(", found ");
-                i64 actual_count = (i64)arg_count;
-                message.push_display(&actual_count);
-                diagnostics.error(expr.span, move message);
-                *ok = false;
             }
             inferred = types.type_args.get(callable_inner);
         }
