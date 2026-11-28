@@ -713,6 +713,16 @@ impl MoveFlow {
         return -1;
     }
 
+    /// Whether a visible local or parameter, tracked or not, is named `name_id`.
+    bool names_local(MoveFlow* self, u32 name_id) {
+        i64 i = self.locals.len() - 1;
+        while (i >= 0) {
+            if (self.locals.get(i).name_id == name_id && !self.is_hidden(i)) { return true; }
+            i -= 1;
+        }
+        return false;
+    }
+
     bool is_hidden(MoveFlow* self, i64 local) {
         i64 i = 0;
         while (i < self.hidden.len()) {
@@ -1026,11 +1036,12 @@ impl MoveFlow {
     /// Rejects consuming a non-Copy element of a container through indexing:
     /// the container still owns it and would drop it again.
     /// Whether `callee` names a function that never returns, the same set
-    /// stage0's move check knows. A local of that name shadows it.
+    /// stage0's move check knows. A local or parameter of that name, such
+    /// as a callback, shadows it whatever its type.
     bool never_returns(MoveFlow* self, u32 callee) {
         if (callee == 0) { return false; }
         AstExpr* target = self.pool.get_expr(callee);
-        if (target.kind != ExprKind.Var || self.lookup(target.aux) >= 0) { return false; }
+        if (target.kind != ExprKind.Var || self.names_local(target.aux)) { return false; }
         str name = self.symbols.names.get(target.aux);
         return strcmp(name, "abort") == 0 || strcmp(name, "silver_rt_abort") == 0
             || strcmp(name, "exit") == 0 || strcmp(name, "sys_exit") == 0

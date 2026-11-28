@@ -943,11 +943,15 @@ class NativeLsp(unittest.TestCase):
                 " if (flag) { take(t); abort(); }\n return peek(&t);\n}\n"
                 "i64 falls(bool flag) {\n Tok t = { .id = 1 };\n"
                 " if (flag) { take(t); }\n return peek(&t);\n}\n"
-                "i64 main() { return stops(false) + falls(false); }\n"
+                "i64 shadowed(bool flag, void() abort) {\n Tok t = { .id = 1 };\n"
+                " if (flag) { take(t); abort(); }\n return peek(&t);\n}\n"
+                "void quiet() { }\n"
+                "i64 main() { return stops(false) + falls(false) + shadowed(false, quiet); }\n"
                 "void abort() { while (true) { } }\n")
         uri = self.open(text)
         diagnostics = self.session.published(uri, 1)["diagnostics"]
-        self.assertEqual([item["range"]["start"]["line"] for item in diagnostics], [13])
+        # A callback parameter named `abort` returns, so it ends no path.
+        self.assertEqual([item["range"]["start"]["line"] for item in diagnostics], [13, 18])
 
     def test_a_local_callable_is_checked_against_its_own_signature(self):
         # The parameter `f` shadows the function `f`, so its signature rules.
