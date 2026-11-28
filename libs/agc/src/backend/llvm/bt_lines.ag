@@ -1,0 +1,613 @@
+// libs/agc/src/backend/llvm/bt_lines.ag — the runtime's exact-line table.
+//
+// `__silver_bt_lines` maps (function start, offset within the function) to
+// a source line, so a backtrace names the faulting line rather than the
+// function's declaration. Offsets exist only once LLVM has emitted machine
+// code, so after every unit's object is written the driver reads their DWARF
+// line programs (`backend.llvm.debug_info` makes LLVM write them) and emits
+// one more object holding the table. Function addresses in it are
+// relocations against the units' symbols. Stage0 builds the same rows from
+// the same DWARF (bootstrap/stage0/agc/src/codegen/dwarf_bt.rs).
+import vendor.llvm.llvm;
+import std.algo.sort;
+import std.intern;
+import std.mem.vec;
+import std.path;
+import std.string;
+import backend.llvm.generator;
+import backend.llvm.optimization;
+
+const u64 BT_SHT_SYMTAB = 2;
+const u64 BT_SHT_RELA = 4;
+const u64 BT_SHT_NOBITS = 8;
+const u64 BT_STT_FUNC = 2;
+const u64 BT_STB_LOCAL = 0;
+const u64 BT_SHN_LORESERVE = 0xff00;
+const u64 BT_EM_X86_64 = 62;
+const u64 BT_EM_AARCH64 = 183;
+const u64 BT_R_X86_64_64 = 1;
+const u64 BT_R_AARCH64_ABS64 = 257;
+const u64 BT_SYMBOL_SIZE = 24;
+const u64 BT_RELA_SIZE = 24;
+
+/// One row of the table: a function (an id in `BtLineTable.functions`), an
+/// offset from its start, and the line and file (an id in `files`) there.
+struct BtLineRow {
+    i64 function;
+    u64 offset;
+    u64 line;
+    i64 file;
+}
+
+/// The rows of every object, with interned function and file names.
+struct BtLineTable {
+    Interner functions;
+    /// Per function id: whether an earlier object already defined it. The
+    /// linker keeps the first definition of a weak (generic instance)
+    /// symbol, so later copies contribute no rows.
+    Vec<bool> claimed;
+    Interner files;
+    Vec<BtLineRow> rows;
+}
+
+/// One ELF section header, as far as the reader needs it.
+struct BtSection {
+    u64 name;
+    u64 kind;
+    u64 offset;
+    u64 size;
+    u64 link;
+    u64 info;
+}
+
+/// A code address: an ELF section index and an offset within it.
+struct BtAddress {
+    u64 section;
+    u64 offset;
+}
+
+/// One function symbol of an object. `id` is its function id, or -1 when
+/// its rows are dropped (local, or another object's copy is linked).
+struct BtObjectFunction {
+    u64 section;
+    u64 start;
+    u64 size;
+    i64 id;
+}
+
+/// An absolute relocation in `.debug_line`: the field at `offset` holds
+/// `target` once linked.
+struct BtLineRelocation {
+    u64 offset;
+    BtAddress target;
+}
+
+/// Reads `size` (at most 8) little-endian bytes at `at`.
+u64 bt_read(u8* data, u64 at, u64 size) {
+    u64 value = 0;
+    u64 i = 0;
+    while (i < size) {
+        value = value | ((u64)data[at + i] << (i * 8));
+        i += 1;
+    }
+    return value;
+}
+
+/// Bounds-checked reader over one section.
+struct BtCursor {
+    u8* data;
+    u64 pos;
+    u64 end;
+    bool failed;
+}
+
+impl BtCursor {
+    /// Reads a fixed-size little-endian value, or 0 past the end.
+    u64 fixed(BtCursor* self, u64 size) {
+        if (self.failed || self.pos + size > self.end) {
+            self.failed = true;
+            return 0;
+        }
+        u64 value = bt_read(self.data, self.pos, size);
+        self.pos += size;
+        return value;
+    }
+
+    /// Reads an unsigned LEB128 value.
+    u64 uleb(BtCursor* self) {
+        u64 value = 0;
+        u64 shift = 0;
+        while (true) {
+            u64 byte = self.fixed(1);
+            if (self.failed) { return 0; }
+            if (shift < 64) { value = value | ((byte & 0x7f) << shift); }
+            shift += 7;
+            if ((byte & 0x80) == 0) { return value; }
+        }
+        return value;
+    }
+
+    /// Reads a signed LEB128 value.
+    i64 sleb(BtCursor* self) {
+        u64 value = 0;
+        u64 shift = 0;
+        u64 byte = 0x80;
+        while ((byte & 0x80) != 0) {
+            byte = self.fixed(1);
+            if (self.failed) { return 0; }
+            if (shift < 64) { value = value | ((byte & 0x7f) << shift); }
+            shift += 7;
+        }
+        if (shift < 64 && (byte & 0x40) != 0) {
+            value = value | ((u64)0 - ((u64)1 << shift));
+        }
+        return (i64)value;
+    }
+
+    /// Skips a NUL-terminated string and returns where it starts.
+    u64 cstr(BtCursor* self) {
+        u64 start = self.pos;
+        while (!self.failed && self.fixed(1) != 0) {}
+        return start;
+    }
+}
+
+/// Orders functions by section, then start.
+i32 bt_compare_functions(BtObjectFunction* a, BtObjectFunction* b) {
+    if (a.section != b.section) { return a.section < b.section ? -1 : 1; }
+    if (a.start != b.start) { return a.start < b.start ? -1 : 1; }
+    return 0;
+}
+
+/// Orders relocations by the offset they patch.
+i32 bt_compare_relocations(BtLineRelocation* a, BtLineRelocation* b) {
+    if (a.offset != b.offset) { return a.offset < b.offset ? -1 : 1; }
+    return 0;
+}
+
+/// Whether `[offset, offset + size)` lies within an object of `length` bytes.
+bool bt_in_bounds(u64 offset, u64 size, u64 length) {
+    return offset <= length && size <= length - offset;
+}
+
+/// The NUL-terminated name at `at` in string section `strings`, or null
+/// when it runs past the section.
+str bt_section_string(u8* data, BtSection* strings, u64 at) {
+    u64 i = at;
+    while (i < strings.size) {
+        if (data[strings.offset + i] == (u8)0) {
+            return (str)((u64)data + strings.offset + at);
+        }
+        i += 1;
+    }
+    return (str)0;
+}
+
+/// The function containing `address`, or null.
+BtObjectFunction* bt_function_at(Vec<BtObjectFunction>* functions, BtAddress address) {
+    i64 lo = 0;
+    i64 hi = functions.len() - 1;
+    i64 best = -1;
+    while (lo <= hi) {
+        i64 mid = (lo + hi) / 2;
+        BtObjectFunction* function = functions.get_ptr(mid);
+        if (function.section < address.section
+            || (function.section == address.section && function.start <= address.offset)) {
+            best = mid;
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    if (best < 0) { return (BtObjectFunction*)0; }
+    BtObjectFunction* found = functions.get_ptr(best);
+    if (found.section != address.section || address.offset - found.start >= found.size) {
+        return (BtObjectFunction*)0;
+    }
+    return found;
+}
+
+/// The file id of 1-based line-program file `file`, or -1.
+i64 bt_file_id(Vec<i64>* files, u64 file) {
+    if (file < 1 || file > (u64)files.len()) { return (i64)-1; }
+    return files.get((i64)file - 1);
+}
+
+/// The relocation patching `offset`, or null.
+BtLineRelocation* bt_relocation_at(Vec<BtLineRelocation>* relocations, u64 offset) {
+    i64 lo = 0;
+    i64 hi = relocations.len() - 1;
+    while (lo <= hi) {
+        i64 mid = (lo + hi) / 2;
+        BtLineRelocation* relocation = relocations.get_ptr(mid);
+        if (relocation.offset == offset) { return relocation; }
+        if (relocation.offset < offset) { lo = mid + 1; } else { hi = mid - 1; }
+    }
+    return (BtLineRelocation*)0;
+}
+
+impl BtLineTable {
+    /// Creates an empty table.
+    BtLineTable new() {
+        BtLineTable table;
+        table.functions = Interner.new();
+        table.claimed = Vec<bool>.new();
+        table.files = Interner.new();
+        table.rows = Vec<BtLineRow>.new();
+        return move table;
+    }
+
+    /// Records that line `line` of file `file` starts at `address`.
+    void add_row(BtLineTable* self, Vec<BtObjectFunction>* functions,
+                 BtAddress address, u64 line, i64 file) {
+        if (address.section == 0 || file < 0) { return; }
+        BtObjectFunction* function = bt_function_at(functions, address);
+        if (function == (BtObjectFunction*)0 || function.id < 0) { return; }
+        BtLineRow row;
+        row.function = function.id;
+        row.offset = address.offset - function.start;
+        row.line = line;
+        row.file = file;
+        // Rows of one function arrive in address order. The last row at an
+        // address describes it, and repeating a line adds nothing.
+        if (self.rows.len() > 0) {
+            BtLineRow* last = self.rows.get_ptr(self.rows.len() - 1);
+            if (last.function == row.function && last.offset == row.offset) {
+                self.rows.pop();
+            }
+        }
+        if (self.rows.len() > 0) {
+            BtLineRow* last = self.rows.get_ptr(self.rows.len() - 1);
+            if (last.function == row.function && last.line == row.line
+                && last.file == row.file) {
+                return;
+            }
+        }
+        self.rows.push(row);
+    }
+
+    /// Adds the rows of the ELF object `data` (`length` bytes). Anything
+    /// but a 64-bit little-endian x86-64 or AArch64 object adds none.
+    void read_elf(BtLineTable* self, u8* data, u64 length) {
+        if (length < 64 || data[0] != (u8)0x7f || data[1] != (u8)'E' || data[2] != (u8)'L'
+            || data[3] != (u8)'F' || data[4] != (u8)2 || data[5] != (u8)1) {
+            return;
+        }
+        u64 machine = bt_read(data, 18, 2);
+        u64 absolute = machine == BT_EM_X86_64 ? BT_R_X86_64_64
+            : machine == BT_EM_AARCH64 ? BT_R_AARCH64_ABS64 : 0;
+        u64 header_offset = bt_read(data, 0x28, 8);
+        u64 header_size = bt_read(data, 0x3a, 2);
+        u64 section_count = bt_read(data, 0x3c, 2);
+        u64 names_index = bt_read(data, 0x3e, 2);
+        if (absolute == 0 || header_size < 64 || section_count == 0
+            || names_index >= section_count
+            || !bt_in_bounds(header_offset, header_size * section_count, length)) {
+            return;
+        }
+        Vec<BtSection> sections = Vec<BtSection>.new();
+        u64 index = 0;
+        bool valid = true;
+        while (index < section_count) {
+            u64 at = header_offset + index * header_size;
+            BtSection section;
+            section.name = bt_read(data, at, 4);
+            section.kind = bt_read(data, at + 4, 4);
+            section.offset = bt_read(data, at + 24, 8);
+            section.size = bt_read(data, at + 32, 8);
+            section.link = bt_read(data, at + 40, 4);
+            section.info = bt_read(data, at + 44, 4);
+            if (section.kind != BT_SHT_NOBITS
+                && !bt_in_bounds(section.offset, section.size, length)) {
+                valid = false;
+            }
+            sections.push(section);
+            index += 1;
+        }
+        BtSection* names = sections.get_ptr((i64)names_index);
+        i64 line_index = -1;
+        i64 symtab_index = -1;
+        index = 0;
+        while (valid && index < section_count) {
+            BtSection* section = sections.get_ptr((i64)index);
+            str name = bt_section_string(data, names, section.name);
+            if (name != (str)0 && strcmp(name, ".debug_line") == 0) {
+                line_index = (i64)index;
+            }
+            if (section.kind == BT_SHT_SYMTAB) { symtab_index = (i64)index; }
+            index += 1;
+        }
+        if (!valid || line_index < 0 || symtab_index < 0) {
+            sections.drop();
+            return;
+        }
+        BtSection* symtab = sections.get_ptr(symtab_index);
+        if (symtab.link >= section_count) {
+            sections.drop();
+            return;
+        }
+        BtSection* strings = sections.get_ptr((i64)symtab.link);
+
+        // Symbols: every value, for relocations, and the defined functions.
+        Vec<BtAddress> symbols = Vec<BtAddress>.new();
+        Vec<BtObjectFunction> functions = Vec<BtObjectFunction>.new();
+        u64 symbol_count = symtab.size / BT_SYMBOL_SIZE;
+        index = 0;
+        while (index < symbol_count) {
+            u64 at = symtab.offset + index * BT_SYMBOL_SIZE;
+            u64 info = (u64)data[at + 4];
+            BtAddress symbol;
+            symbol.section = bt_read(data, at + 6, 2);
+            symbol.offset = bt_read(data, at + 8, 8);
+            u64 size = bt_read(data, at + 16, 8);
+            if ((info & 0xf) == BT_STT_FUNC && symbol.section != 0
+                && symbol.section < BT_SHN_LORESERVE && size > 0) {
+                BtObjectFunction function;
+                function.section = symbol.section;
+                function.start = symbol.offset;
+                function.size = size;
+                function.id = -1;
+                str name = bt_section_string(data, strings, bt_read(data, at, 4));
+                // The table object can name only global and weak symbols.
+                if (name != (str)0 && (info >> 4) != BT_STB_LOCAL) {
+                    i64 id = (i64)self.functions.intern(name);
+                    if (id == self.claimed.len()) {
+                        self.claimed.push(false);
+                    }
+                    if (!self.claimed.get(id)) {
+                        self.claimed.set(id, true);
+                        function.id = id;
+                    }
+                }
+                functions.push(function);
+            }
+            symbols.push(symbol);
+            index += 1;
+        }
+        sort_by(&functions, &bt_compare_functions);
+
+        // Line program addresses are relocations against code sections.
+        Vec<BtLineRelocation> relocations = Vec<BtLineRelocation>.new();
+        index = 0;
+        while (index < section_count) {
+            BtSection* section = sections.get_ptr((i64)index);
+            if (section.kind == BT_SHT_RELA && section.info == (u64)line_index) {
+                u64 count = section.size / BT_RELA_SIZE;
+                u64 entry = 0;
+                while (entry < count) {
+                    u64 at = section.offset + entry * BT_RELA_SIZE;
+                    u64 info = bt_read(data, at + 8, 8);
+                    u64 symbol = info >> 32;
+                    if ((info & 0xffffffff) == absolute && symbol < (u64)symbols.len()) {
+                        BtLineRelocation relocation;
+                        relocation.offset = bt_read(data, at, 8);
+                        relocation.target = symbols.get((i64)symbol);
+                        relocation.target.offset += bt_read(data, at + 16, 8);
+                        relocations.push(relocation);
+                    }
+                    entry += 1;
+                }
+            }
+            index += 1;
+        }
+        sort_by(&relocations, &bt_compare_relocations);
+
+        BtSection* line_section = sections.get_ptr(line_index);
+        self.read_line_program(data + line_section.offset, line_section.size,
+            &functions, &relocations);
+        relocations.drop();
+        functions.drop();
+        symbols.drop();
+        sections.drop();
+    }
+
+    /// Runs every DWARF 2-4 line program in `.debug_line` (`data`, `size`
+    /// bytes) and records its rows.
+    void read_line_program(BtLineTable* self, u8* data, u64 size,
+                           Vec<BtObjectFunction>* functions,
+                           Vec<BtLineRelocation>* relocations) {
+        u64 unit = 0;
+        while (unit + 4 <= size) {
+            u64 unit_length = bt_read(data, unit, 4);
+            // 0xffffffff starts 64-bit DWARF, which LLVM does not write here.
+            if (unit_length == 0 || unit_length > size - unit - 4) { return; }
+            u64 unit_end = unit + 4 + unit_length;
+            BtCursor cursor;
+            cursor.data = data;
+            cursor.pos = unit + 4;
+            cursor.end = unit_end;
+            cursor.failed = false;
+            u64 version = cursor.fixed(2);
+            if (version < 2 || version > 4) {
+                unit = unit_end;
+                continue;
+            }
+            u64 header_length = cursor.fixed(4);
+            u64 program = cursor.pos + header_length;
+            u64 min_length = cursor.fixed(1);
+            if (version >= 4) { cursor.fixed(1); } // maximum operations per instruction
+            cursor.fixed(1); // default_is_stmt
+            i64 line_base = (i64)(i8)(u8)cursor.fixed(1);
+            u64 line_range = cursor.fixed(1);
+            u64 opcode_base = cursor.fixed(1);
+            u64 lengths = cursor.pos;
+            cursor.pos += opcode_base > 0 ? opcode_base - 1 : 0;
+            while (!cursor.failed && cursor.pos < cursor.end && data[cursor.pos] != (u8)0) {
+                cursor.cstr(); // include directory
+            }
+            cursor.fixed(1);
+            Vec<i64> files = Vec<i64>.new();
+            while (!cursor.failed && cursor.pos < cursor.end && data[cursor.pos] != (u8)0) {
+                u64 name_at = cursor.cstr();
+                cursor.uleb(); // directory
+                cursor.uleb(); // modification time
+                cursor.uleb(); // length
+                if (!cursor.failed) {
+                    String name = path_basename((str)((u64)data + name_at));
+                    files.push((i64)self.files.intern(name.to_str()));
+                    name.drop();
+                }
+            }
+            if (cursor.failed || line_range == 0 || program > unit_end) {
+                files.drop();
+                unit = unit_end;
+                continue;
+            }
+            cursor.pos = program;
+
+            BtAddress address;
+            address.section = 0;
+            address.offset = 0;
+            i64 line = 1;
+            u64 file = 1;
+            while (!cursor.failed && cursor.pos < unit_end) {
+                u64 opcode = cursor.fixed(1);
+                if (opcode >= opcode_base) {
+                    u64 adjusted = opcode - opcode_base;
+                    address.offset += (adjusted / line_range) * min_length;
+                    line += line_base + (i64)(adjusted % line_range);
+                    self.add_row(functions, address, (u64)line,
+                        bt_file_id(&files, file));
+                } else if (opcode == 0) {
+                    u64 length = cursor.uleb();
+                    u64 next = cursor.pos + length;
+                    u64 sub = cursor.fixed(1);
+                    if (sub == 1) { // end_sequence
+                        address.section = 0;
+                        address.offset = 0;
+                        line = 1;
+                        file = 1;
+                    } else if (sub == 2 && length == 9) { // set_address
+                        BtLineRelocation* relocation = bt_relocation_at(relocations, cursor.pos);
+                        u64 raw = cursor.fixed(8);
+                        if (relocation != (BtLineRelocation*)0) {
+                            address.section = relocation.target.section;
+                            address.offset = relocation.target.offset + raw;
+                        } else {
+                            address.section = 0;
+                        }
+                    }
+                    cursor.pos = next;
+                } else if (opcode == 1) { // copy
+                    self.add_row(functions, address, (u64)line,
+                        bt_file_id(&files, file));
+                } else if (opcode == 2) { // advance_pc
+                    address.offset += cursor.uleb() * min_length;
+                } else if (opcode == 3) { // advance_line
+                    line += cursor.sleb();
+                } else if (opcode == 4) { // set_file
+                    file = cursor.uleb();
+                } else if (opcode == 8) { // const_add_pc
+                    address.offset += ((255 - opcode_base) / line_range) * min_length;
+                } else if (opcode == 9) { // fixed_advance_pc
+                    address.offset += cursor.fixed(2);
+                } else {
+                    // Other standard opcodes: skip their ULEB operands.
+                    u64 operands = (u64)data[lengths + opcode - 1];
+                    while (operands > 0) {
+                        cursor.uleb();
+                        operands -= 1;
+                    }
+                }
+            }
+            files.drop();
+            unit = unit_end;
+        }
+    }
+
+    /// Adds the rows of the object file at `path`. An unreadable file adds
+    /// none.
+    void read_object(BtLineTable* self, str path) {
+        LLVMOpaqueMemoryBuffer* buffer = (LLVMOpaqueMemoryBuffer*)0;
+        i8* message = (i8*)0;
+        if (LLVMCreateMemoryBufferWithContentsOfFile(path, &buffer, &message) != 0) {
+            if (message != (i8*)0) { LLVMDisposeMessage(message); }
+            return;
+        }
+        self.read_elf(LLVMGetBufferStart(buffer), LLVMGetBufferSize(buffer));
+        LLVMDisposeMemoryBuffer(buffer);
+    }
+}
+
+/// Writes an object defining `__silver_bt_lines` and its count from the
+/// line programs of `object_paths`, given in link order. The units define
+/// both weakly as empty, so this table replaces them when linked. The object
+/// is built for `target_triple`, the triple of the units it links with.
+/// Returns false with `*out_error` set when the object cannot be emitted.
+bool llvm_write_bt_line_object(Vec<String>* object_paths, str target_triple, str output_path,
+                               String* out_error) {
+    BtLineTable table = BtLineTable.new();
+    i64 i = 0;
+    while (i < object_paths.len()) {
+        table.read_object(object_paths.get_ptr(i).to_str());
+        i += 1;
+    }
+
+    LlvmGenerator generator = LlvmGenerator.new("__silver_bt_lines", target_triple, LlvmOptimization.O0);
+    LLVMOpaqueContext* ctx = generator.ctx;
+    LLVMOpaqueModule* module = generator.module;
+    LLVMOpaqueType* i64_type = LLVMInt64TypeInContext(ctx);
+    LLVMOpaqueType* ptr_type = LLVMPointerTypeInContext(ctx, 0);
+    LLVMOpaqueType* signature = LLVMFunctionType(LLVMVoidTypeInContext(ctx),
+        (LLVMOpaqueType**)0, 0, 0);
+
+    // Each function and file becomes a constant once, on first use.
+    Vec<LLVMOpaqueValue*> addresses = Vec<LLVMOpaqueValue*>.new();
+    i = 0;
+    while (i < table.functions.len()) {
+        addresses.push((LLVMOpaqueValue*)0);
+        i += 1;
+    }
+    Vec<LLVMOpaqueValue*> files = Vec<LLVMOpaqueValue*>.new();
+    i = 0;
+    while (i < table.files.len()) {
+        String suffix = String.from_str("line_file.");
+        suffix.push_display(&i);
+        files.push(llvm_bt_string_global(ctx, module, suffix.to_str(),
+            table.files.get((u32)i)));
+        suffix.drop();
+        i += 1;
+    }
+    Vec<LLVMOpaqueValue*> records = Vec<LLVMOpaqueValue*>.with_capacity(table.rows.len());
+    Vec<LLVMOpaqueValue*> fields = Vec<LLVMOpaqueValue*>.new();
+    i = 0;
+    while (i < table.rows.len()) {
+        BtLineRow row = table.rows.get(i);
+        if (addresses.get(row.function) == (LLVMOpaqueValue*)0) {
+            LLVMOpaqueValue* function = LLVMAddFunction(module,
+                table.functions.get((u32)row.function), signature);
+            addresses.set(row.function, LLVMConstPtrToInt(function, i64_type));
+        }
+        fields.clear();
+        fields.push(addresses.get(row.function));
+        fields.push(LLVMConstInt(i64_type, row.offset, 0));
+        fields.push(LLVMConstInt(i64_type, row.line, 0));
+        fields.push(files.get(row.file));
+        records.push(LLVMConstStructInContext(ctx, fields.data, (u32)fields.len(), 0));
+        i += 1;
+    }
+
+    LLVMOpaqueValue* lines = LLVMAddGlobal(module, ptr_type, "__silver_bt_lines");
+    LLVMOpaqueValue* count = LLVMAddGlobal(module, i64_type, "__silver_bt_lines_count");
+    if (records.len() > 0) {
+        LLVMOpaqueType* record_type = LLVMTypeOf(records.get(0));
+        LLVMOpaqueValue* data = LLVMAddGlobal(module,
+            LLVMArrayType(record_type, (u32)records.len()), "__silver_bt_lines_data");
+        LLVMSetInitializer(data, LLVMConstArray2(record_type, records.data,
+            (u64)records.len()));
+        // Writable: the runtime sorts the rows in place on first use.
+        LLVMSetLinkage(data, LLVMLinkage.LLVMPrivateLinkage);
+        LLVMSetInitializer(lines, data);
+    } else {
+        LLVMSetInitializer(lines, LLVMConstNull(ptr_type));
+    }
+    LLVMSetInitializer(count, LLVMConstInt(i64_type, (u64)records.len(), 0));
+
+    bool emitted = generator.emit_object_file(output_path, out_error);
+    generator.destroy();
+    fields.drop();
+    records.drop();
+    files.drop();
+    addresses.drop();
+    return emitted;
+}

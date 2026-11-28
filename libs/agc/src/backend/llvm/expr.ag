@@ -14,12 +14,15 @@ import frontend.symbols;
 import frontend.typecheck_expr;
 import frontend.types;
 import backend.llvm.context;
+import backend.llvm.debug_info;
 import backend.llvm.drop;
 import backend.llvm.mono;
 import backend.llvm.stmt;
 import backend.llvm.types;
 import backend.llvm.reference;
 import backend.llvm.function_abi;
+import backend.llvm.target;
+import backend.llvm.c_abi;
 
 /// Returns function `name` as a value (declaring an import when needed),
 /// or null when unknown.
@@ -254,15 +257,53 @@ LLVMOpaqueValue* llvm_emit_asm(LlvmContext* ctx, u32 expr_id) {
     LLVMOpaqueType* fn_type = LLVMFunctionType(i64_ty, param_types.data, args_count, 0);
     param_types.drop();
 
-    // Constraints arrive complete from lowering (lower_asm builds the fixed
-    // x86_64 register model: =rax output, rax/rdi/rsi/rdx/r10/r8/r9 inputs,
-    // rcx/r11 plus caller clobbers). Pass through verbatim: prepending
-    // another copy duplicates outputs and crashes LLVM's constraint parser.
+    // asm() uses a fixed register model shaped like the target's Linux
+    // syscall convention; the first input is the syscall number on both:
+    //   x86_64:  result {rax}; inputs {rax},{rdi},{rsi},{rdx},{r10},{r8},{r9};
+    //            rcx/r11 always clobbered.
+    //   aarch64: result {x0}; inputs {x8},{x0},{x1},{x2},{x3},{x4},{x5}.
+    // Lowering supplies only the caller's clobbers.
+    str registers[8];
+    str fixed_clobbers = "";
+    if (ctx.target_arch == LlvmTargetArch.X86_64) {
+        registers[0] = "{rax}"; registers[1] = "{rax}"; registers[2] = "{rdi}"; registers[3] = "{rsi}";
+        registers[4] = "{rdx}"; registers[5] = "{r10}"; registers[6] = "{r8}"; registers[7] = "{r9}";
+        fixed_clobbers = ",~{rcx},~{r11}";
+    } else if (ctx.target_arch == LlvmTargetArch.Aarch64) {
+        registers[0] = "{x0}"; registers[1] = "{x8}"; registers[2] = "{x0}"; registers[3] = "{x1}";
+        registers[4] = "{x2}"; registers[5] = "{x3}"; registers[6] = "{x4}"; registers[7] = "{x5}";
+    } else {
+        ctx.note_unresolved("asm-target", code);
+        args.drop();
+        return (LLVMOpaqueValue*)0;
+    }
     if (args_count > 7) {
         ctx.note_unresolved("asm-args", code);
         args.drop();
         return (LLVMOpaqueValue*)0;
     }
+    String full_constraints = String.from_str("=");
+    full_constraints.push_str(registers[0]);
+    u32 r = 0;
+    while (r < args_count) {
+        full_constraints.push((u8)',');
+        full_constraints.push_str(registers[r + 1]);
+        r += 1;
+    }
+    full_constraints.push_str(fixed_clobbers);
+    String clobber_list = String.from_str(constraints);
+    SplitIter clobbers = clobber_list.split(",");
+    while (true) {
+        Optional<str> clobber = clobbers.next();
+        if (clobber.is_none()) { break; }
+        str piece = clobber.unwrap();
+        if (strlen(piece) > 0 && !full_constraints.contains(piece)) {
+            full_constraints.push((u8)',');
+            full_constraints.push_str(piece);
+        }
+    }
+    clobber_list.drop();
+    constraints = full_constraints.to_str();
 
     u64 code_len = (u64)strlen(code);
     u64 constraints_len = (u64)strlen(constraints);
@@ -281,6 +322,7 @@ LLVMOpaqueValue* llvm_emit_asm(LlvmContext* ctx, u32 expr_id) {
 
     LLVMOpaqueValue* res = LLVMBuildCall2(ctx.builder, fn_type, asm_val, args.data, args_count, "asm_res");
     args.drop();
+    full_constraints.drop();
     return res;
 }
 
@@ -2766,7 +2808,14 @@ LLVMOpaqueValue* llvm_emit_struct_lit(LlvmContext* ctx, AstExpr* expr) {
     u32 named_id = TYPE_UNKNOWN;
     str struct_name = "";
     if (expr.inner0 == 0) {
-        named_id = ctx.types.resolve_subst(ctx.expected_type_id);
+        // A brace initializer in a return or argument carries the type its
+        // target gave it in type checking; a nested one takes its field's.
+        u32 target_id = expr.inferred_type;
+        if (target_id == TYPE_UNKNOWN || target_id == 0
+            || ctx.types.get(ctx.types.resolve_subst(target_id)).kind != TypeKind.Named) {
+            target_id = ctx.expected_type_id;
+        }
+        named_id = ctx.types.resolve_subst(target_id);
         TypeEntry* expected = ctx.types.get(named_id);
         if (expected.kind == TypeKind.Named) {
             struct_name = ctx.types.names.get(expected.name_id);
@@ -2791,13 +2840,21 @@ LLVMOpaqueValue* llvm_emit_struct_lit(LlvmContext* ctx, AstExpr* expr) {
         ctx.note_unresolved("struct-lit", struct_name);
         return (LLVMOpaqueValue*)0;
     }
-    LLVMOpaqueValue* slot = llvm_entry_alloca(ctx, def.llvm_type, "struct.lit");
-    LLVMBuildStore(ctx.builder, LLVMConstNull(def.llvm_type), slot);
+    // The target's own lowering gives a generic instance (`Cell<i32>`) its
+    // concrete layout; the shared definition only supplies the field order.
+    mono_ensure_type_layout(ctx, named_id, &ctx.generic_layout_ids);
+    LLVMOpaqueType* lit_type = llvm_lower_type(ctx.ctx, ctx.types, named_id);
+    LLVMOpaqueValue* slot = llvm_entry_alloca(ctx, lit_type, "struct.lit");
+    LLVMBuildStore(ctx.builder, LLVMConstNull(lit_type), slot);
     i64 tracking = llvm_begin_literal_tracking(ctx, slot, named_id, expr.span);
     i64 fi = 0;
     while (fi < (i64)expr.aux) {
         u32 field_name_id = ctx.pool.args.get((i64)expr.inner1 + fi * 2);
         u32 val_id = ctx.pool.args.get((i64)expr.inner1 + fi * 2 + 1);
+        // An untyped positional entry has no name until its target is known.
+        if (field_name_id == 0 && fi < def.fields.len()) {
+            field_name_id = def.fields.get_ptr(fi).name_id;
+        }
         i32 field_idx = ctx.find_field_index(def, field_name_id);
         if (field_idx < 0) {
             ctx.note_unresolved("struct-lit-field", ctx.names.get(field_name_id));
@@ -2814,7 +2871,7 @@ LLVMOpaqueValue* llvm_emit_struct_lit(LlvmContext* ctx, AstExpr* expr) {
             return (LLVMOpaqueValue*)0;
         }
         val = llvm_compat_value(ctx, val, llvm_expr_type(ctx, val_id), field_type);
-        LLVMOpaqueValue* field_ptr = LLVMBuildStructGEP2(ctx.builder, def.llvm_type, slot, (u32)field_idx, "struct.lit.field");
+        LLVMOpaqueValue* field_ptr = LLVMBuildStructGEP2(ctx.builder, lit_type, slot, (u32)field_idx, "struct.lit.field");
         LLVMOpaqueValue* store = LLVMBuildStore(ctx.builder, val, field_ptr);
         if (def.packed) { LLVMSetAlignment(store, 1); }
         // The literal owns the field's value from here. Releasing its source
@@ -2828,7 +2885,7 @@ LLVMOpaqueValue* llvm_emit_struct_lit(LlvmContext* ctx, AstExpr* expr) {
         fi += 1;
     }
     llvm_end_literal_tracking(ctx, tracking);
-    return LLVMBuildLoad2(ctx.builder, def.llvm_type, slot, "struct.lit.val");
+    return LLVMBuildLoad2(ctx.builder, lit_type, slot, "struct.lit.val");
 }
 
 /// Converts integer slice bound `value` to i64, sign- or zero-extending by
@@ -3423,9 +3480,11 @@ LLVMOpaqueValue* llvm_emit_launch(LlvmContext* ctx, u32 expr_id) {
     if (callee == (LLVMOpaqueValue*)0) {
         return (LLVMOpaqueValue*)0;
     }
-    LLVMOpaqueType* fn_type = LLVMGlobalGetValueType(callee);
     bool c_abi_call = callee_expr.kind == ExprKind.Var
         && item_is_c_extern_function(ctx.root, ctx.names.get(callee_expr.aux));
+    // A C callee packs and passes its Silver-level arguments; the trampoline
+    // converts by-value structs to the C ABI at the call.
+    LLVMOpaqueType* fn_type = c_abi_call ? llvm_c_call_type(ctx, callee) : LLVMGlobalGetValueType(callee);
     u32 param_count = LLVMCountParamTypes(fn_type);
     if (param_count != call.aux) {
         ctx.note_unresolved("launch-arity", ctx.names.get(callee_expr.aux));
@@ -3434,9 +3493,10 @@ LLVMOpaqueValue* llvm_emit_launch(LlvmContext* ctx, u32 expr_id) {
     Vec<LLVMOpaqueType*> param_types = Vec<LLVMOpaqueType*>.new();
     u32 param_index = 0;
     while (param_index < param_count) {
-        param_types.push(LLVMTypeOf(LLVMGetParam(callee, param_index)));
+        param_types.push((LLVMOpaqueType*)0);
         param_index += 1;
     }
+    if (param_count > 0) { LLVMGetParamTypes(fn_type, param_types.data); }
 
     u32 task_type = llvm_launch_task_type(ctx, launch_expr);
     TypeEntry* task_entry = ctx.types.get(task_type);
@@ -3596,9 +3656,14 @@ LLVMOpaqueValue* llvm_emit_launch(LlvmContext* ctx, u32 expr_id) {
                                               "task.trampoline.value"));
         i += 1;
     }
-    LLVMOpaqueValue* result = LLVMBuildCall2(ctx.builder, fn_type, callee,
-        trampoline_values.data, (u32)trampoline_values.len(),
-        has_result ? "task.result" : "");
+    // C ABI temporaries are allocated in the function being built.
+    LLVMOpaqueValue* launcher = ctx.current_fn;
+    ctx.current_fn = trampoline;
+    LLVMOpaqueValue* result = c_abi_call ? llvm_emit_c_call(ctx, callee, &trampoline_values)
+        : LLVMBuildCall2(ctx.builder, fn_type, callee,
+            trampoline_values.data, (u32)trampoline_values.len(),
+            has_result ? "task.result" : "");
+    ctx.current_fn = launcher;
     if (c_abi_call && has_result
         && llvm_type_is_unit_enum(ctx.root, ctx.types, result_type)
         && LLVMGetTypeKind(LLVMTypeOf(result)) == (u32)8) {
@@ -3992,6 +4057,20 @@ LLVMOpaqueValue* llvm_emit_literal_value(LlvmContext* ctx, u32 expr_id) {
 /// an unsupported construct, which is also counted).
 LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
     if (expr_id == 0) { return (LLVMOpaqueValue*)0; }
+    // Instructions take this expression's line, and the enclosing one's
+    // line comes back afterwards: a call emitted after its arguments must
+    // not keep the last argument's line.
+    LLVMOpaqueMetadata* enclosing = LLVMGetCurrentDebugLocation2(ctx.builder);
+    llvm_debug_set_location(ctx, ctx.pool.get_expr(expr_id).span);
+    LLVMOpaqueValue* value = llvm_emit_expr_at(ctx, expr_id);
+    if (ctx.di_builder != (LLVMOpaqueDIBuilder*)0) {
+        LLVMSetCurrentDebugLocation2(ctx.builder, enclosing);
+    }
+    return value;
+}
+
+/// Emits expression `expr_id` once `llvm_emit_expr` has set its location.
+LLVMOpaqueValue* llvm_emit_expr_at(LlvmContext* ctx, u32 expr_id) {
     // Child statements can synthesize expressions and reallocate the pool.
     AstExpr expr = *ctx.pool.get_expr(expr_id);
     if (expr.kind == ExprKind.Launch) { return llvm_emit_launch(ctx, expr_id); }
@@ -5635,7 +5714,9 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         if (carried_call) {
             fn_type = llvm_callable_signature(ctx, callee_type, false);
         } else if (LLVMIsAFunction(fn_val) != (LLVMOpaqueValue*)0) {
-            fn_type = LLVMGlobalGetValueType(fn_val);
+            // A C callee is prepared against its Silver-level signature;
+            // llvm_emit_c_call converts by-value structs to the C ABI.
+            fn_type = c_abi_call ? llvm_c_call_type(ctx, fn_val) : LLVMGlobalGetValueType(fn_val);
         } else {
             LLVMOpaqueType* val_ty = LLVMTypeOf(fn_val);
             u32 vk = LLVMGetTypeKind(val_ty);
@@ -5691,6 +5772,8 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 (i64)LLVMCountParamTypes(fn_type), &call_args, &call_arg_types);
         }
         LLVMOpaqueValue* res = carried_call ? llvm_emit_callable_call(ctx, fn_val, callee_type, &call_args)
+            : c_abi_call && LLVMIsAFunction(fn_val) != (LLVMOpaqueValue*)0
+                ? llvm_emit_c_call(ctx, fn_val, &call_args)
             : LLVMBuildCall2(ctx.builder, fn_type, fn_val, call_args.data, (u32)call_args.len(), "");
         u32 result_type = llvm_expr_type(ctx, expr_id);
         if (c_abi_call && result_type == TYPE_UNKNOWN) {

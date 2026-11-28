@@ -15,6 +15,12 @@ String init_plan_unrepresentable(str type_name) {
     return @format("cannot represent owner initialization plan for '{}': unresolved inline layout or more than 65536 nodes / 256 projection levels", type_name);
 }
 
+/// Diagnostic text: "{} '{}' contains itself by value; use a pointer", where
+/// the kind is `struct` or `enum`. Returns an owned string.
+String type_contains_itself(str kind, str name) {
+    return @format("{} '{}' contains itself by value; use a pointer", kind, name);
+}
+
 /// Diagnostic text: "owner initialization update has no resolved inline
 /// place". Returns an owned string.
 String init_plan_unknown_place() {
@@ -126,6 +132,29 @@ String invalid_optimization_level(str level) {
 String llvm_optimization_failed(str detail) {
     String message = String.from_str("LLVM optimization failed: ");
     message.push_str(detail);
+    return move message;
+}
+
+/// Diagnostic text for more than one output-kind flag. Returns an owned string.
+String conflicting_output_kind_flags() {
+    return String.from_str(
+        "conflicting flags: choose only one of --emit-llvm, -S, or -c (or use --emit=...)");
+}
+
+/// Diagnostic text: "native builds cannot emit '{}'; ...". Returns an owned string.
+String unsupported_native_output_kind(str kind) {
+    String message = String.from_str("native builds cannot emit '");
+    message.push_str(kind);
+    message.push_str("'; expected exe, obj, asm, llvm-ir, or module (use the lex, parse, ast, or check commands for frontend output)");
+    return move message;
+}
+
+/// Diagnostic text: "run needs an executable; '{}' output cannot be run".
+/// Returns an owned string.
+String run_needs_executable(str kind) {
+    String message = String.from_str("run needs an executable; '");
+    message.push_str(kind);
+    message.push_str("' output cannot be run");
     return move message;
 }
 
@@ -312,6 +341,18 @@ str global_initializer_not_constant() {
 /// declaration". Returns an owned string.
 String designated_array_initializer_unsupported() {
     return String.from_str("stage1 supports designated array initializers (`[index] = value`) only in a global or non-static local array declaration");
+}
+
+/// Diagnostic text: "a brace initializer cannot initialize {}: it needs a
+/// struct type". Returns an owned string.
+String initializer_target_not_struct(str type_name) {
+    return @format("a brace initializer cannot initialize {}: it needs a struct type", type_name);
+}
+
+/// Diagnostic text: "too many initializer entries for {}". Returns an owned
+/// string.
+String initializer_too_many_entries(str type_name) {
+    return @format("too many initializer entries for {}", type_name);
 }
 
 /// Diagnostic text: "array initializer index must be a constant integer".

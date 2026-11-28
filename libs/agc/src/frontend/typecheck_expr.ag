@@ -113,6 +113,17 @@ impl TypeEnv {
     }
 }
 
+/// True when local or parameter `name_id` holds a function value.
+bool typecheck_is_callable_local(TypeTable* types, TypeEnv* env, u32 name_id) {
+    u32 type_id = env.lookup(name_id);
+    if (type_id == TYPE_UNKNOWN) { return false; }
+    TypeEntry* entry = types.get(types.resolve_subst(type_id));
+    while (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) {
+        entry = types.get(types.resolve_subst(entry.inner));
+    }
+    return entry.kind == TypeKind.Function;
+}
+
 /// Returns true for 8-bit integer types (byte buffers). `char` is excluded.
 bool type_is_byte_like(u32 id) {
     // `char` is a 32-bit Unicode scalar, not a byte: accepting it here would
@@ -2593,6 +2604,10 @@ bool typecheck_judged_methods(TypeTable* types, SyntaxNode* root, u32 owner_type
         || typecheck_type_is_unresolved(types, owner_type, 0))) {
         return false;
     }
+    if (!primitive && owner.count == 0
+        && mono_contains_type_param(&types.scope_type_params, owner.name_id)) {
+        return false;
+    }
     str owner_name = primitive ? types.type_name(owner_type) : types.names.get(owner.name_id);
     if (!primitive && find_item_by_name(root, NodeKind.Struct, owner_name) == (SyntaxNode*)0
         && find_enum_item(root, owner_name) == (SyntaxNode*)0) {
@@ -3026,7 +3041,70 @@ u32 typecheck_method_return_type_for_call(AstPool* pool, SyntaxNode* root,
         receiver = types.get(resolved_receiver);
     }
     if (receiver.kind != TypeKind.Named) { return TYPE_UNKNOWN; }
+    // A type parameter's methods are known only after instantiation.
+    if (receiver.count == 0
+        && mono_contains_type_param(&types.scope_type_params, receiver.name_id)) {
+        return TYPE_UNKNOWN;
+    }
     str owner_name = types.names.get(receiver.name_id);
+    i64 best_score = -1;
+    u32 best_return_type = typecheck_method_return_type_at_depth(pool, root, types,
+        receiver_type, resolved_receiver, owner_name, receiver_depth, method_name,
+        param_count, args_start, static_method, false, &best_score);
+    if (best_return_type == TYPE_UNKNOWN && receiver_depth > 0) {
+        return typecheck_method_return_type_for_call(pool, root, types, resolved_receiver,
+            method_name, param_count, args_start, static_method);
+    }
+    if (receiver_depth > 0) {
+        // Through a pointer receiver, a value impl's overload that fits the
+        // arguments better is the one monomorphization calls.
+        i64 value_score = -1;
+        u32 value_return_type = typecheck_method_return_type_at_depth(pool, root, types,
+            resolved_receiver, resolved_receiver, owner_name, 0, method_name,
+            param_count, args_start, static_method, true, &value_score);
+        if (value_return_type != TYPE_UNKNOWN && value_score > best_score) {
+            return value_return_type;
+        }
+    }
+    return best_return_type;
+}
+
+/// Whether `impl_item`'s target type arguments fit those of `receiver`, as
+/// monomorphization requires before it picks a method from that impl.
+bool typecheck_impl_fits_receiver_args(SyntaxNode* root, TypeTable* types,
+                                       SyntaxNode* impl_item, SyntaxNode* target,
+                                       u32 receiver) {
+    TypeEntry* entry = types.get(receiver);
+    Vec<u32> arg_ids = Vec<u32>.new();
+    i64 i = 0;
+    while (i < entry.count) {
+        arg_ids.push(types.resolve_subst(types.type_args.get(entry.inner + (u32)i)));
+        i += 1;
+    }
+    Vec<u32> declared = Vec<u32>.new();
+    mono_impl_type_parameters(impl_item, types, &declared);
+    if (declared.len() == 0) {
+        mono_collect_struct_parameters(root, target.text, types, &declared);
+    }
+    Vec<u32> bound = Vec<u32>.new();
+    bool fits = mono_match_target_args(target, types, &declared, &arg_ids, &bound);
+    bound.drop();
+    declared.drop();
+    arg_ids.drop();
+    return fits;
+}
+
+/// Returns the return type of the best-fitting `method_name` among impls of
+/// `owner_name` at `receiver_depth`, and its argument score in `*out_score`.
+/// With `check_args`, impls whose target type arguments do not fit the
+/// receiver's are skipped.
+u32 typecheck_method_return_type_at_depth(AstPool* pool, SyntaxNode* root,
+                                          TypeTable* types, u32 receiver_type,
+                                          u32 resolved_receiver, str owner_name,
+                                          u32 receiver_depth, str method_name,
+                                          i64 param_count, u32 args_start,
+                                          bool static_method, bool check_args,
+                                          i64* out_score) {
     u32 best_return_type = TYPE_UNKNOWN;
     i64 best_score = -1;
     SyntaxNode* item = root.first_child;
@@ -3034,7 +3112,9 @@ u32 typecheck_method_return_type_for_call(AstPool* pool, SyntaxNode* root,
         if (item.kind == NodeKind.Impl) {
             SyntaxNode* target = impl_target_identifier(item);
             if (target != (SyntaxNode*)0 && strcmp(target.text, owner_name) == 0
-                && impl_target_pointer_depth(item) == receiver_depth) {
+                && impl_target_pointer_depth(item) == receiver_depth
+                && (!check_args || typecheck_impl_fits_receiver_args(
+                    root, types, item, target, resolved_receiver))) {
                 SyntaxNode* block = item.first_child;
                 while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
                     block = block.next_sibling;
@@ -3144,10 +3224,7 @@ u32 typecheck_method_return_type_for_call(AstPool* pool, SyntaxNode* root,
         }
         item = item.next_sibling;
     }
-    if (best_return_type == TYPE_UNKNOWN && receiver_depth > 0) {
-        return typecheck_method_return_type_for_call(pool, root, types, resolved_receiver,
-            method_name, param_count, args_start, static_method);
-    }
+    *out_score = best_score;
     return best_return_type;
 }
 
@@ -3177,6 +3254,10 @@ u32 typecheck_method_parameter_type_for_call(AstPool* pool, SyntaxNode* root,
         receiver = types.get(resolved_receiver);
     }
     if (receiver.kind != TypeKind.Named) { return TYPE_UNKNOWN; }
+    if (receiver.count == 0
+        && mono_contains_type_param(&types.scope_type_params, receiver.name_id)) {
+        return TYPE_UNKNOWN;
+    }
     str owner_name = types.names.get(receiver.name_id);
     u32 best_parameter_type = TYPE_UNKNOWN;
     u32 fallback_parameter_type = TYPE_UNKNOWN;
@@ -3591,7 +3672,15 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
             }
             field_index += 1;
         }
-        inferred = types.get_named(symbols.names.get(expr.inner0));
+        // A brace initializer has no type of its own; the target it was
+        // checked against (see `typecheck_adopt_literal_target`) names it.
+        if (expr.inner0 != 0) {
+            inferred = types.get_named(symbols.names.get(expr.inner0));
+        } else if (expr.inferred_type != 0 && types.get(expr.inferred_type).kind == TypeKind.Named) {
+            inferred = expr.inferred_type;
+        } else {
+            inferred = TYPE_UNKNOWN;
+        }
     } else if (expr.kind == ExprKind.Asm) {
         AstAsm* asm_info = pool.asms.get_ptr((i64)expr.aux);
         i64 i = 0;
@@ -3922,9 +4011,11 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         TypeKind callable_kind = callable_entry.kind;
         u32 callable_inner = callable_entry.inner;
         i64 callable_count = callable_entry.count;
-        // A local binding shadows every function of the same name.
-        bool local_binding = callee.kind == ExprKind.Var && env.lookup(callee.aux) != TYPE_UNKNOWN;
-        bool named_function = callee.kind == ExprKind.Var && !local_binding
+        // A function-typed local or parameter shadows a top-level function
+        // of the same name.
+        bool local_callable = callee.kind == ExprKind.Var
+            && typecheck_is_callable_local(types, env, callee.aux);
+        bool named_function = callee.kind == ExprKind.Var && !local_callable
             && find_function_by_name(root, symbols.names.get(callee.aux)) != (SyntaxNode*)0;
         if (callable_kind == TypeKind.Function && !named_function) {
             u32 arg_count = expr.aux;
@@ -3940,17 +4031,8 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 TypeKind parameter_kind = parameter_entry.kind;
                 u32 arg_id = pool.args.get((i64)expr.inner1 + i);
                 u32 actual_type = infer_expr(pool, types, symbols, root, env, arg_id, diagnostics, ok);
-                bool literal = expr_is_literal(pool, arg_id);
-                if (!direct_c_call
-                    && !typecheck_call_argument_matches(types, parameter_type, actual_type, literal)
-                    && !typecheck_implicit_borrow(types, parameter_type, actual_type, literal)
-                    && !typecheck_tuple_literal_fits(pool, root, types, parameter_type, arg_id)
-                    && !typecheck_implicit_cast(root, types, actual_type, parameter_type)) {
-                    diagnostics.error(pool.get_expr(arg_id).span,
-                        argument_type_mismatch(i + 1, types.type_name(parameter_type),
-                            types.type_name(actual_type)));
-                    *ok = false;
-                }
+                actual_type = typecheck_adopt_literal_target(pool, types, symbols, root, arg_id,
+                    actual_type, parameter_type, diagnostics, ok);
                 typecheck_char_pointer_argument(types, parameter_type, actual_type,
                     pool.get_expr(arg_id).span, diagnostics, ok);
                 if (parameter_kind == TypeKind.Pointer) { pool.mutable_borrows.set((i64)arg_id); }
@@ -3961,11 +4043,27 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                     typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
                                                        arg_id, diagnostics, ok);
                 }
+                // Types still naming a generic parameter are checked at
+                // instantiation, and a C function's arguments convert.
+                if (!direct_c_call
+                    && !typecheck_type_is_unresolved(types, parameter_type, 0)
+                    && !typecheck_type_is_unresolved(types, actual_type, 0)
+                    && !typecheck_call_argument_matches(types, parameter_type, actual_type,
+                        expr_is_literal(pool, arg_id))
+                    && !typecheck_implicit_borrow(types, parameter_type, actual_type,
+                        expr_is_literal(pool, arg_id))
+                    && !typecheck_tuple_literal_fits(pool, root, types, parameter_type, arg_id)
+                    && !typecheck_implicit_cast(root, types, actual_type, parameter_type)) {
+                    diagnostics.error(pool.get_expr(arg_id).span,
+                        argument_type_mismatch(i + 1, types.type_name(parameter_type),
+                            types.type_name(actual_type)));
+                    *ok = false;
+                }
                 i += 1;
             }
             inferred = types.type_args.get(callable_inner);
         }
-        if (callee.kind == ExprKind.Var) {
+        if (callee.kind == ExprKind.Var && !local_callable) {
             str callee_name = symbols.names.get(callee.aux);
             if (typecheck_str_starts_with(callee_name, "__atomic_")) {
                 inferred = TYPE_UNKNOWN;
@@ -3991,12 +4089,9 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
             bool ambiguous = false;
             bool no_match = false;
             u32 resolved_symbol_id = 0;
-            // The callable branch above checked a local callable's arguments.
-            bool local_callable = local_binding && callable_kind == TypeKind.Function;
-            SyntaxNode* callee_fn = local_callable ? (SyntaxNode*)0
-                : typecheck_resolve_free_function(
-                    pool, types, symbols, root, env, callee_name, expr, diagnostics, ok,
-                    &overloaded, &ambiguous, &no_match, &resolved_symbol_id);
+            SyntaxNode* callee_fn = typecheck_resolve_free_function(
+                pool, types, symbols, root, env, callee_name, expr, diagnostics, ok,
+                &overloaded, &ambiguous, &no_match, &resolved_symbol_id);
             if (ambiguous || no_match) {
                 String message = ambiguous
                     ? String.from_str("call to overloaded function '")
@@ -4066,7 +4161,8 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                                 ? typecheck_parameter_base_type_id(types, param)
                                 : typecheck_parameter_type_id(types, param));
                         u32 arg_expr_id = pool.args.get((i64)expr.inner1 + i);
-                        u32 actual_arg_type = arg_types.get(i);
+                        u32 actual_arg_type = typecheck_adopt_literal_target(pool, types,
+                            symbols, root, arg_expr_id, arg_types.get(i), expected_arg_type, diagnostics, ok);
                         typecheck_char_pointer_argument(types, expected_arg_type, actual_arg_type,
                             pool.get_expr(arg_expr_id).span, diagnostics, ok);
                         TypeEntry* expected_entry = types.get(expected_arg_type);
@@ -4335,7 +4431,8 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 u32 expected_arg_type = typecheck_method_parameter_type_for_call(
                     pool, root, types, receiver_type, method_name, total_param_count,
                     expr.inner1, static_method, parameter_index, (bool*)0);
-                u32 arg_type = pool.get_expr(arg_id).inferred_type;
+                u32 arg_type = typecheck_adopt_literal_target(pool, types, symbols, root,
+                    arg_id, pool.get_expr(arg_id).inferred_type, expected_arg_type, diagnostics, ok);
                 typecheck_char_pointer_argument(types, expected_arg_type, arg_type,
                     pool.get_expr(arg_id).span, diagnostics, ok);
                 AstExpr* argument = pool.get_expr(arg_id);
@@ -4693,6 +4790,98 @@ void typecheck_reject_defer_control(AstPool* pool, u32 node_id, bool is_stmt,
     }
 }
 
+/// Names the struct literal `value_id` after `target_type`, the type its
+/// position expects (an assignment target, a return type, or a parameter),
+/// when the literal has no declared type of its own: a brace initializer,
+/// or a nested literal named after a generic field's type parameter (`U` in
+/// `Box<U>`). Returns the literal's type, or `value_type` otherwise.
+u32 typecheck_adopt_literal_target(AstPool* pool, TypeTable* types, SymbolTable* symbols,
+                                   SyntaxNode* root, u32 value_id, u32 value_type,
+                                   u32 target_type, DiagnosticBag* diagnostics, bool* ok) {
+    AstExpr* value_expr = pool.get_expr(value_id);
+    if (value_expr.kind != ExprKind.StructLit || target_type == TYPE_UNKNOWN) {
+        return value_type;
+    }
+    bool untyped_literal = value_expr.inner0 == 0
+        || (find_item_by_name(root, NodeKind.Struct, symbols.names.get(value_expr.inner0))
+                == (SyntaxNode*)0
+            && find_enum_item(root, symbols.names.get(value_expr.inner0)) == (SyntaxNode*)0);
+    if (!untyped_literal) { return value_type; }
+    u32 resolved_target = types.resolve_subst(target_type);
+    // Enums are named types too, but a brace initializer only builds a struct.
+    bool enum_target = types.get(resolved_target).kind == TypeKind.Named
+        && find_enum_item(root, types.names.get(types.get(resolved_target).name_id))
+            != (SyntaxNode*)0;
+    if (types.get(resolved_target).kind != TypeKind.Named || enum_target) {
+        if (value_expr.inner0 == 0 && resolved_target != TYPE_UNKNOWN) {
+            diagnostics.error(value_expr.span,
+                initializer_target_not_struct(types.type_name(resolved_target)));
+            *ok = false;
+        }
+        return value_type;
+    }
+    value_expr.inferred_type = resolved_target;
+    if (value_expr.inner0 == 0) {
+        typecheck_brace_initializer_fields(pool, types, symbols, root, value_id,
+                                           resolved_target, diagnostics, ok);
+    }
+    return resolved_target;
+}
+
+/// Checks the entries of brace initializer `literal_id` against the fields of
+/// struct `target`: each designated name must exist, positional entries must
+/// not outnumber the fields, and each value must fit its field's type. A
+/// nested brace initializer adopts and checks its field's type in turn.
+void typecheck_brace_initializer_fields(AstPool* pool, TypeTable* types, SymbolTable* symbols,
+                                        SyntaxNode* root, u32 literal_id, u32 target,
+                                        DiagnosticBag* diagnostics, bool* ok) {
+    str target_name = types.names.get(types.get(target).name_id);
+    SyntaxNode* item = find_item_by_name(root, NodeKind.Struct, target_name);
+    if (item == (SyntaxNode*)0) { return; }
+    u32 fields_start = pool.get_expr(literal_id).inner1;
+    i64 field_count = (i64)pool.get_expr(literal_id).aux;
+    i64 index = 0;
+    while (index < field_count) {
+        u32 name_id = pool.args.get((i64)fields_start + index * 2);
+        u32 val_id = pool.args.get((i64)fields_start + index * 2 + 1);
+        Span value_span = pool.get_expr(val_id).span;
+        str field_name = (str)0;
+        if (name_id != 0) {
+            field_name = symbols.names.get(name_id);
+        } else {
+            SyntaxNode* positional = struct_field_name_at(item, index);
+            if (positional == (SyntaxNode*)0) {
+                diagnostics.error(value_span,
+                    initializer_too_many_entries(types.type_name(target)));
+                *ok = false;
+                return;
+            }
+            field_name = positional.text;
+        }
+        u32 field_type = struct_field_type_id(types, item, field_name);
+        if (field_type == TYPE_UNKNOWN) {
+            diagnostics.error(value_span, unknown_field(field_name, types.type_name(target)));
+            *ok = false;
+        } else {
+            field_type = types.resolve_subst(
+                resolve_generic_member_type(types, root, target, field_type));
+            u32 value_type = typecheck_adopt_literal_target(pool, types, symbols, root, val_id,
+                pool.get_expr(val_id).inferred_type, field_type, diagnostics, ok);
+            if (value_type != TYPE_UNKNOWN
+                && !typecheck_type_is_unresolved(types, field_type, 0)
+                && !types_match_value(types, field_type, value_type,
+                                      expr_is_literal(pool, val_id))
+                && !typecheck_tuple_literal_fits(pool, root, types, field_type, val_id)
+                && !typecheck_implicit_cast(root, types, value_type, field_type)) {
+                diagnostics.error(value_span, type_mismatch(types.type_name(field_type),
+                                                            types.type_name(value_type)));
+                *ok = false;
+            }
+        }
+        index += 1;
+    }
+}
+
 // Resolve local initializers with the same expression checker as function bodies.
 // The environment is supplied by the caller's scope model.
 /// Returns the type of a declaration initializer.
@@ -4831,23 +5020,8 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
     } else if (stmt.kind == StmtKind.Assign) {
         u32 target_type = infer_expr(pool, types, symbols, root, env, stmt.inner0, diagnostics, ok);
         u32 val_type = infer_expr(pool, types, symbols, root, env, stmt.inner1, diagnostics, ok);
-        AstExpr* value_expr = pool.get_expr(stmt.inner1);
-        // A nested literal in a generic field is named after the field's type
-        // parameter (`U` in `Box<U>`), not a declared type: it takes the target's.
-        bool untyped_literal = value_expr.kind == ExprKind.StructLit
-            && (value_expr.inner0 == 0
-                || (find_item_by_name(root, NodeKind.Struct, symbols.names.get(value_expr.inner0))
-                        == (SyntaxNode*)0
-                    && find_enum_item(root, symbols.names.get(value_expr.inner0))
-                        == (SyntaxNode*)0));
-        if (untyped_literal) {
-            u32 resolved_target = types.resolve_subst(target_type);
-            TypeEntry* target_entry = types.get(resolved_target);
-            if (target_entry.kind == TypeKind.Named) {
-                value_expr.inferred_type = resolved_target;
-                val_type = resolved_target;
-            }
-        }
+        val_type = typecheck_adopt_literal_target(pool, types, symbols, root, stmt.inner1,
+                                                  val_type, target_type, diagnostics, ok);
         if (pool.get_expr(stmt.inner1).kind != ExprKind.Move) {
             typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
                                                stmt.inner1, diagnostics, ok);
@@ -4872,6 +5046,8 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
         u32 expr_id = stmt.inner0;
         if (expr_id != 0) {
             u32 actual_type = infer_expr(pool, types, symbols, root, env, expr_id, diagnostics, ok);
+            actual_type = typecheck_adopt_literal_target(pool, types, symbols, root, expr_id,
+                                                         actual_type, expected_return, diagnostics, ok);
             TypeEntry* return_entry = types.get(expected_return);
             if (return_entry.kind != TypeKind.Pointer && return_entry.kind != TypeKind.Reference
                 && pool.get_expr(expr_id).kind != ExprKind.Move) {
@@ -5096,9 +5272,15 @@ void typecheck_function_statements_scoped(AstPool* pool, TypeTable* types, Symbo
                                           DiagnosticBag* diagnostics, bool* ok, bool* unsupported_out) {
     SyntaxNode* body = find_function_body(function);
     if (body == (SyntaxNode*)0) { return; }
+    SyntaxNode* name = function_identifier(function);
+    types.scope_type_params.clear();
+    if (name != (SyntaxNode*)0) {
+        mono_collect_generic_parameters(name.next_sibling, types, &types.scope_type_params);
+    }
     typecheck_body(pool, types, symbols, root, binding_function_parameters(function), body,
                    function_return_type_id(types, function), TYPE_UNKNOWN, cfg, diagnostics, ok,
                    unsupported_out);
+    types.scope_type_params.clear();
 }
 
 /// Type-checks the statements of `body` with `parameters` in scope. A
@@ -5271,8 +5453,15 @@ void typecheck_impl_methods(AstPool* pool, SymbolTable* symbols, SyntaxNode* roo
                 }
                 bool function_ok = true;
                 bool unsupported = false;
+                types.scope_type_params.clear();
+                mono_impl_type_parameters(item, types, &types.scope_type_params);
+                if (!is_cast) {
+                    mono_collect_generic_parameters(name.next_sibling, types,
+                                                    &types.scope_type_params);
+                }
                 typecheck_body(pool, types, symbols, root, cursor, next, expected_return,
                                owner, cfg, diagnostics, &function_ok, &unsupported);
+                types.scope_type_params.clear();
                 if (unsupported && function_ok) {
                     diagnostics.error(name.span, unchecked_function_body(name.text));
                     function_ok = false;
@@ -5314,6 +5503,386 @@ bool typecheck_constant_initializer(AstPool* pool, u32 id) {
         i += 1;
     }
     return true;
+}
+
+/// Bit width a folded constant of type `type_id` wraps to: 1 for `bool`,
+/// 8 to 64 for integers, and 0 for types that do not fold, including the
+/// 128-bit integers, whose literals keep their full-width path.
+i64 const_eval_bits(u32 type_id) {
+    if (type_id == TYPE_BOOL) { return 1; }
+    if (type_id == TYPE_I8 || type_id == TYPE_U8) { return 8; }
+    if (type_id == TYPE_I16 || type_id == TYPE_U16) { return 16; }
+    if (type_id == TYPE_I32 || type_id == TYPE_U32) { return 32; }
+    if (type_id == TYPE_I64 || type_id == TYPE_U64) { return 64; }
+    return 0;
+}
+
+/// Truncates `value` to type `type_id` like the runtime operation would,
+/// sign-extending signed types. Other types keep the value.
+i64 const_eval_wrap(i64 value, u32 type_id) {
+    i64 bits = const_eval_bits(type_id);
+    if (bits == 0 || bits >= 64) { return value; }
+    i64 mask = ((i64)1 << bits) - 1;
+    i64 truncated = value & mask;
+    if (type_is_signed_integer(type_id) && ((truncated >> (bits - 1)) & 1) != 0) {
+        return truncated | ~mask;
+    }
+    return truncated;
+}
+
+/// Parses integer literal `text` (decimal, `0x`, `0o` or `0b`, with `_`
+/// separators and an optional type suffix) as a 64-bit pattern. False when
+/// it has no digits.
+bool const_eval_parse_int(str text, i64* out) {
+    i64 len = strlen(text);
+    i64 i = 0;
+    u64 radix = 10;
+    if (len >= 2 && text[0] == (u8)'0') {
+        u8 prefix = text[1];
+        if (prefix == (u8)'x' || prefix == (u8)'X') { radix = 16; }
+        if (prefix == (u8)'o' || prefix == (u8)'O') { radix = 8; }
+        if (prefix == (u8)'b' || prefix == (u8)'B') { radix = 2; }
+        if (radix != 10) { i = 2; }
+    }
+    u64 value = 0;
+    bool digits = false;
+    while (i < len) {
+        u8 c = text[i];
+        if (c != (u8)'_') {
+            u64 digit = radix;
+            if (c >= (u8)'0' && c <= (u8)'9') {
+                digit = (u64)(c - (u8)'0');
+            } else if (radix == 16 && c >= (u8)'a' && c <= (u8)'f') {
+                digit = (u64)(c - (u8)'a') + 10;
+            } else if (radix == 16 && c >= (u8)'A' && c <= (u8)'F') {
+                digit = (u64)(c - (u8)'A') + 10;
+            }
+            // A type suffix ends the digits.
+            if (digit >= radix) { break; }
+            // Reject literals beyond u64 rather than keep their low bits.
+            if (value > (~(u64)0 - digit) / radix) { return false; }
+            value = value * radix + digit;
+            digits = true;
+        }
+        i += 1;
+    }
+    *out = (i64)value;
+    return digits;
+}
+
+/// A folded integer or bool operand. `type_id` is its type; TYPE_UNKNOWN
+/// marks a bare literal, which takes the type of the operation around it.
+struct ConstOperand {
+    i64 value;
+    u32 type_id;
+}
+
+/// True for operators whose result is a bool: comparisons and logical
+/// operators.
+bool const_eval_compares(u32 op) {
+    return op == (u32)TokenKind.Equal || op == (u32)TokenKind.NotEqual
+        || op == (u32)TokenKind.Less || op == (u32)TokenKind.Greater
+        || op == (u32)TokenKind.LessEqual || op == (u32)TokenKind.GreaterEqual
+        || op == (u32)TokenKind.And || op == (u32)TokenKind.Or;
+}
+
+/// Result type of a binary operation on operands of types `a` and `b`, like
+/// the type checker gives it: the wider type, or the typed one beside a bare
+/// literal (TYPE_UNKNOWN).
+u32 const_eval_common_type(u32 a, u32 b) {
+    if (a == TYPE_UNKNOWN) { return b; }
+    if (b == TYPE_UNKNOWN) { return a; }
+    return common_numeric_type(a, b);
+}
+
+/// Folds `lhs op rhs` in the operands' type (`context` when both are bare
+/// literals), wrapping like the runtime operation. Comparisons and logical
+/// operators produce a bool. False for an operator that does not fold,
+/// division by zero, or an out-of-range shift.
+bool const_eval_binary(u32 op, ConstOperand lhs, ConstOperand rhs, u32 context,
+                       ConstOperand* out) {
+    // A wide literal adopts a typed operand's width beside it; with none,
+    // its value does not fit the folder.
+    if (lhs.type_id == TYPE_I128) {
+        if (const_eval_bits(rhs.type_id) == 0) { return false; }
+        lhs.type_id = TYPE_UNKNOWN;
+    }
+    if (rhs.type_id == TYPE_I128) {
+        if (const_eval_bits(lhs.type_id) == 0) { return false; }
+        rhs.type_id = TYPE_UNKNOWN;
+    }
+    u32 typed = const_eval_common_type(lhs.type_id, rhs.type_id);
+    bool compares = const_eval_compares(op);
+    u32 type_id = typed != TYPE_UNKNOWN ? typed : (compares ? TYPE_UNKNOWN : context);
+    i64 l = const_eval_wrap(lhs.value, type_id);
+    i64 r = const_eval_wrap(rhs.value, type_id);
+    // Like the runtime operation, an unsigned operand on either side makes
+    // compares, division and right shifts unsigned, on the result width's
+    // bit patterns; the result keeps its own type.
+    bool is_unsigned = type_id == TYPE_BOOL || type_is_unsigned_integer(type_id)
+        || type_is_unsigned_integer(lhs.type_id) || type_is_unsigned_integer(rhs.type_id);
+    i64 width = const_eval_bits(type_id);
+    if (is_unsigned && width > 0 && width < 64) {
+        i64 mask = ((i64)1 << width) - 1;
+        l = l & mask;
+        r = r & mask;
+    }
+    bool truth = false;
+    i64 value = 0;
+    if (op == (u32)TokenKind.Equal) {
+        truth = l == r;
+    } else if (op == (u32)TokenKind.NotEqual) {
+        truth = l != r;
+    } else if (op == (u32)TokenKind.Less) {
+        truth = is_unsigned ? (u64)l < (u64)r : l < r;
+    } else if (op == (u32)TokenKind.Greater) {
+        truth = is_unsigned ? (u64)l > (u64)r : l > r;
+    } else if (op == (u32)TokenKind.LessEqual) {
+        truth = is_unsigned ? (u64)l <= (u64)r : l <= r;
+    } else if (op == (u32)TokenKind.GreaterEqual) {
+        truth = is_unsigned ? (u64)l >= (u64)r : l >= r;
+    } else if (op == (u32)TokenKind.And) {
+        // Each operand is truthy in its own type, before any narrowing.
+        truth = lhs.value != 0 && rhs.value != 0;
+    } else if (op == (u32)TokenKind.Or) {
+        truth = lhs.value != 0 || rhs.value != 0;
+    } else if (op == (u32)TokenKind.Plus) {
+        value = (i64)((u64)l + (u64)r);
+    } else if (op == (u32)TokenKind.Minus) {
+        value = (i64)((u64)l - (u64)r);
+    } else if (op == (u32)TokenKind.Star) {
+        value = (i64)((u64)l * (u64)r);
+    } else if (op == (u32)TokenKind.Slash || op == (u32)TokenKind.Percent) {
+        if (r == 0) { return false; }
+        bool divide = op == (u32)TokenKind.Slash;
+        if (is_unsigned) {
+            value = divide ? (i64)((u64)l / (u64)r) : (i64)((u64)l % (u64)r);
+        } else if (r == -1) {
+            // Avoid the i64 overflow trap; the result wraps like the runtime one.
+            value = divide ? (i64)((u64)0 - (u64)l) : (i64)0;
+        } else {
+            value = divide ? l / r : l % r;
+        }
+    } else if (op == (u32)TokenKind.BitwiseAnd) {
+        value = l & r;
+    } else if (op == (u32)TokenKind.BitwiseOr) {
+        value = l | r;
+    } else if (op == (u32)TokenKind.BitwiseXor) {
+        value = l ^ r;
+    } else if (op == (u32)TokenKind.LeftShift || op == (u32)TokenKind.RightShift) {
+        i64 bits = const_eval_bits(type_id);
+        if (bits == 0) { bits = 64; }
+        // Range-check the count as written, before any narrowing.
+        if (rhs.value < 0 || rhs.value >= bits) { return false; }
+        if (op == (u32)TokenKind.LeftShift) {
+            value = (i64)((u64)l << (u64)r);
+        } else if (is_unsigned) {
+            value = (i64)((u64)l >> (u64)r);
+        } else {
+            value = l >> r;
+        }
+    } else {
+        return false;
+    }
+    if (compares) {
+        out.value = truth ? 1 : 0;
+        out.type_id = TYPE_BOOL;
+    } else {
+        out.value = const_eval_wrap(value, type_id);
+        out.type_id = typed;
+    }
+    return true;
+}
+
+/// Folds integer and bool constant initializers. Each referenced constant
+/// is lowered once, into `scratch` so the caller's pool does not grow under
+/// expressions it holds, and folded once; `active` holds the constants being
+/// folded, so a cycle is rejected instead of recursing.
+struct ConstEval {
+    AstPool scratch;
+    TypeTable* types;
+    Interner* names;
+    SyntaxNode* root;
+    Vec<str> done_names;
+    Vec<i64> done_values;
+    Vec<u32> done_types;
+    Vec<str> active;
+}
+
+impl ConstEval {
+    /// Creates an evaluator for the globals under `root`.
+    ConstEval new(TypeTable* types, Interner* names, SyntaxNode* root) {
+        ConstEval eval;
+        eval.scratch = AstPool.new();
+        eval.types = types;
+        eval.names = names;
+        eval.root = root;
+        eval.done_names = Vec<str>.new();
+        eval.done_values = Vec<i64>.new();
+        eval.done_types = Vec<u32>.new();
+        eval.active = Vec<str>.new();
+        return move eval;
+    }
+
+    /// Folds initializer `value_id`, lowered into `pool`, of a global
+    /// declared with integer or bool type `type_id` into `*out`.
+    bool fold_initializer(ConstEval* self, AstPool* pool, u32 value_id, u32 type_id,
+                          i64* out) {
+        if (const_eval_bits(type_id) == 0) { return false; }
+        ConstOperand folded;
+        if (!self.fold_operand(pool, value_id, type_id, &folded)) { return false; }
+        *out = const_eval_wrap(folded.value, type_id);
+        return true;
+    }
+
+    /// Lowers global `item` and folds its integer or bool initializer,
+    /// storing its declared type in `*type_out`.
+    bool fold_item(ConstEval* self, SyntaxNode* item, u32* type_out, i64* out) {
+        SyntaxNode* start = item.first_child;
+        while (start != (SyntaxNode*)0 && start.kind == NodeKind.Token
+            && (start.token_kind == TokenKind.Private || strcmp(start.text, "#") == 0)) {
+            start = strcmp(start.text, "#") == 0 && start.next_sibling != (SyntaxNode*)0
+                ? start.next_sibling.next_sibling : start.next_sibling;
+        }
+        ExprLowerer lowerer = ExprLowerer.new(&self.scratch, self.types, self.names);
+        lowerer.unit_root = self.root;
+        Vec<u32> stmt_ids = Vec<u32>.new();
+        lowerer.lower_block_range(start, (SyntaxNode*)0, &stmt_ids);
+        bool folded = false;
+        if (!lowerer.unsupported && stmt_ids.len() == 1) {
+            // Copy the fields: folding lowers more statements into the pool.
+            AstStmt* declaration = self.scratch.get_stmt(stmt_ids.get(0));
+            StmtKind kind = declaration.kind;
+            u32 type_id = declaration.inner0;
+            u32 value = declaration.inner1;
+            if (kind == StmtKind.Let && value != 0) {
+                *type_out = type_id;
+                folded = self.fold_initializer(&self.scratch, value, type_id, out);
+            }
+        }
+        stmt_ids.drop();
+        return folded;
+    }
+
+    /// Folds a reference to `name`, a top-level `const` integer or bool
+    /// global, in its declared type.
+    bool fold_name(ConstEval* self, str name, ConstOperand* out) {
+        i64 i = 0;
+        while (i < self.done_names.len()) {
+            if (strcmp(self.done_names.get(i), name) == 0) {
+                out.value = self.done_values.get(i);
+                out.type_id = self.done_types.get(i);
+                return true;
+            }
+            i += 1;
+        }
+        i = 0;
+        while (i < self.active.len()) {
+            if (strcmp(self.active.get(i), name) == 0) { return false; }
+            i += 1;
+        }
+        // The last declaration of `name` is the one the backend emits (it
+        // does not apply cfg to globals yet), so folding reads that one too.
+        SyntaxNode* item = (SyntaxNode*)0;
+        SyntaxNode* scan = self.root.first_child;
+        while (scan != (SyntaxNode*)0) {
+            SyntaxNode* id_node = scan.kind == NodeKind.Global
+                ? item_identifier(scan) : (SyntaxNode*)0;
+            if (id_node != (SyntaxNode*)0 && strcmp(id_node.text, name) == 0) { item = scan; }
+            scan = scan.next_sibling;
+        }
+        if (item == (SyntaxNode*)0) { return false; }
+        bool is_const = false;
+        SyntaxNode* part = item.first_child;
+        while (part != (SyntaxNode*)0 && part != item_identifier(item)) {
+            if (part.kind == NodeKind.Token && part.token_kind == TokenKind.Const) {
+                is_const = true;
+            }
+            part = part.next_sibling;
+        }
+        if (!is_const) { return false; }
+        self.active.push(name);
+        u32 type_id = TYPE_UNKNOWN;
+        i64 value = 0;
+        bool folded = self.fold_item(item, &type_id, &value);
+        self.active.pop();
+        if (!folded) { return false; }
+        self.done_names.push(name);
+        self.done_values.push(value);
+        self.done_types.push(type_id);
+        out.value = value;
+        out.type_id = type_id;
+        return true;
+    }
+
+    /// Folds lowered expression `id` in its own type, like the runtime
+    /// operation: a typed operand (a constant, cast or bool) fixes the type
+    /// of the operation, and a bare literal takes the type of `context`.
+    bool fold_operand(ConstEval* self, AstPool* pool, u32 id, u32 context,
+                      ConstOperand* out) {
+        // Copy the fields: folding a referenced constant lowers into scratch,
+        // which may be `pool`.
+        AstExpr* expr = pool.get_expr(id);
+        ExprKind kind = expr.kind;
+        u32 inner0 = expr.inner0;
+        u32 inner1 = expr.inner1;
+        u32 aux = expr.aux;
+        if (kind == ExprKind.Literal) {
+            str text = self.names.get(inner0);
+            if (aux == TYPE_BOOL) {
+                out.value = strcmp(text, "true") == 0 ? 1 : 0;
+                out.type_id = TYPE_BOOL;
+                return true;
+            }
+            // A literal too wide for i64 folds only where a 64-bit or
+            // narrower type takes it (the context, or a typed operand beside
+            // it); until then it is marked TYPE_I128.
+            bool wide = (aux == TYPE_I128 || aux == TYPE_U128) && const_eval_bits(context) == 0;
+            out.type_id = wide ? TYPE_I128 : TYPE_UNKNOWN;
+            return type_is_integer(aux) && const_eval_parse_int(text, &out.value);
+        }
+        if (kind == ExprKind.Var) {
+            return self.fold_name(self.names.get(aux), out);
+        }
+        if (kind == ExprKind.Cast) {
+            ConstOperand inner;
+            if (const_eval_bits(aux) == 0 || !self.fold_operand(pool, inner0, TYPE_I64, &inner)) {
+                return false;
+            }
+            out.value = const_eval_wrap(const_eval_wrap(inner.value, inner.type_id), aux);
+            out.type_id = aux;
+            return true;
+        }
+        if (kind == ExprKind.Unary) {
+            ConstOperand inner;
+            if (!self.fold_operand(pool, inner0, context, &inner)) { return false; }
+            // A bare literal stays unwrapped until an operation types it.
+            u32 type_id = inner.type_id;
+            i64 value = const_eval_wrap(inner.value, type_id);
+            if (aux == (u32)TokenKind.Minus) {
+                value = (i64)((u64)0 - (u64)value);
+            } else if (aux == (u32)TokenKind.Not && type_id == TYPE_BOOL) {
+                value = value == 0 ? 1 : 0;
+            } else if (aux == (u32)TokenKind.Not || aux == (u32)TokenKind.BitwiseNot) {
+                value = ~value;
+            } else if (aux != (u32)TokenKind.Plus) {
+                return false;
+            }
+            out.value = const_eval_wrap(value, type_id);
+            out.type_id = type_id;
+            return true;
+        }
+        if (kind == ExprKind.Binary) {
+            ConstOperand lhs;
+            ConstOperand rhs;
+            // Comparison operands are integers, not the bool result.
+            u32 operand_context = const_eval_compares(aux) ? TYPE_UNKNOWN : context;
+            return self.fold_operand(pool, inner0, operand_context, &lhs)
+                && self.fold_operand(pool, inner1, operand_context, &rhs)
+                && const_eval_binary(aux, lhs, rhs, context, out);
+        }
+        return false;
+    }
 }
 
 /// Lowers global `item` like a local declaration and records its declared
@@ -5361,7 +5930,11 @@ void typecheck_global(AstPool* pool, SymbolTable* symbols, SyntaxNode* root, Syn
             AstStmt* stmt = pool.get_stmt(stmt_ids.get(i));
             u32 value = stmt.kind == StmtKind.Let || stmt.kind == StmtKind.Assign
                 ? stmt.inner1 : (u32)0;
-            if (value != 0 && !typecheck_constant_initializer(pool, value)) {
+            u32 declared_type = stmt.kind == StmtKind.Let ? stmt.inner0 : TYPE_UNKNOWN;
+            i64 folded = 0;
+            ConstEval eval = ConstEval.new(&symbols.types, &symbols.names, root);
+            if (value != 0 && !typecheck_constant_initializer(pool, value)
+                && !eval.fold_initializer(pool, value, declared_type, &folded)) {
                 diagnostics.error(pool.get_expr(value).span,
                                   String.from_str(global_initializer_not_constant()));
                 *ok = false;

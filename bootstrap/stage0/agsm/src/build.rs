@@ -61,7 +61,11 @@ pub fn build(options: &BuildOptions) -> Result<PathBuf, BuildError> {
         options.lib_paths.clone(),
         options.defines.clone(),
     );
-    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    // `Path::parent` of a bare file name is "", which `canonicalize` rejects.
+    let base_dir = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     let base_dir = fs::canonicalize(base_dir).map_err(|error| BuildError::Io {
         path: base_dir.to_path_buf(),
         message: error.to_string(),

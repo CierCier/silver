@@ -56,6 +56,13 @@ extern "C" i32 sprintf(u8* output, str format, ...);
 extern "C" void qsort(void* values, u64 count, u64 size, i32(&i32, &i32) compare);
 extern "C" f64 strtod(str text, u8** end);
 
+// libc's div_t (8 bytes, one register) and lldiv_t (16 bytes: two registers on SysV and AAPCS64, sret on Win64)
+// come back by C struct ABI rules, not as plain aggregates.
+struct CDiv { i32 quot; i32 rem; }
+struct CLongDiv { i64 quot; i64 rem; }
+extern "C" CDiv div(i32 numerator, i32 denominator);
+extern "C" CLongDiv lldiv(i64 numerator, i64 denominator);
+
 i64 reference_comparisons = 0;
 i32 compare_reference_values(&i32 left, &i32 right) {
     reference_comparisons += 1;
@@ -119,6 +126,12 @@ i32 main() {
         assert_eq_i32(7, values[2], "C reference callback sorts third value");
         assert_eq_i32(9, values[3], "C reference callback sorts last value");
         assert_true(reference_comparisons > 0, "C invokes the stored reference callback");
+        CDiv small = div(47, 10);
+        assert_eq_i32(4, small.quot, "C struct result in one register: quotient");
+        assert_eq_i32(7, small.rem, "C struct result in one register: remainder");
+        CLongDiv large = lldiv(-47, 10);
+        assert_eq_i64(-4, large.quot, "C struct result in two registers: quotient");
+        assert_eq_i64(-7, large.rem, "C struct result in two registers: remainder");
         // Observe C default promotions through sprintf's va_list consumer.
         u8 formatted[64];
         i32 formatted_len = sprintf(&formatted[0], "%d %d %d %d %d %d %.1f %s",

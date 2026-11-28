@@ -10,6 +10,7 @@ import frontend.diagnostics;
 import frontend.expressions;
 import frontend.items;
 import frontend.messages;
+import frontend.module_loader;
 import frontend.symbols;
 import frontend.types;
 
@@ -425,6 +426,167 @@ void typecheck_enum(SyntaxNode* item, DiagnosticBag* diagnostics, bool* ok) {
     arities.drop();
 }
 
+/// Bounds the inline-type search through generic instantiations that keep
+/// growing, such as `G<G<T>>`; the type that grows is itself reported.
+const i64 MAX_INLINE_TYPE_SEARCH = 4096;
+
+/// Returns true when `ids` holds `id`.
+bool typecheck_list_has(Vec<u32>* ids, u32 id) {
+    i64 i = 0;
+    while (i < ids.len()) {
+        if (ids.get(i) == id) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+/// Returns the index of the recorded struct or enum facts for `name_id`, or -1.
+i64 typecheck_definition_index(TypeTable* types, u32 name_id) {
+    i64 i = 0;
+    while (i < types.struct_properties.len()) {
+        if (types.struct_properties.get_ptr(i).name_id == name_id) { return i; }
+        i += 1;
+    }
+    return -1;
+}
+
+/// Returns `id` with each type parameter in `params` replaced by the type at
+/// the same index of `arguments`, or by `TYPE_UNKNOWN` past its end. Applies
+/// once, so an argument that names a parameter is not rebound. Only the
+/// inline shapes (arrays, tuples, named arguments) are rebuilt; pointers and
+/// other indirections keep their pointee, which the inline search skips.
+u32 typecheck_substitute(TypeTable* types, u32 id, Vec<u32>* params, Vec<u32>* arguments) {
+    TypeEntry entry = *types.get(id);
+    if (entry.kind == TypeKind.TypeParam || (entry.kind == TypeKind.Named && entry.count == 0)) {
+        i64 i = 0;
+        while (i < params.len()) {
+            if (params.get(i) == entry.name_id) {
+                return i < arguments.len() ? arguments.get(i) : TYPE_UNKNOWN;
+            }
+            i += 1;
+        }
+        return id;
+    }
+    if (entry.kind == TypeKind.Array) {
+        return types.get_array(typecheck_substitute(types, entry.inner, params, arguments), entry.count);
+    }
+    if (entry.kind != TypeKind.Tuple && entry.kind != TypeKind.Named) { return id; }
+    Vec<u32> parts = Vec<u32>.new();
+    i64 i = 0;
+    while (i < entry.count) {
+        parts.push(typecheck_substitute(types, types.type_args.get(entry.inner + (u32)i), params, arguments));
+        i += 1;
+    }
+    u32 result = entry.kind == TypeKind.Tuple
+        ? types.get_tuple(&parts)
+        : types.get_named_args(types.names.get(entry.name_id), &parts);
+    parts.drop();
+    return result;
+}
+
+/// Pushes the field or payload types that `definition` stores inline when
+/// instantiated with the arguments of named type `id`. Parameters without an
+/// argument become `TYPE_UNKNOWN`, so they never name an unrelated type.
+void typecheck_push_inline_fields(TypeTable* types, i64 definition, u32 id,
+                                  Vec<u32>* pending) {
+    TypeStructProperties facts = types.struct_properties.get(definition);
+    TypeEntry entry = *types.get(id);
+    Vec<u32> params = Vec<u32>.new();
+    Vec<u32> arguments = Vec<u32>.new();
+    u32 p = 0;
+    while (p < facts.type_param_count) {
+        params.push(types.struct_type_params.get(facts.type_param_start + p));
+        p += 1;
+    }
+    if (entry.kind == TypeKind.Named && (i64)facts.type_param_count == entry.count) {
+        i64 a = 0;
+        while (a < entry.count) {
+            arguments.push(types.type_args.get(entry.inner + (u32)a));
+            a += 1;
+        }
+    }
+    u32 field = 0;
+    while (field < facts.field_count) {
+        u32 field_type = types.struct_fields.get(facts.field_start + field);
+        pending.push(typecheck_substitute(types, field_type, &params, &arguments));
+        field += 1;
+    }
+    params.drop();
+    arguments.drop();
+}
+
+/// Returns true when struct or enum `name` stores itself inline, directly or
+/// through other fields, arrays, tuples, or generic arguments. Such a type
+/// has no finite size.
+bool typecheck_holds_itself(TypeTable* types, str name) {
+    u32 name_id = types.names.intern(name);
+    i64 definition = typecheck_definition_index(types, name_id);
+    if (definition < 0) { return false; }
+    Vec<u32> pending = Vec<u32>.new();
+    Vec<u32> visited = Vec<u32>.new();
+    typecheck_push_inline_fields(types, definition, types.get_named(name), &pending);
+    bool found = false;
+    while (!found && pending.len() > 0 && visited.len() < MAX_INLINE_TYPE_SEARCH) {
+        u32 id = pending.pop();
+        TypeEntry entry = *types.get(id);
+        if (entry.kind == TypeKind.Array) {
+            pending.push(entry.inner);
+        } else if (entry.kind == TypeKind.Tuple) {
+            i64 i = 0;
+            while (i < entry.count) {
+                pending.push(types.type_args.get(entry.inner + (u32)i));
+                i += 1;
+            }
+        } else if (entry.kind == TypeKind.Named) {
+            if (entry.name_id == name_id) {
+                found = true;
+            } else if (!typecheck_list_has(&visited, id)) {
+                visited.push(id);
+                i64 inner = typecheck_definition_index(types, entry.name_id);
+                if (inner >= 0) {
+                    typecheck_push_inline_fields(types, inner, id, &pending);
+                }
+            }
+        }
+    }
+    pending.drop();
+    visited.drop();
+    return found;
+}
+
+/// Reports each struct or enum among `items` that stores itself inline.
+/// Records the items' field facts first, since later passes and the
+/// search below read them from the type table.
+void typecheck_recursive_types(SymbolTable* symbols, SyntaxTree* tree,
+                               Vec<SyntaxNode*>* items,
+                               DiagnosticBag* diagnostics, bool* ok) {
+    i64 index = 0;
+    while (index < items.len()) {
+        SyntaxNode* item = items.get(index);
+        if (symbol_item_is_struct(item)) {
+            module_register_source_struct(&symbols.types, item);
+        } else if (item.kind == NodeKind.Enum) {
+            module_register_source_enum(&symbols.types, tree.root, item);
+        }
+        index += 1;
+    }
+    index = 0;
+    while (index < items.len()) {
+        SyntaxNode* item = items.get(index);
+        SyntaxNode* name = item_identifier(item);
+        bool aggregate = symbol_item_is_struct(item) || item.kind == NodeKind.Enum;
+        if (aggregate && name != (SyntaxNode*)0
+            && typecheck_holds_itself(&symbols.types, name.text)) {
+            String message = type_contains_itself(
+                symbol_item_is_struct(item) ? "struct" : "enum", name.text
+            );
+            diagnostics.error(name.span, move message);
+            *ok = false;
+        }
+        index += 1;
+    }
+}
+
 /// Checks every named type in cfg-active declarations. Returns false when
 /// any type was unknown or an enum was malformed.
 bool check_declared_types(SymbolTable* symbols, SyntaxTree* tree, CfgSet* cfg,
@@ -447,6 +609,7 @@ bool check_declared_types(SymbolTable* symbols, SyntaxTree* tree, CfgSet* cfg,
         }
         index += 1;
     }
+    typecheck_recursive_types(symbols, tree, &items, diagnostics, &ok);
     items.drop();
     return ok;
 }
