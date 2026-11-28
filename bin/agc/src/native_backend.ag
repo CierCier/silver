@@ -23,6 +23,7 @@ import agc;
 import frontend.serialize;
 import frontend.lint;
 import frontend.messages;
+import backend.llvm.bt_lines;
 import backend.llvm.optimization;
 
 #[link(c)]
@@ -3249,6 +3250,26 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         *result = 0;
         return true;
     }
+
+    profiler_begin_phase("backtrace line table");
+    String bt_lines_path = native_temp_path(".bt_lines.o", pid);
+    String bt_lines_error = String.new();
+    if (!llvm_write_bt_line_object(&object_paths, bt_lines_path.to_str(), &bt_lines_error)) {
+        STDERR.write_str("agc: error: failed to emit the backtrace line table: ");
+        STDERR.write_str(bt_lines_error.to_str());
+        STDERR.write_str("\n");
+        bt_lines_error.drop();
+        bt_lines_path.drop();
+        native_dispose_object_paths(&object_paths, true);
+        link_libs.drop();
+        link_objects.drop();
+        output.drop();
+        *result = 2;
+        return true;
+    }
+    bt_lines_error.drop();
+    object_paths.push(move bt_lines_path);
+    profiler_end_phase("backtrace line table");
 
     String linker = String.new();
     bool direct_linker = false;

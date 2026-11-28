@@ -4,6 +4,7 @@ import std.fs;
 import std.intern;
 import std.io;
 import std.mem.vec;
+import std.path;
 import std.string;
 import frontend.ast;
 import frontend.ast_expr;
@@ -17,6 +18,7 @@ import std.cpu;
 import frontend.typecheck_expr;
 import frontend.types;
 import backend.llvm.context;
+import backend.llvm.debug_info;
 import backend.llvm.drop;
 import backend.llvm.expr;
 import backend.llvm.mono;
@@ -344,6 +346,7 @@ bool llvm_define_method_instance(LlvmContext* ctx, TypeTable* types, Interner* n
     ctx.current_function_span = body_node.span;
     LLVMOpaqueBasicBlock* entry_bb = LLVMAppendBasicBlockInContext(ctx.ctx, fn_val, "entry");
     LLVMPositionBuilderAtEnd(ctx.builder, entry_bb);
+    llvm_debug_begin_function(ctx, fn_val, body_node.span);
     ctx.push_scope();
     ctx.push_type_binding("Self", self_instance_id);
     Vec<Binding> params = Vec<Binding>.new();
@@ -459,6 +462,7 @@ bool llvm_define_free_function_instance(LlvmContext* ctx, TypeTable* types,
     ctx.current_function_span = body_node.span;
     LLVMOpaqueBasicBlock* entry = LLVMAppendBasicBlockInContext(ctx.ctx, fn_val, "entry");
     LLVMPositionBuilderAtEnd(ctx.builder, entry);
+    llvm_debug_begin_function(ctx, fn_val, body_node.span);
     ctx.push_scope();
     Vec<Binding> params = Vec<Binding>.new();
     collect_parameter_bindings(params_node, &params);
@@ -989,13 +993,12 @@ void llvm_bt_record_function(LLVMOpaqueContext* ctx, LLVMOpaqueModule* module,
                              LLVMOpaqueValue* function, str function_name,
                              Span span, Vec<String>* source_paths,
                              Vec<LLVMOpaqueValue*>* records) {
-    String file_name = String.new();
+    // The file name alone, as stage0 and the line table print it.
+    str path = "unknown.ag";
     if (span.file > 0 && span.file <= source_paths.len()) {
-        String* path = source_paths.get_ptr((u32)(span.file - 1));
-        file_name.push_str(path.to_str());
-    } else {
-        file_name.push_str("unknown.ag");
+        path = source_paths.get_ptr((u32)(span.file - 1)).to_str();
     }
+    String file_name = path_basename(path);
 
     String name_suffix = String.from_str("name.");
     name_suffix.push_str(function_name);
@@ -1413,6 +1416,7 @@ impl LlvmGenerator {
             self.unresolved_calls = ctx.unresolved_calls;
             return false;
         }
+        llvm_debug_init(&ctx);
 
         // Pass 0: Register all struct types
         SyntaxNode* item = tree.root.first_child;
@@ -2043,13 +2047,23 @@ impl LlvmGenerator {
         if (g_bt_lines == (LLVMOpaqueValue*)0) {
             g_bt_lines = LLVMAddGlobal(self.module, ptr_type, "__silver_bt_lines");
         }
-        if (!module_object && primary_source) { LLVMSetInitializer(g_bt_lines, LLVMConstNull(ptr_type)); }
+        if (!module_object && primary_source) {
+            LLVMSetInitializer(g_bt_lines, LLVMConstNull(ptr_type));
+            // Weak: the linked line-table object (backend.llvm.bt_lines)
+            // defines the real table.
+            LLVMSetLinkage(g_bt_lines, LLVMLinkage.LLVMWeakAnyLinkage);
+        }
 
         LLVMOpaqueValue* g_bt_lines_count = LLVMGetNamedGlobal(self.module, "__silver_bt_lines_count");
         if (g_bt_lines_count == (LLVMOpaqueValue*)0) {
             g_bt_lines_count = LLVMAddGlobal(self.module, i64_type, "__silver_bt_lines_count");
         }
-        if (!module_object && primary_source) { LLVMSetInitializer(g_bt_lines_count, LLVMConstInt(i64_type, 0, 0)); }
+        if (!module_object && primary_source) {
+            LLVMSetInitializer(g_bt_lines_count, LLVMConstInt(i64_type, 0, 0));
+            // Weak: the linked line-table object (backend.llvm.bt_lines)
+            // defines the real table.
+            LLVMSetLinkage(g_bt_lines_count, LLVMLinkage.LLVMWeakAnyLinkage);
+        }
 
         LLVMOpaqueValue* g_bt_args = LLVMGetNamedGlobal(self.module, "__silver_bt_args");
         if (g_bt_args == (LLVMOpaqueValue*)0) {
@@ -2148,6 +2162,7 @@ impl LlvmGenerator {
 
                     LLVMOpaqueBasicBlock* entry_bb = LLVMAppendBasicBlockInContext(self.ctx, fn_val, "entry");
                     LLVMPositionBuilderAtEnd(self.builder, entry_bb);
+                    llvm_debug_begin_function(&ctx, fn_val, item.span);
                     ctx.push_scope();
 
                     Vec<Binding> params = Vec<Binding>.new();
@@ -2379,6 +2394,7 @@ impl LlvmGenerator {
 
                                         LLVMOpaqueBasicBlock* entry_bb = LLVMAppendBasicBlockInContext(self.ctx, fn_val, "entry");
                                         LLVMPositionBuilderAtEnd(self.builder, entry_bb);
+                                        llvm_debug_begin_function(&ctx, fn_val, cursor.span);
                                         ctx.push_scope();
                                         u32 method_self_type = typecheck_impl_self_type(types, item);
                                         types.push_subst(types.names.intern("Self"), method_self_type);
@@ -2499,6 +2515,7 @@ impl LlvmGenerator {
         bt_function_records.drop();
         bt_arg_function_records.drop();
 
+        llvm_debug_finish(&ctx);
         self.unresolved_calls = ctx.unresolved_calls;
         return ctx.unresolved_calls == 0 && self.ownership_diagnostics.is_empty();
     }
