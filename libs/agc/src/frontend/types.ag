@@ -170,6 +170,15 @@ struct TypeTable {
     /// Type parameter names of the generic item whose body is being checked.
     /// A same-named struct or enum does not stand in for them.
     Vec<u32> scope_type_params;
+    /// While a generic call's body is rechecked with the call's argument
+    /// types: the callee's type parameters from `probe_type_start`, and its
+    /// parameters' names and declared (generic) types from
+    /// `probe_param_start`. Empty outside a recheck.
+    Vec<u32> probe_type_params;
+    Vec<u32> probe_param_names;
+    Vec<u32> probe_param_types;
+    i64 probe_type_start;
+    i64 probe_param_start;
 }
 /// Computes copy/drop properties of type `id`, recursing into fields and
 /// elements up to depth 256 (deeper types report neither).
@@ -269,6 +278,11 @@ impl TypeTable {
         table.packed_structs = Vec<u32>.new();
         table.method_params = Vec<TypeMethodParam>.new();
         table.scope_type_params = Vec<u32>.new();
+        table.probe_type_params = Vec<u32>.new();
+        table.probe_param_names = Vec<u32>.new();
+        table.probe_param_types = Vec<u32>.new();
+        table.probe_type_start = 0;
+        table.probe_param_start = 0;
         // 0: Unknown
         table.add_prim(TypeKind.Unknown, "unknown");
         // 1: Void
@@ -317,6 +331,11 @@ impl TypeTable {
         copy.packed_structs = Vec<u32>.with_capacity(self.packed_structs.len());
         copy.method_params = Vec<TypeMethodParam>.with_capacity(self.method_params.len());
         copy.scope_type_params = Vec<u32>.with_capacity(self.scope_type_params.len());
+        copy.probe_type_params = Vec<u32>.new();
+        copy.probe_param_names = Vec<u32>.new();
+        copy.probe_param_types = Vec<u32>.new();
+        copy.probe_type_start = 0;
+        copy.probe_param_start = 0;
         i64 i = 0;
         while (i < self.types.len()) { copy.types.push(self.types.get(i)); i += 1; }
         i = 0;
