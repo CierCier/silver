@@ -324,6 +324,12 @@ String unchecked_global_initializer(str name) {
     return @format("cannot check the initializer of '{}': it uses a construct the stage1 checker does not support yet", name);
 }
 
+/// Diagnostic text: "a braced initializer needs a struct or fixed-array
+/// type". Returns static text.
+str braced_initializer_unsupported_type() {
+    return "a braced initializer needs a struct or fixed-array type";
+}
+
 /// Diagnostic text: "global initializer must be a compile-time constant
 /// expression". Returns static text.
 str global_initializer_not_constant() {

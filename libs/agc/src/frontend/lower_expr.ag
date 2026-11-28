@@ -4,6 +4,7 @@ import std.mem.vec;
 import std.string;
 import frontend.ast;
 import frontend.ast_expr;
+import frontend.callback_abi;
 import frontend.cfg;
 import frontend.items;
 import frontend.lexer;
@@ -3598,6 +3599,10 @@ impl ExprLowerer {
                 u32 temp_name = self.names.intern(temp_text.to_str());
                 temp_text.drop();
                 u32 init = self.lower_sequence(assign_node.next_sibling, end);
+                if (init == 0 && assign_node.next_sibling != end) {
+                    self.unsupported = true;
+                    return;
+                }
                 stmt_ids.push(self.pool.add_stmt_let(temp_name, TYPE_UNKNOWN, init, start.span));
                 u32 tuple_index = 0;
                 SyntaxNode* binding = pattern.first_child;
@@ -3665,7 +3670,23 @@ impl ExprLowerer {
                     if (value_type.kind == TypeKind.Named
                         && init_start != (SyntaxNode*)0 && init_start.kind == NodeKind.Block
                         && init_start.next_sibling == end) {
-                        u32 aggregate_id = self.lower_struct_lit(self.types.names.get(value_type.name_id), init_start);
+                        str named_type = self.types.names.get(value_type.name_id);
+                        // Follow `type` aliases so an alias of an enum or a
+                        // scalar is rejected like the type itself.
+                        u32 underlying = self.unit_root == (SyntaxNode*)0 ? type_id
+                            : callback_abi_resolve_alias(self.unit_root, self.types, type_id, 0);
+                        TypeEntry* underlying_type = self.types.get(underlying);
+                        if (self.unit_root != (SyntaxNode*)0
+                            && (underlying_type.kind != TypeKind.Named
+                                || find_item_by_name(self.unit_root, NodeKind.Enum,
+                                                     self.types.names.get(underlying_type.name_id))
+                                    != (SyntaxNode*)0)) {
+                            self.unsupported = true;
+                            self.record_error(String.from_str(braced_initializer_unsupported_type()),
+                                              init_start.span);
+                            return;
+                        }
+                        u32 aggregate_id = self.lower_struct_lit(named_type, init_start);
                         if (aggregate_id == 0) { return; }
                         if (static_storage) {
                             stmt_ids.push(self.pool.add_stmt_static_let(var_name, type_id,
@@ -3695,12 +3716,26 @@ impl ExprLowerer {
                                                             init_start, start.span, stmt_ids)) {
                         return;
                     }
+                    // Only struct and array declarations take a braced
+                    // initializer; anything else would otherwise lower to a
+                    // declaration that silently drops it.
+                    if (!array_initializer && init_start != (SyntaxNode*)0
+                        && init_start.kind == NodeKind.Block && init_start.next_sibling == end) {
+                        self.unsupported = true;
+                        self.record_error(String.from_str(braced_initializer_unsupported_type()),
+                                          init_start.span);
+                        return;
+                    }
                     u32 init_id = 0;
                     u32 saved_expected_type = self.expected_type_id;
                     self.expected_type_id = type_id;
                     init_id = array_initializer ? self.lower_array_initializer(init_start)
                         : self.lower_sequence(init_start, end);
                     self.expected_type_id = saved_expected_type;
+                    if (init_id == 0 && init_start != end) {
+                        self.unsupported = true;
+                        return;
+                    }
                     u32 id = static_storage
                         ? self.pool.add_stmt_static_let(var_name, type_id, init_id, start.span)
                         : self.pool.add_stmt_let(var_name, type_id, init_id, start.span);

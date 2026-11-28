@@ -3367,24 +3367,33 @@ impl TypeChecker {
                                                 }
                                             }
                                             ast::PatternKind::Tuple(bindings) => {
+                                                // One `move` element gives the arm
+                                                // every payload, so each named
+                                                // element binds owned and mutable,
+                                                // like a single `move` payload.
+                                                let any_move = bindings.iter().any(|sub| {
+                                                    matches!(sub.kind, ast::PatternKind::Move(_))
+                                                });
                                                 for (i, sub) in bindings.iter().enumerate() {
-                                                    if let ast::PatternKind::Identifier(b) =
-                                                        &sub.kind
-                                                        && let Some(pt) = payload_types.get(i)
-                                                    {
-                                                        let bound = self.substitute_type_params(
-                                                            &Type::from_ast(pt),
-                                                            &enum_type_map,
-                                                        );
-                                                        if self.type_has_drop_impl(&bound.to_ast()) {
-                                                            owned_bindings.push(&b.name);
-                                                        }
-                                                        self.bind(&b.name, bound, false, b.span);
-                                                    } else if locked
-                                                        && let ast::PatternKind::Move(b) = &sub.kind
-                                                    {
+                                                    let (b, is_move) = match &sub.kind {
+                                                        ast::PatternKind::Identifier(b) => (b, any_move),
+                                                        ast::PatternKind::Move(b) => (b, true),
+                                                        _ => continue,
+                                                    };
+                                                    if locked && matches!(sub.kind, ast::PatternKind::Move(_)) {
                                                         self.error(msg::move_out_of_lock(&b.name), sub.span);
                                                     }
+                                                    let Some(pt) = payload_types.get(i) else {
+                                                        continue;
+                                                    };
+                                                    let bound = self.substitute_type_params(
+                                                        &Type::from_ast(pt),
+                                                        &enum_type_map,
+                                                    );
+                                                    if !is_move && self.type_has_drop_impl(&bound.to_ast()) {
+                                                        owned_bindings.push(&b.name);
+                                                    }
+                                                    self.bind(&b.name, bound, is_move, b.span);
                                                 }
                                             }
                                             _ => {

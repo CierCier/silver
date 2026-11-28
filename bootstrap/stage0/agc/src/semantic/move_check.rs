@@ -342,7 +342,8 @@ impl VarState {
         }
         // Merge MovePathTree field granularity via structural Place prefixes.
         for (place, (span, reason)) in &other.place_spans {
-            if !init::is_initialized(&other.tree, place) && init::is_initialized(&self.tree, place)
+            // A partial place still takes a whole-place move from `other`.
+            if !init::is_initialized(&other.tree, place) && !init::is_moved_out(&self.tree, place)
             {
                 // Use move_out to propagate Partial to ancestors via is_prefix_of.
                 let _ = init::move_out(&mut self.tree, place);
@@ -450,13 +451,14 @@ fn join_changed(into: &mut State, other: &State) -> bool {
 const MAX_LOOP_PASSES: usize = 8;
 
 /// Scope entry: (name, previous state, previous type, previous owner,
-/// previous locked type) so shadowing restores.
+/// previous locked type, previously a borrowed payload) so shadowing restores.
 type ScopeEntry = (
     String,
     Option<VarState>,
     Option<ast::Type>,
     Option<super::init_plan::OwnerLocalId>,
     Option<ast::Type>,
+    bool,
 );
 /// Facts for move classification. TODO(Phase 5): centralize via `type_properties::{is_copy,needs_drop}`.
 #[derive(Clone, Debug, Default)]
@@ -483,6 +485,8 @@ struct Facts {
     struct_fields: FxHashMap<String, StructInfo>,
     /// Payload types of each tuple variant, by (enum, variant).
     variant_payloads: FxHashMap<(String, String), Vec<ast::Type>>,
+    /// Variant names of each enum, for match exhaustiveness.
+    enum_variants: FxHashMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Debug)]
@@ -535,6 +539,10 @@ impl Facts {
             }
             ast::ItemKind::Enum(enumeration) => {
                 self.opaque_owners.insert(enumeration.name.name.clone());
+                self.enum_variants.insert(
+                    enumeration.name.name.clone(),
+                    enumeration.variants.iter().map(|v| v.name.name.clone()).collect(),
+                );
                 for variant in &enumeration.variants {
                     if let ast::EnumVariantData::Tuple(types) = &variant.data {
                         self.variant_payloads.insert(
@@ -652,6 +660,10 @@ impl Facts {
                 }
                 ExportKind::Enum => {
                     self.opaque_owners.insert(export.name.clone());
+                    self.enum_variants.insert(
+                        export.name.clone(),
+                        export.enum_variants.iter().map(|v| v.name.clone()).collect(),
+                    );
                     for variant in &export.enum_variants {
                         let payloads: Option<Vec<ast::Type>> = variant
                             .payload_types
@@ -892,6 +904,7 @@ pub fn analyze_program_with_imports(
         current_plan: super::init_plan::FunctionInitPlan::default(),
         owner_bindings: FxHashMap::default(),
         locked_bindings: FxHashMap::default(),
+        borrowed_payloads: FxHashSet::default(),
         loops: Vec::new(),
         defers: Vec::new(),
     };
@@ -943,6 +956,9 @@ struct MoveChecker {
     /// Owning payload bindings of a match on a lock block's value, with their
     /// types: the Mutex still owns what they name.
     locked_bindings: FxHashMap<String, ast::Type>,
+    /// Payload bindings of the enclosing match arms that borrow their
+    /// payload: the matched enum still owns it.
+    borrowed_payloads: FxHashSet<String>,
     /// Enclosing loops of the statement being checked, innermost last.
     loops: Vec<LoopFrame>,
     /// Registered `defer` statements with the scope depth that owns them.
@@ -978,6 +994,7 @@ impl OwnerLayouts {
             current_plan: Default::default(),
             owner_bindings: FxHashMap::default(),
             locked_bindings: FxHashMap::default(),
+            borrowed_payloads: FxHashSet::default(),
             loops: Vec::new(),
             defers: Vec::new(),
         };
@@ -1887,6 +1904,7 @@ impl MoveChecker {
         var_types: &mut FxHashMap<String, ast::Type>,
     ) {
         let name = &identifier.name;
+        let old_borrowed = self.borrowed_payloads.remove(name);
         let old_locked = self.locked_bindings.remove(name);
         if let Some(ty) = ty {
             let old_owner = self.owner_bindings.remove(name);
@@ -1911,6 +1929,10 @@ impl MoveChecker {
                     }
                 }
                 state.insert(name.to_string(), var);
+            } else {
+                // An untracked binding shadows any outer state of the same
+                // name, such as a moved-from scrutinee; the scope restores it.
+                state.remove(name);
             }
             var_types.insert(name.to_string(), ty.clone());
             scopes.last_mut().expect("scope stack is non-empty").push((
@@ -1919,8 +1941,9 @@ impl MoveChecker {
                 old_type,
                 old_owner,
                 old_locked,
+                old_borrowed,
             ));
-        } else if old_locked.is_some() {
+        } else if old_locked.is_some() || old_borrowed {
             // An untyped local leaves the state alone but still shadows the
             // locked name until its scope ends.
             scopes.last_mut().expect("scope stack is non-empty").push((
@@ -1929,6 +1952,7 @@ impl MoveChecker {
                 var_types.get(name).cloned(),
                 self.owner_bindings.get(name).cloned(),
                 old_locked,
+                old_borrowed,
             ));
         }
     }
@@ -1969,9 +1993,13 @@ impl MoveChecker {
         var_types: &mut FxHashMap<String, ast::Type>,
     ) {
         if let Some(scope) = scopes.pop() {
-            for (name, old_state, old_type, old_owner, old_locked) in scope {
+            for (name, old_state, old_type, old_owner, old_locked, old_borrowed) in scope {
                 self.owner_bindings.remove(&name);
                 self.locked_bindings.remove(&name);
+                self.borrowed_payloads.remove(&name);
+                if old_borrowed {
+                    self.borrowed_payloads.insert(name.clone());
+                }
                 if let Some(locked) = old_locked {
                     self.locked_bindings.insert(name.clone(), locked);
                 }
@@ -2123,8 +2151,11 @@ impl MoveChecker {
         let mut shadowed = FxHashSet::default();
         let saved_owners = self.owner_bindings.clone();
         let saved_locked = self.locked_bindings.clone();
+        let saved_borrowed = self.borrowed_payloads.clone();
         for scope in scopes.iter().skip(owner).rev() {
-            for (name, old_state, old_type, old_owner, old_locked) in scope.iter().rev() {
+            for (name, old_state, old_type, old_owner, old_locked, old_borrowed) in
+                scope.iter().rev()
+            {
                 shadowed.insert(name.clone());
                 self.owner_bindings.remove(name);
                 if let Some(old) = old_owner {
@@ -2133,6 +2164,10 @@ impl MoveChecker {
                 self.locked_bindings.remove(name);
                 if let Some(old) = old_locked {
                     self.locked_bindings.insert(name.clone(), old.clone());
+                }
+                self.borrowed_payloads.remove(name);
+                if *old_borrowed {
+                    self.borrowed_payloads.insert(name.clone());
                 }
                 match old_state {
                     Some(old) => {
@@ -2155,6 +2190,7 @@ impl MoveChecker {
         self.check_statement(deferred, &mut view, scopes, &mut view_types);
         self.owner_bindings = saved_owners;
         self.locked_bindings = saved_locked;
+        self.borrowed_payloads = saved_borrowed;
         for (name, var) in view {
             if !shadowed.contains(&name) {
                 state.insert(name, var);
@@ -3009,9 +3045,43 @@ impl MoveChecker {
                 let locked = self.locked_place(expression, var_types).map(|(_, ty)| ty);
                 let scrutinee = self.receiver_type(expression, var_types);
                 // Each arm is an independent path from the pre-match state;
-                // arms that never fall through do not contribute.
-                let mut merged = state.clone();
+                // arms that never fall through do not contribute. The
+                // pre-match state joins only when no arm may match.
+                let mut merged: Option<State> = None;
+                // A heap container keeps owning its elements, so an arm cannot
+                // move payloads out of one, as `move v[i]` cannot.
+                // Arms after an unguarded catch-all never run.
+                let reachable = arms
+                    .iter()
+                    .position(|arm| arm.guard.is_none() && !Self::pattern_is_refutable(&arm.pattern))
+                    .map_or(arms.len(), |end| end + 1);
+                let moves = arms[..reachable]
+                    .iter()
+                    .any(|arm| Self::pattern_has_move(&arm.pattern));
+                let container_move = moves && self.reject_container_element_move(expression, var_types);
+                if moves && !container_move {
+                    self.reject_borrowed_scrutinee_move(expression);
+                    // A field whose holder has its own destructor stays whole.
+                    if let Some((root, path)) = expr_root_and_path(expression)
+                        && !path.is_empty()
+                    {
+                        self.reject_partial_move_from_drop_ancestor(
+                            &root,
+                            &path,
+                            expression.span,
+                            var_types,
+                        );
+                    }
+                }
+                // An arm after an unguarded catch-all never runs; codegen
+                // emits none, so it neither checks nor joins.
+                let mut caught = false;
+                let mut guarded = false;
                 for arm in arms {
+                    if caught {
+                        break;
+                    }
+                    caught = arm.guard.is_none() && !Self::pattern_is_refutable(&arm.pattern);
                     if arm.guard.is_some() && Self::pattern_has_move(&arm.pattern) {
                         self.error(
                             "cannot move out of payload in a match arm with a guard".to_string(),
@@ -3028,15 +3098,88 @@ impl MoveChecker {
                         self.check_expr(guard, state, scopes, var_types);
                     }
                     let mut arm_state = state.clone();
+                    // An earlier guard may have consumed the scrutinee, and
+                    // this arm reads its payloads again.
+                    // Only a place can be consumed by a guard. The scrutinee was
+                    // evaluated once, above, so its call or index operands are
+                    // not walked again.
+                    if guarded
+                        && Self::pattern_has_move(&arm.pattern)
+                        && let Some(owner) = plain_prefix(expression)
+                    {
+                        self.check_expr(owner, &mut arm_state, &mut scopes.clone(), var_types);
+                    }
+                    guarded |= arm.guard.is_some();
                     let mut arm_scopes = scopes.clone();
                     if let Some(missed) = &missed {
                         join_changed(state, missed);
                     }
+                    // An arm that moves a payload takes the scrutinee's
+                    // payloads, so the scrutinee is moved-from after it until
+                    // reinitialized. Codegen releases it, so no transfer is
+                    // recorded.
+                    let indexed = place_from_expr(expression)
+                        .filter(|place| place.projections.contains(&Projection::Index));
+                    if Self::pattern_has_move(&arm.pattern)
+                        && !container_move
+                        && let Some(place) = indexed
+                    {
+                        // An element place is index-insensitive, like `move v[i]`.
+                        if let Some(var) = arm_state.get_mut(&place.local) {
+                            var.mark_place_moved(
+                                &place,
+                                expression.span,
+                                msg::note_value_moved_here(),
+                            );
+                        }
+                    } else if Self::pattern_has_move(&arm.pattern)
+                        && !container_move
+                        && let Some((root, path)) = expr_root_and_path(expression)
+                        && let Some(var) = arm_state.get_mut(&root)
+                    {
+                        if path.is_empty() {
+                            var.mark_moved(expression.span, msg::note_value_moved_here());
+                        } else {
+                            var.mark_place_moved(
+                                &place_from_root_and_path(&root, &path),
+                                expression.span,
+                                msg::note_value_moved_here(),
+                            );
+                        }
+                    }
                     // A `move` binding owns its payload within the arm.
                     arm_scopes.push(Vec::new());
-                    for (binding, ty) in self.move_payload_bindings(&arm.pattern, scrutinee.as_ref()) {
-                        self.record_owner(&binding, &ty, true);
-                        self.declare(&binding, Some(&ty), &mut arm_state, &mut arm_scopes, var_types);
+                    // Saved before any binding shadows an outer borrowed name.
+                    let saved_borrowed = self.borrowed_payloads.clone();
+                    let owned = self.move_payload_bindings(&arm.pattern, scrutinee.as_ref());
+                    for (binding, ty) in &owned {
+                        self.record_owner(binding, ty, true);
+                        self.declare(binding, Some(ty), &mut arm_state, &mut arm_scopes, var_types);
+                    }
+                    // A borrowed payload binding owns nothing, but it still
+                    // hides an outer local of its name until the arm ends,
+                    // and keeps its payload type for nested matches.
+                    let typed = self.payload_bindings(&arm.pattern, scrutinee.as_ref(), true);
+                    for binding in Self::payload_binding_names(&arm.pattern) {
+                        if owned.iter().any(|(o, _)| o.name == binding.name) {
+                            continue;
+                        }
+                        let name = binding.name.clone();
+                        let old_state = arm_state.remove(&name);
+                        let old_type = var_types.remove(&name);
+                        let old_owner = self.owner_bindings.remove(&name);
+                        if let Some((_, ty)) = typed.iter().find(|(t, _)| t.name == name) {
+                            var_types.insert(name.clone(), ty.clone());
+                        }
+                        let old_borrowed = !self.borrowed_payloads.insert(name.clone());
+                        arm_scopes.last_mut().expect("arm scope is pushed").push((
+                            name,
+                            old_state,
+                            old_type,
+                            old_owner,
+                            None,
+                            old_borrowed,
+                        ));
                     }
                     // The arm's result is consumed even when the match is a
                     // statement: codegen moves it out, as it does a block's
@@ -3045,16 +3188,22 @@ impl MoveChecker {
                     self.pop_scope(&mut arm_state, &mut arm_scopes, var_types);
                     self.reject_locked_move(&arm.body, var_types);
                     self.locked_bindings = saved;
+                    self.borrowed_payloads = saved_borrowed;
                     if !expression_terminates(&arm.body) {
-                        for (name, var) in merged.iter_mut() {
-                            let arm_var = arm_state.get(name).cloned().unwrap_or_default();
-                            if arm_var.level > var.level {
-                                var.merge_with(&arm_var);
-                            }
-                        }
+                        // Join every fall-through arm, as an if/else does:
+                        // two arms at the same level can still move
+                        // different fields.
+                        Self::join_exit(&mut merged, state, &arm_state);
                     }
                 }
-                *state = merged;
+                if !self.match_is_exhaustive(arms, scrutinee.as_ref()) {
+                    let fallthrough = state.clone();
+                    Self::join_exit(&mut merged, state, &fallthrough);
+                }
+                // With no reachable exit the code after the match is dead.
+                if let Some(merged) = merged {
+                    *state = merged;
+                }
             }
             ast::ExpressionKind::Block(block) => {
                 self.check_block_yielding(block, true, state, scopes, var_types);
@@ -3199,6 +3348,17 @@ impl MoveChecker {
         pattern: &ast::Pattern,
         scrutinee: Option<&ast::Type>,
     ) -> Vec<(ast::Identifier, ast::Type)> {
+        self.payload_bindings(pattern, scrutinee, false)
+    }
+
+    /// The payload bindings of `pattern` with their payload types: the owned
+    /// ones, or with `all` every named one, borrowed bindings included.
+    fn payload_bindings(
+        &self,
+        pattern: &ast::Pattern,
+        scrutinee: Option<&ast::Type>,
+        all: bool,
+    ) -> Vec<(ast::Identifier, ast::Type)> {
         let ast::PatternKind::Enum {
             variant,
             data: Some(data),
@@ -3208,14 +3368,19 @@ impl MoveChecker {
             return Vec::new();
         };
         let bindings: Vec<Option<&ast::Identifier>> = match &data.kind {
-            ast::PatternKind::Tuple(items) => items
+            // One `move` element gives the arm every payload, so a named
+            // sibling is owned too and its transfers must be tracked.
+            ast::PatternKind::Tuple(items) if all || items.iter().any(Self::pattern_has_move) => items
                 .iter()
                 .map(|item| match &item.kind {
-                    ast::PatternKind::Move(binding) => Some(binding),
+                    ast::PatternKind::Identifier(binding) | ast::PatternKind::Move(binding) => {
+                        Some(binding)
+                    }
                     _ => None,
                 })
                 .collect(),
             ast::PatternKind::Move(binding) => vec![Some(binding)],
+            ast::PatternKind::Identifier(binding) if all => vec![Some(binding)],
             _ => return Vec::new(),
         };
         let Some(scrutinee) = scrutinee else {
@@ -3242,6 +3407,90 @@ impl MoveChecker {
                 Some((binding?.clone(), Self::substitute_type(payload, &substitutions)))
             })
             .collect()
+    }
+
+    /// Rejects an arm that moves payloads out of an enclosing arm's borrowed
+    /// payload binding: the outer enum still owns them and drops them.
+    fn reject_borrowed_scrutinee_move(&mut self, expression: &ast::Expression) {
+        if let Some(place) = place_from_expr(expression)
+            && self.borrowed_payloads.contains(&place.local)
+        {
+            self.error(msg::cannot_move_out_of_borrowed_payload(&place.local), expression.span);
+        }
+    }
+
+    /// The identifiers an enum arm binds to its payloads.
+    fn payload_binding_names(pattern: &ast::Pattern) -> Vec<&ast::Identifier> {
+        let ast::PatternKind::Enum {
+            data: Some(data), ..
+        } = &pattern.kind
+        else {
+            return Vec::new();
+        };
+        let items: Vec<&ast::Pattern> = match &data.kind {
+            ast::PatternKind::Tuple(items) => items.iter().collect(),
+            _ => vec![data.as_ref()],
+        };
+        items
+            .into_iter()
+            .filter_map(|item| match &item.kind {
+                ast::PatternKind::Identifier(binding) | ast::PatternKind::Move(binding) => {
+                    Some(binding)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether some arm always matches: an unguarded catch-all, or unguarded
+    /// arms that take every variant of an enum scrutinee whatever its payloads.
+    fn match_is_exhaustive(&self, arms: &[ast::MatchArm], scrutinee: Option<&ast::Type>) -> bool {
+        let unguarded = || arms.iter().filter(|arm| arm.guard.is_none());
+        if unguarded().any(|arm| !Self::pattern_is_refutable(&arm.pattern)) {
+            return true;
+        }
+        let Some(variants) = scrutinee.and_then(|ty| self.facts.enum_variants.get(&Facts::owner_key(ty)))
+        else {
+            return false;
+        };
+        let binds_any = |p: &ast::Pattern| {
+            matches!(
+                p.kind,
+                ast::PatternKind::Identifier(_) | ast::PatternKind::Move(_) | ast::PatternKind::Wildcard
+            )
+        };
+        variants.iter().all(|name| {
+            unguarded().any(|arm| match &arm.pattern.kind {
+                ast::PatternKind::Enum { variant, data, .. } if &variant.name == name => {
+                    match data.as_deref().map(|d| &d.kind) {
+                        None => true,
+                        Some(ast::PatternKind::Tuple(items)) => items.iter().all(binds_any),
+                        Some(_) => binds_any(data.as_deref().expect("data is present")),
+                    }
+                }
+                _ => false,
+            })
+        })
+    }
+
+    /// Joins one reachable exit of a match into `merged`, the first exit
+    /// seeding it, over the names of the pre-match `state`.
+    fn join_exit(merged: &mut Option<State>, state: &State, exit: &State) {
+        match merged {
+            None => {
+                let mut seeded = state.clone();
+                for (name, var) in seeded.iter_mut() {
+                    *var = exit.get(name).cloned().unwrap_or_default();
+                }
+                *merged = Some(seeded);
+            }
+            Some(merged) => {
+                for (name, var) in merged.iter_mut() {
+                    let exit_var = exit.get(name).cloned().unwrap_or_default();
+                    var.merge_with(&exit_var);
+                }
+            }
+        }
     }
 
     fn pattern_has_move(pattern: &ast::Pattern) -> bool {
@@ -3670,6 +3919,217 @@ mod tests {
                 "{control}: {errors:?}"
             );
         }
+    }
+
+    #[test]
+    fn move_bindings_of_a_multi_payload_variant_are_owned() {
+        let items = "enum Twin { Both(Text, Text); Neither; }\n";
+        let control = "Twin w = Twin.Both(fresh(), fresh()); \
+                       match w { Both(move a, b): { eat(a); i64 n = b.inspect(); }, Neither: {} };";
+        let errors = errors_with_items(items, control);
+        assert!(
+            errors.types.is_empty() && errors.moves.is_empty(),
+            "{control}: {errors:?}"
+        );
+        let misuse = "Twin w = Twin.Both(fresh(), fresh()); \
+                      match w { Both(a, move b): { eat(b); i64 n = b.inspect(); }, Neither: {} };";
+        let errors = errors_with_items(items, misuse);
+        assert!(errors.types.is_empty(), "{misuse}: {errors:?}");
+        assert!(
+            errors.moves.iter().any(|error| error.contains("'b'")),
+            "{misuse}: {errors:?}"
+        );
+        // The arm takes the scrutinee's payloads, so the scrutinee is
+        // moved-from afterwards, while a Copy payload that reuses its name
+        // stays readable inside the arm.
+        let reuse = "Twin w = Twin.Both(fresh(), fresh()); \
+                     match w { Both(move a, b): { eat(a); eat(b); }, Neither: {} }; \
+                     match w { Both(a, b): {}, Neither: {} };";
+        let errors = errors_with_items(items, reuse);
+        assert!(
+            errors.moves.iter().any(|error| error.contains("'w'")),
+            "{reuse}: {errors:?}"
+        );
+        // A later arm's field move still reaches the join when an earlier
+        // arm already moved another field of the same root.
+        let items = "enum Twin { Both(Text, Text); Neither; }\n\
+                     struct Holder { Twin twin; Text other; }\n";
+        let joined = "Holder h; h.twin = Twin.Both(fresh(), fresh()); h.other = fresh(); \
+                      match h.twin { Both(move a, b): { eat(a); eat(b); }, \
+                      Neither: { eat(h.other); } }; eat(h.other);";
+        let errors = errors_with_items(items, joined);
+        assert!(!errors.moves.is_empty(), "{joined}: {errors:?}");
+        let items = "enum Mixed { Both(i64, Text); Neither; }\n";
+        let shadow = "Mixed w = Mixed.Both(4, fresh()); \
+                      match w { Both(w, move leaf): { i64 n = w; eat(leaf); }, Neither: {} };";
+        let errors = errors_with_items(items, shadow);
+        assert!(
+            errors.types.is_empty() && errors.moves.is_empty(),
+            "{shadow}: {errors:?}"
+        );
+        // A borrowed payload binding hides a moved-from local of its name,
+        // and an exhaustive match that reinitializes it in every arm leaves
+        // it live.
+        for control in [
+            "Mixed w = Mixed.Both(4, fresh()); \
+             match w { Both(n, move leaf): { eat(leaf); }, Neither: {} }; \
+             Mixed m = Mixed.Both(5, fresh()); \
+             match m { Both(w, leaf): { i64 n = w; }, Neither: {} };",
+            "Mixed w = Mixed.Both(4, fresh()); \
+             match w { Both(n, move leaf): { eat(leaf); }, Neither: {} }; \
+             Mixed m = Mixed.Neither; \
+             match m { Both(n, leaf): { w = Mixed.Neither; }, Neither: { w = Mixed.Neither; } }; \
+             match w { Both(n, leaf): {}, Neither: {} };",
+        ] {
+            let errors = errors_with_items(items, control);
+            assert!(
+                errors.types.is_empty() && errors.moves.is_empty(),
+                "{control}: {errors:?}"
+            );
+        }
+        for misuse in [
+            // A match without a catch-all may match no arm.
+            "Mixed w = Mixed.Both(4, fresh()); \
+             match w { Both(n, move leaf): { eat(leaf); }, Neither: {} }; \
+             Mixed m = Mixed.Neither; \
+             match m { Both(n, leaf): { w = Mixed.Neither; } }; \
+             match w { Both(n, leaf): {}, Neither: {} };",
+            // A payload move from an array element moves the element.
+            "Mixed items[2]; items[0] = Mixed.Both(4, fresh()); \
+             match items[0] { Both(n, move leaf): { eat(leaf); }, Neither: {} }; \
+             match items[0] { Both(n, leaf): {}, Neither: {} };",
+        ] {
+            let errors = errors_with_items(items, misuse);
+            assert!(!errors.moves.is_empty(), "{misuse}: {errors:?}");
+        }
+        // One arm moving a whole field outweighs another moving part of it.
+        let items = "enum Twin { Both(Text, Text); Neither; }\n\
+                     struct Inner { i64 id; Twin twin; }\n\
+                     struct Holder { Inner inner; }\n";
+        let partial = "Holder h; h.inner.twin = Twin.Both(fresh(), fresh()); bool f = true; \
+                       if (f) { match h.inner.twin { Both(move a, b): { eat(a); eat(b); }, \
+                       Neither: {} }; } else { Inner gone = h.inner; } i64 n = h.inner.id;";
+        let errors = errors_with_items(items, partial);
+        assert!(!errors.moves.is_empty(), "{partial}: {errors:?}");
+        // A borrowed payload stays owned by the matched enum, so a nested arm
+        // cannot move its payloads; one bound with `move` can.
+        let items = "enum Twin { Both(Text, Text); Neither; }\n\
+                     enum Parcel { Held(Twin); Empty; }\n";
+        let nested = "Twin w = Twin.Neither; Parcel c = Parcel.Held(Twin.Both(fresh(), fresh())); \
+                      match c { Held(w): { match w { Both(move a, b): { Text kept = a; eat(a); }, \
+                      Neither: {} }; }, Empty: {} };";
+        let errors = errors_with_items(items, nested);
+        assert!(
+            errors.moves.contains(&crate::diagnostics::messages::cannot_move_out_of_borrowed_payload("w")),
+            "{nested}: {errors:?}"
+        );
+        let owned = "Parcel c = Parcel.Held(Twin.Both(fresh(), fresh())); \
+                     match c { Held(move w): { match w { Both(move a, b): { eat(a); eat(b); }, \
+                     Neither: {} }; }, Empty: {} };";
+        let errors = errors_with_items(items, owned);
+        assert!(
+            errors.types.is_empty() && errors.moves.is_empty(),
+            "{owned}: {errors:?}"
+        );
+        // A heap container keeps its elements.
+        let items = "enum Twin { Both(Text, Text); Neither; }\n";
+        let container = "Bag<Twin> bag; \
+                         match bag[0] { Both(move a, b): { eat(a); }, Neither: {} };";
+        let errors = errors_with_items(items, container);
+        assert!(errors.types.is_empty(), "{container}: {errors:?}");
+        assert!(
+            errors.moves.contains(&crate::diagnostics::messages::cannot_move_out_of_indexed_element("Bag<Twin>")),
+            "{container}: {errors:?}"
+        );
+        // A guard that consumes the scrutinee leaves nothing for a later arm
+        // to take, and a field of a holder with a destructor stays whole.
+        let items = "enum Twin { Both(Text, Text); Neither; }\n\
+                     struct Kept { Twin twin; }\n\
+                     impl Drop for Kept { void drop(*self) {} }\n\
+                     bool used(Twin t) { return false; }\n";
+        for (misuse, expected) in [
+            (
+                "Twin w = Twin.Both(fresh(), fresh()); \
+                 match w { Both(a, b), used(w): {}, Both(move a, b): { eat(a); eat(b); }, \
+                 Neither: {} };",
+                "'w'",
+            ),
+            (
+                "Kept k; k.twin = Twin.Both(fresh(), fresh()); \
+                 match k.twin { Both(move a, b): { eat(a); eat(b); }, Neither: {} };",
+                "implements Drop",
+            ),
+        ] {
+            let errors = errors_with_items(items, misuse);
+            assert!(errors.types.is_empty(), "{misuse}: {errors:?}");
+            assert!(
+                errors.moves.iter().any(|error| error.contains(expected)),
+                "{misuse}: {errors:?}"
+            );
+        }
+        // An arm after an unguarded catch-all never runs.
+        let unreachable = "Twin w = Twin.Both(fresh(), fresh()); \
+                           match w { _: {}, Both(move a, b): { eat(a); eat(b); } }; \
+                           match w { Both(a, b): {}, Neither: {} };";
+        let errors = errors_with_items(items, unreachable);
+        assert!(
+            errors.types.is_empty() && errors.moves.is_empty(),
+            "{unreachable}: {errors:?}"
+        );
+        let unreachable = "Kept k; k.twin = Twin.Both(fresh(), fresh()); \
+                           match k.twin { _: {}, Both(move a, b): { eat(a); eat(b); } };";
+        let errors = errors_with_items(items, unreachable);
+        assert!(
+            errors.types.is_empty() && errors.moves.is_empty(),
+            "{unreachable}: {errors:?}"
+        );
+        // A value scrutinee runs once, so a later move arm after a guard
+        // does not consume its operands again.
+        let items = "enum Twin { Both(Text, Text); Neither; }\n\
+                     Twin pass(Twin t) { return t; }\n\
+                     bool ok() { return true; }\n";
+        let once = "Twin w = Twin.Both(fresh(), fresh()); \
+                    match pass(w) { Both(a, b), ok(): {}, Both(move a, b): { eat(a); eat(b); }, \
+                    Neither: {} };";
+        let errors = errors_with_items(items, once);
+        assert!(
+            errors.types.is_empty() && errors.moves.is_empty(),
+            "{once}: {errors:?}"
+        );
+        let items = "enum Twin { Both(Text, Text); Neither; }\n\
+                     i64 index(Text t) { return 0; }\n";
+        let once = "Twin items[2]; items[0] = Twin.Both(fresh(), fresh()); Text probe = fresh(); \
+                    match items[index(probe)] { Neither, false: {}, \
+                    Both(move a, b): { eat(a); eat(b); }, Neither: {} };";
+        let errors = errors_with_items(items, once);
+        assert!(
+            errors.types.is_empty() && errors.moves.is_empty(),
+            "{once}: {errors:?}"
+        );
+        // A nested block's shadow ends with the block, so the borrowed
+        // payload binding is borrowed again after it.
+        let items = "enum Twin { Both(Text, Text); Neither; }\n\
+                     enum Parcel { Held(Twin); Empty; }\n";
+        let shadowed = "Parcel c = Parcel.Held(Twin.Both(fresh(), fresh())); \
+                        match c { Held(w): { if (true) { Twin w = Twin.Neither; } \
+                        match w { Both(move a, b): { eat(a); eat(b); }, Neither: {} }; }, \
+                        Empty: {} };";
+        let errors = errors_with_items(items, shadowed);
+        assert!(
+            errors.moves.contains(&crate::diagnostics::messages::cannot_move_out_of_borrowed_payload("w")),
+            "{shadowed}: {errors:?}"
+        );
+        // So does an inner arm's owned binding of the same name.
+        let shadowed = "Parcel c = Parcel.Held(Twin.Both(fresh(), fresh())); \
+                        Parcel q = Parcel.Held(Twin.Neither); \
+                        match c { Held(w): { match q { Held(move w): {}, Empty: {} }; \
+                        match w { Both(move a, b): { eat(a); eat(b); }, Neither: {} }; }, \
+                        Empty: {} };";
+        let errors = errors_with_items(items, shadowed);
+        assert!(
+            errors.moves.contains(&crate::diagnostics::messages::cannot_move_out_of_borrowed_payload("w")),
+            "{shadowed}: {errors:?}"
+        );
     }
 
     #[test]

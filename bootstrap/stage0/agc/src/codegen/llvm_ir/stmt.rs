@@ -1238,7 +1238,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let function = self
             .current_fn
             .ok_or_else(|| CodegenError::new("no active function for match expression"))?;
-        let scrutinee = self.emit_expression_value(expression)?;
+        let (scrutinee, scrutinee_addr) = self.emit_match_scrutinee(expression, arms)?;
         let end_bb = self.context.append_basic_block(function, "match.end");
         let mut cond_bb = self
             .builder
@@ -1429,28 +1429,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             } else {
                                 HashMap::default()
                             };
-                            let bindings: Vec<Option<(&ast::Identifier, bool)>> =
-                                match &data_pattern.kind {
-                                    ast::PatternKind::Identifier(binding) => {
-                                        vec![Some((binding, false))]
-                                    }
-                                    ast::PatternKind::Move(binding) => {
-                                        vec![Some((binding, true))]
-                                    }
-                                    ast::PatternKind::Tuple(items) => items
-                                        .iter()
-                                        .map(|item| match &item.kind {
-                                            ast::PatternKind::Identifier(binding) => {
-                                                Some((binding, false))
-                                            }
-                                            ast::PatternKind::Move(binding) => {
-                                                Some((binding, true))
-                                            }
-                                            _ => None,
-                                        })
-                                        .collect(),
-                                    _ => Vec::new(),
-                                };
+                            let (bindings, any_move) =
+                                Self::match_payload_bindings(data_pattern, payload_types.len());
                             if !bindings.is_empty() {
                                 let data_ptr = self
                                     .builder
@@ -1463,11 +1443,56 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                     .map(|pt| Self::substitute_generic_type(pt, &substitutions))
                                     .collect();
                                 let offsets = self.enum_payload_field_offsets(&concrete_payload)?;
+                                // Resolve the scrutinee's storage and release its drop state
+                                // before any arm binding can shadow its name.
+                                let orig_ptr = if any_move {
+                                    scrutinee_addr.as_ref().map(|(ptr, _, _)| *ptr)
+                                } else {
+                                    None
+                                };
+                                if orig_ptr.is_some() {
+                                    if let ast::ExpressionKind::Identifier(ident) =
+                                        expression.kind.as_ref()
+                                        && let Some(var) = self.lookup_variable(&ident.name)
+                                        && let Some(flag) = var.drop_flag
+                                    {
+                                        self.builder
+                                            .build_store(
+                                                flag,
+                                                self.context
+                                                    .bool_type()
+                                                    .const_int(0, false),
+                                            )
+                                            .map_err(|e| {
+                                                CodegenError::new(format!(
+                                                    "clear moved-out flag: {e}"
+                                                ))
+                                            })?;
+                                    }
+                                    if let ast::ExpressionKind::Identifier(ident) =
+                                        expression.kind.as_ref()
+                                    {
+                                        self.clear_field_flags(&ident.name)?;
+                                    } else if let Some((root_name, path)) =
+                                        self.lvalue_root_and_path(expression)
+                                    {
+                                        // A field enum's owner must not
+                                        // drop the payloads the arm now owns.
+                                        self.clear_field_flags_for_path(&root_name, &path)?;
+                                    } else {
+                                        // An element at a computed index releases its owner node,
+                                        // as `move items[i]` does.
+                                        if let Some((ptr, ty, Some(state))) = &scrutinee_addr {
+                                            self.move_borrowed_place(*ptr, ty, *state, expression.span)?;
+                                        }
+                                    }
+                                }
                                 for (i, concrete_pt) in concrete_payload.iter().enumerate() {
                                     let llvm_ty = self.lower_basic_type(concrete_pt)?;
                                     let byte_offset = offsets[i];
-                                    let binding = bindings.get(i).copied().flatten();
+                                    let binding = bindings.get(i).cloned().flatten();
                                     if let Some((binding, is_move)) = binding {
+                                        let binding = &binding;
                                         let field_ptr =
                                             if byte_offset == 0 {
                                                 data_ptr
@@ -1525,14 +1550,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                                 VarInfo {
                                                     ptr: alloca,
                                                     ty: concrete_pt.clone(),
-                                                    is_mutable: false,
+                                                    // An owned binding is mutable, as typeck binds it.
+                                                    is_mutable: is_move || any_move,
                                                     is_volatile: false,
                                                     drop_flag: None,
                                                     field_flags: Vec::new(),
                                                 },
                                             );
                                         }
-                                        if is_move {
+                                        if is_move || any_move {
                                             if !self.register_owner_state(binding, concrete_pt, alloca, true)? {
                                                 self.register_drop_flag(&binding.name, concrete_pt, alloca)?;
                                             }
@@ -1541,39 +1567,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                                 alloca, self.initialized_reference_state(),
                                             );
                                         }
-                                        if is_move
-                                            && let Ok((orig_ptr, _)) =
-                                                self.resolve_lvalue_ptr(expression)
-                                        {
-                                            if let ast::ExpressionKind::Identifier(ident) =
-                                                expression.kind.as_ref()
-                                                && let Some(var) = self.lookup_variable(&ident.name)
-                                                && let Some(flag) = var.drop_flag
-                                            {
-                                                self.builder
-                                                    .build_store(
-                                                        flag,
-                                                        self.context
-                                                            .bool_type()
-                                                            .const_int(0, false),
-                                                    )
-                                                    .map_err(|e| {
-                                                        CodegenError::new(format!(
-                                                            "clear moved-out flag: {e}"
-                                                        ))
-                                                    })?;
-                                            }
-                                            if let ast::ExpressionKind::Identifier(ident) =
-                                                expression.kind.as_ref()
-                                            {
-                                                self.clear_field_flags(&ident.name)?;
-                                            } else if let Some((root, path)) =
-                                                self.lvalue_root_and_path(expression)
-                                            {
-                                                // A field scrutinee's owner must not
-                                                // drop the zeroed payload again.
-                                                self.clear_field_flags_for_path(&root, &path)?;
-                                            }
+                                        // When any payload moves, the arm owns
+                                        // every payload, so each one leaves the
+                                        // original storage, not just the moved one.
+                                        if let Some(orig_ptr) = orig_ptr {
                                             let orig_data = self
                                                 .builder
                                                 .build_struct_gep(
