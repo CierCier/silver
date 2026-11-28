@@ -167,6 +167,12 @@ struct LlvmContext {
     Vec<MonoRequest> mono_queue;
     Vec<u32> mono_queue_args;
     Vec<u32> generic_layout_ids;
+    /// Line-table debug info (`backend.llvm.debug_info`); null when off.
+    LLVMOpaqueDIBuilder* di_builder;
+    /// Signature shared by every subprogram: line tables need no types.
+    LLVMOpaqueMetadata* di_signature;
+    /// One DIFile per `source_paths` entry, created on first use.
+    Vec<LLVMOpaqueMetadata*> di_files;
 }
 
 impl LlvmContext {
@@ -215,6 +221,9 @@ impl LlvmContext {
         c.mono_queue = Vec<MonoRequest>.new();
         c.mono_queue_args = Vec<u32>.new();
         c.generic_layout_ids = Vec<u32>.new();
+        c.di_builder = (LLVMOpaqueDIBuilder*)0;
+        c.di_signature = (LLVMOpaqueMetadata*)0;
+        c.di_files = Vec<LLVMOpaqueMetadata*>.new();
         return move c;
     }
 

@@ -304,7 +304,18 @@ type Handler = void(i32);
 ```silver
 str g_app_name = "SilverApp";      // global variable
 const f64 PI = 3.1415926535;       // const (enforced immutability)
+const i32 COLUMNS = 3;
+const i32 WIDTH = COLUMNS * 8 + 2; // folded at compile time
 ```
+
+An integer or `bool` initializer may combine literals and other `const`
+integers or bools with casts and arithmetic, bitwise, shift, comparison and
+logical operators. Constants may be declared in any order and wrap to their
+declared type. Each operation folds with the same widening and signedness as
+the same expression inside a function. Mutable globals, calls, and a cycle of
+constants are rejected. The self-hosted compiler folds `bool` and 8- to
+64-bit integer initializers; there, an `i128` or `u128` constant still needs a
+plain literal.
 
 `mut i32 g_counter` is **not** valid — `mut` cannot start a type declaration (variables are mutable by default).
 
