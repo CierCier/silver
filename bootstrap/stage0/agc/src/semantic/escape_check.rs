@@ -147,6 +147,28 @@ struct Checker<'a> {
     current_ref_param_indices: FxHashSet<usize>,
     recorded_return_spans: FxHashSet<(u32, usize, usize)>,
     globals: FxHashSet<String>,
+    /// Type parameters in scope for the function being checked.
+    current_type_params: FxHashSet<String>,
+    /// Parameters of the current function typed by a bare type parameter
+    /// (`T x`). They hold a reference when `T` is one, so returning them
+    /// forwards the caller's borrow, while `&x` still borrows the frame.
+    current_value_params: FxHashSet<String>,
+    /// Indices of such type-parameter-typed parameters per callee. A call
+    /// argument that carries no reference adds no origin through them.
+    value_param_indices: FxHashMap<CallKey, FxHashSet<usize>>,
+    resolved_value_param_indices: FxHashMap<CallableIdentity, FxHashSet<usize>>,
+    /// Per local of the current function: its source before any store into
+    /// one of its places, and the frame-local references stored at each
+    /// place path (`None` for a store that a later one cannot replace).
+    /// Keyed by name and declaration depth, so a shadowing local in an
+    /// inner block keeps its own history.
+    place_stores: FxHashMap<(String, usize), PlaceStores>,
+}
+
+#[derive(Default)]
+struct PlaceStores {
+    base: Option<Source>,
+    stores: Vec<(Option<String>, Source)>,
 }
 
 pub fn check_program(program: &ast::Program) -> Vec<EscapeError> {
@@ -208,6 +230,11 @@ pub fn analyze_program_with_callables(
         current_ref_param_indices: FxHashSet::default(),
         recorded_return_spans: FxHashSet::default(),
         globals,
+        current_type_params: FxHashSet::default(),
+        current_value_params: FxHashSet::default(),
+        value_param_indices: FxHashMap::default(),
+        resolved_value_param_indices: FxHashMap::default(),
+        place_stores: FxHashMap::default(),
     };
     checker.seed_extern_return_summaries(program);
 
@@ -344,25 +371,35 @@ impl Checker<'_> {
     fn check_program_functions(&mut self, program: &ast::Program) {
         for item in &program.items {
             match &item.kind {
-                ast::ItemKind::Function(func) => self.check_function(
+                ast::ItemKind::Function(func) => {
+                    self.current_type_params = Self::type_param_names(func.generics.as_ref());
+                    self.check_function(
                     &func.name.name,
                     func.name.span,
                     &func.parameters,
                     &func.return_type,
                     &func.body,
                     false,
-                ),
+                    )
+                }
                 ast::ItemKind::Impl(imp) => {
+                    let mut impl_params = Self::type_param_names(imp.generics.as_ref());
+                    impl_params.extend(imp.implicit_type_params.iter().cloned());
                     for member in &imp.items {
+                        self.current_type_params = impl_params.clone();
                         match member {
-                            ast::ImplItemKind::Function(func) => self.check_function(
+                            ast::ImplItemKind::Function(func) => {
+                                self.current_type_params
+                                    .extend(Self::type_param_names(func.generics.as_ref()));
+                                self.check_function(
                                 &func.name.name,
                                 func.name.span,
                                 &func.parameters,
                                 &func.return_type,
                                 &func.body,
                                 true,
-                            ),
+                                )
+                            }
                             ast::ImplItemKind::Cast(cast) => self.check_function(
                                 "<cast>",
                                 cast.span,
@@ -377,6 +414,29 @@ impl Checker<'_> {
                 }
                 _ => {}
             }
+        }
+    }
+
+    fn type_param_names(generics: Option<&ast::Generics>) -> FxHashSet<String> {
+        generics
+            .into_iter()
+            .flat_map(|generics| generics.params.iter())
+            .filter_map(|param| match param {
+                ast::GenericParam::Type(param) => Some(param.name.name.clone()),
+                ast::GenericParam::Lifetime(_) => None,
+            })
+            .collect()
+    }
+
+    /// True for a bare type-parameter type such as `T`.
+    fn is_type_param(&self, ty: &ast::Type) -> bool {
+        match ty.kind.as_ref() {
+            ast::TypeKind::Named(named) => {
+                named.path.len() == 1
+                    && named.generics.is_none()
+                    && self.current_type_params.contains(&named.path[0].name)
+            }
+            _ => false,
         }
     }
 
@@ -411,7 +471,20 @@ impl Checker<'_> {
         let mut ref_sources: FxHashMap<String, Source> = FxHashMap::default();
         let mut ptr_locals: FxHashSet<String> = FxHashSet::default();
         let mut ref_params: FxHashSet<String> = FxHashSet::default();
-        for param in parameters {
+        self.current_value_params.clear();
+        self.place_stores.clear();
+        let mut value_indices = FxHashSet::default();
+        for (index, param) in parameters.iter().enumerate() {
+            if self.is_type_param(&param.param_type) {
+                self.current_value_params.insert(param.name.name.clone());
+                value_indices.insert(index);
+                ref_sources.insert(
+                    param.name.name.clone(),
+                    Source::Escapable {
+                        origins: FxHashSet::from_iter([param.name.name.clone()]),
+                    },
+                );
+            }
             match param.param_type.kind.as_ref() {
                 ast::TypeKind::Reference(_) => {
                     ref_params.insert(param.name.name.clone());
@@ -431,6 +504,20 @@ impl Checker<'_> {
                 .last_mut()
                 .expect("scope stack non-empty")
                 .push((param.name.name.clone(), None));
+        }
+        if !value_indices.is_empty() {
+            self.value_param_indices.insert(
+                CallKey {
+                    name: function_name.to_string(),
+                    arity: parameters.len(),
+                    method: is_method,
+                },
+                value_indices.clone(),
+            );
+            self.resolved_value_param_indices.insert(
+                CallableIdentity::from_decl_span(function_span, is_method),
+                value_indices,
+            );
         }
         self.check_block(
             body,
@@ -534,6 +621,11 @@ impl Checker<'_> {
                     Source::Escapable {
                         origins: FxHashSet::from_iter([ident.name.clone()]),
                     }
+                } else if self.current_value_params.contains(&ident.name)
+                    && self.local_scope(ident, scopes) == Some(0)
+                {
+                    // `T x` lives in the frame even when `T` is a reference.
+                    Source::Local { depth: 0 }
                 } else if ptr_locals.contains(&ident.name) {
                     if through_fields {
                         Source::Escapable {
@@ -678,7 +770,12 @@ impl Checker<'_> {
                 Some(result.unwrap_or(Source::Opaque))
             }
             ReturnSummary::Escapable { parameter_indices } => {
+                let value_indices = match self.resolved_callables.get(&call_site) {
+                    Some(resolved) => self.resolved_value_param_indices.get(&resolved.identity),
+                    None => self.value_param_indices.get(key),
+                };
                 let mut result = None;
+                let mut carried = parameter_indices.is_empty();
                 for index in parameter_indices {
                     let Some(argument) = arguments.get(*index) else {
                         return Some(Source::Opaque);
@@ -690,6 +787,14 @@ impl Checker<'_> {
                         ptr_locals,
                         ref_params,
                     );
+                    // A `T` parameter given a non-reference value forwards
+                    // no borrow.
+                    if source.is_none()
+                        && value_indices.is_some_and(|indices| indices.contains(index))
+                    {
+                        continue;
+                    }
+                    carried = true;
                     let source = source.or_else(|| {
                         if !method_receiver {
                             return Some(Source::Opaque);
@@ -702,6 +807,9 @@ impl Checker<'_> {
                         Some(self.classify(argument, scopes, ref_sources, ptr_locals, ref_params))
                     });
                     result = merge_sources(result, source);
+                }
+                if !carried {
+                    return None;
                 }
                 Some(result.unwrap_or(Source::Escapable {
                     origins: FxHashSet::default(),
@@ -949,6 +1057,10 @@ impl Checker<'_> {
                 {
                     self.error(msg::reference_escapes_scope(), init.span);
                 }
+                if let ast::PatternKind::Identifier(ident) = &let_stmt.pattern.kind {
+                    self.place_stores
+                        .remove(&(ident.name.clone(), scopes.len() - 1));
+                }
                 Self::record_pattern_refs(&let_stmt.pattern, declared_source, scopes, ref_sources);
                 Self::record_pointer_binding(let_stmt, ptr_locals);
             }
@@ -966,14 +1078,23 @@ impl Checker<'_> {
                             self.error(msg::returned_reference_escapes(), expr.span);
                         }
                         Source::Escapable { origins } => {
-                            let mut borrow_params: Vec<String> = origins.into_iter().collect();
+                            // Only reference parameters are caller loans the
+                            // borrow checker maps; a `T x` origin is not one.
+                            let value_only = !origins.is_empty()
+                                && origins
+                                    .iter()
+                                    .all(|origin| self.current_value_params.contains(origin));
+                            let mut borrow_params: Vec<String> = origins
+                                .into_iter()
+                                .filter(|origin| !self.current_value_params.contains(origin))
+                                .collect();
                             borrow_params.sort();
                             let mut borrow_param_indices: Vec<usize> = borrow_params
                                 .iter()
                                 .filter_map(|name| self.current_param_indices.get(name).copied())
                                 .collect();
                             borrow_param_indices.sort_unstable();
-                            if self.collect_return_origins {
+                            if self.collect_return_origins && !value_only {
                                 let return_key = (expr.span.file, expr.span.start, expr.span.end);
                                 if self.recorded_return_spans.insert(return_key) {
                                     self.return_origins.push(ReturnOrigin {
@@ -1041,6 +1162,121 @@ impl Checker<'_> {
             ast::StatementKind::Defer(inner) => {
                 self.check_statement(inner, scopes, ref_sources, ptr_locals, ref_params);
             }
+        }
+    }
+
+    /// The local a place such as `h.refs[0]` is stored in, unless the path
+    /// goes through a dereference.
+    fn place_root(expr: &ast::Expression) -> Option<&ast::Identifier> {
+        match expr.kind.as_ref() {
+            ast::ExpressionKind::Identifier(ident) => Some(ident),
+            ast::ExpressionKind::FieldAccess { object, .. }
+            | ast::ExpressionKind::Index { object, .. } => Self::place_root(object),
+            _ => None,
+        }
+    }
+
+    /// True when the method call at `span` takes its receiver as `&mut self`
+    /// and has a parameter typed by a bare type parameter, such as
+    /// `Vec<T>.push(&mut self, T value)`: a reference passed there is kept
+    /// by the receiver.
+    fn method_stores_arguments(&self, span: Span) -> bool {
+        self.resolved_callables
+            .get(&(span.file, span.start, span.end, span.expansion))
+            .is_some_and(|resolved| {
+                resolved.mutable_parameters.contains(&0)
+                    && self
+                        .resolved_value_param_indices
+                        .get(&resolved.identity)
+                        .is_some_and(|indices| indices.iter().any(|index| *index > 0))
+            })
+    }
+
+    /// Records that the place rooted at local `root` now holds a reference
+    /// from `source`. With `report_scope`, also reports a referent that dies
+    /// before `root` does.
+    #[allow(clippy::too_many_arguments)]
+    fn store_into_place(
+        &mut self,
+        root: &ast::Identifier,
+        path: Option<String>,
+        source: Source,
+        span: Span,
+        report_scope: bool,
+        scopes: &[Vec<ScopeEntry>],
+        ref_sources: &mut FxHashMap<String, Source>,
+        ptr_locals: &FxHashSet<String>,
+        ref_params: &FxHashSet<String>,
+    ) {
+        // A store through a raw pointer writes its pointee, not the local.
+        if ptr_locals.contains(&root.name) {
+            return;
+        }
+        let Some(mut root_depth) = self.local_scope(root, scopes) else {
+            if report_scope
+                && matches!(source, Source::Local { .. })
+                && self.globals.contains(&root.name)
+            {
+                self.error(msg::reference_stored_into_global(&root.name), span);
+            }
+            return;
+        };
+        let declared_depth = root_depth;
+        // A value parameter dies with the frame, like a local in the body.
+        if root_depth == 0 && !ref_params.contains(&root.name) {
+            root_depth = 1;
+        }
+        if report_scope && matches!(source, Source::Local { depth } if depth > root_depth) {
+            self.error(msg::reference_escapes_scope(), span);
+        }
+        // Only a frame-local referent matters for a later `return root`;
+        // caller origins stay with the owner's declared source. A store to
+        // a field path replaces what that path held before.
+        let entry = self
+            .place_stores
+            .entry((root.name.clone(), declared_depth))
+            .or_insert_with(|| PlaceStores {
+                base: ref_sources.get(&root.name).cloned(),
+                stores: Vec::new(),
+            });
+        if let Some(path) = &path {
+            entry.stores.retain(|(stored, _)| {
+                stored.as_ref().is_none_or(|stored| {
+                    !(stored == path
+                        || stored.starts_with(&format!("{path}."))
+                        || stored.starts_with(&format!("{path}[")))
+                })
+            });
+        }
+        if matches!(source, Source::Local { .. }) {
+            entry.stores.push((path, source));
+        }
+        let merged = entry
+            .stores
+            .iter()
+            .fold(entry.base.clone(), |merged, (_, stored)| {
+                merge_sources(merged, Some(stored.clone()))
+            });
+        match merged {
+            Some(merged) => {
+                ref_sources.insert(root.name.clone(), merged);
+            }
+            None => {
+                ref_sources.remove(&root.name);
+            }
+        }
+    }
+
+    /// The field path of a place below its root local, such as `.r` for
+    /// `w.r`. An indexed step makes the path unreplaceable (`None`): a store
+    /// to one element does not overwrite another.
+    fn place_path(expr: &ast::Expression) -> Option<String> {
+        match expr.kind.as_ref() {
+            ast::ExpressionKind::Identifier(_) => Some(String::new()),
+            ast::ExpressionKind::FieldAccess { object, field } => {
+                Some(format!("{}.{}", Self::place_path(object)?, field.name))
+            }
+            _ => None,
         }
     }
 
@@ -1129,6 +1365,29 @@ impl Checker<'_> {
                             }
                             ref_sources.insert(target.name.clone(), source);
                         }
+                    } else if !matches!(left.kind.as_ref(), ast::ExpressionKind::Identifier(_))
+                        && let Some(root) = Self::place_root(left)
+                        && let Some(source) = self.reference_source(
+                            right,
+                            scopes,
+                            ref_sources,
+                            ptr_locals,
+                            ref_params,
+                        )
+                    {
+                        // The borrow checker judges a field store by its
+                        // later uses; this only remembers what the owner holds.
+                        self.store_into_place(
+                            root,
+                            Self::place_path(left),
+                            source,
+                            right.span,
+                            false,
+                            scopes,
+                            ref_sources,
+                            ptr_locals,
+                            ref_params,
+                        );
                     }
                     self.check_expr(right, scopes, ref_sources, ptr_locals, ref_params);
                 } else {
@@ -1147,6 +1406,45 @@ impl Checker<'_> {
             | ast::ExpressionKind::Launch(operand)
             | ast::ExpressionKind::Wait(operand) => {
                 self.check_expr(operand, scopes, ref_sources, ptr_locals, ref_params);
+            }
+            ast::ExpressionKind::MethodCall {
+                receiver,
+                arguments,
+                ..
+            } if self.method_stores_arguments(expr.span) => {
+                self.check_expr(receiver, scopes, ref_sources, ptr_locals, ref_params);
+                for arg in arguments {
+                    self.check_expr(arg, scopes, ref_sources, ptr_locals, ref_params);
+                }
+                if let Some(root) = Self::place_root(receiver) {
+                    let value_indices = self
+                        .resolved_callables
+                        .get(&(expr.span.file, expr.span.start, expr.span.end, expr.span.expansion))
+                        .and_then(|resolved| self.resolved_value_param_indices.get(&resolved.identity))
+                        .cloned()
+                        .unwrap_or_default();
+                    for (index, arg) in arguments.iter().enumerate() {
+                        // Argument 0 of the callee is the receiver.
+                        if !value_indices.contains(&(index + 1)) {
+                            continue;
+                        }
+                        if let Some(source) =
+                            self.reference_source(arg, scopes, ref_sources, ptr_locals, ref_params)
+                        {
+                            self.store_into_place(
+                                root,
+                                None,
+                                source,
+                                arg.span,
+                                true,
+                                scopes,
+                                ref_sources,
+                                ptr_locals,
+                                ref_params,
+                            );
+                        }
+                    }
+                }
             }
             ast::ExpressionKind::MethodCall {
                 receiver,

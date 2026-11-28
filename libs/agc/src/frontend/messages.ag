@@ -529,6 +529,12 @@ String cannot_assign_borrowed(str name) {
 str ref_does_not_outlive_func() {
     return "returned reference does not outlive the function (it borrows a local value; return a reference to a global or a reference parameter instead)";
 }
+
+/// Diagnostic text: "reference to a block-local value escapes its scope".
+/// Returns static text.
+str ref_escapes_scope() {
+    return "reference to a block-local value escapes its scope";
+}
 /// Diagnostic text: "value moved by return". Returns static text.
 str note_value_moved_by_return() {
     return "value moved by return";

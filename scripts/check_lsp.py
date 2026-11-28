@@ -1025,6 +1025,31 @@ class NativeLsp(unittest.TestCase):
         self.assertEqual({item["range"]["start"]["line"] for item in diagnostics}, {13, 15, 18, 22, 26})
         self.assertTrue(all("does not outlive" in item["message"] for item in diagnostics))
 
+    def test_references_do_not_escape_through_generics_containers_or_fields(self):
+        # A `T` parameter carries a reference when `T` is one, a `Vec<&T>`
+        # keeps what it is given, and a struct field keeps its referent.
+        text = ("struct Tok { i64 id; }\n"
+                "struct View { &Tok r; }\n"
+                "struct Bag<T> { T item; }\n"
+                "impl<T> Bag<T> { void put(&mut self, T item) { self.item = item; } }\n"
+                "T same<T>(T x) { return x; }\n"
+                "T left<T>(T a, T b) { return a; }\n"
+                "&Tok through() {\n Tok t;\n return same(&t);\n}\n"
+                "&Tok kept(&Tok p) {\n Tok t;\n return left(p, &t);\n}\n"
+                "View field() {\n Tok t;\n View w;\n w.r = &t;\n return w;\n}\n"
+                "i64 stored() {\n Bag<&Tok> refs;\n {\n Tok t;\n refs.put(&t);\n }\n return refs.item.id;\n}\n"
+                "i64 aliased() {\n Bag<&Tok> refs;\n {\n Tok t;\n let r = &t;\n refs.put(r);\n }\n return refs.item.id;\n}\n"
+                "i64 local() {\n Tok t;\n Bag<&Tok> refs;\n refs.put(&t);\n let r = same(&t);\n return refs.item.id + r.id + same(5);\n}\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        self.assertEqual([(item["range"]["start"]["line"], item["message"]) for item in diagnostics],
+                         [(8, "returned reference does not outlive the function (it borrows a local "
+                              "value; return a reference to a global or a reference parameter instead)"),
+                          (18, "returned reference does not outlive the function (it borrows a local "
+                               "value; return a reference to a global or a reference parameter instead)"),
+                          (24, "reference to a block-local value escapes its scope"),
+                          (33, "reference to a block-local value escapes its scope")])
+
     def test_shared_values_and_lock_blocks_resolve_to_user_declarations(self):
         repo = Path(__file__).resolve().parent.parent
         text = ("import std.sync;\n"
