@@ -3036,8 +3036,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// recorded as moved there already left when the aggregate was built,
     /// so a later element that reinitializes it keeps its new value.
     fn clear_yielded_element(&mut self, element: &ast::Expression) -> CodegenResult<()> {
-        if matches!(element.kind.as_ref(), ast::ExpressionKind::Identifier(_))
-            && self.records_move(element)
+        // A place whose move was already recorded while the aggregate was
+        // built has left its owner; a later element may have refilled it,
+        // and clearing it again would leak the replacement.
+        if matches!(
+            element.kind.as_ref(),
+            ast::ExpressionKind::Identifier(_)
+                | ast::ExpressionKind::FieldAccess { .. }
+                | ast::ExpressionKind::Index { .. }
+        ) && self.records_move(element)
         {
             return Ok(());
         }

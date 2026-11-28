@@ -989,6 +989,27 @@ class NativeLsp(unittest.TestCase):
         diagnostics = self.session.published(uri, 1)["diagnostics"]
         self.assertEqual(diagnostics, [])
 
+    def test_a_call_that_never_returns_ends_its_path(self):
+        # The branch that moves `t` aborts, so the read after the `if` only
+        # sees `t` intact. Without the abort the read is still rejected.
+        text = ("trait Drop { void drop(*self); }\n"
+                "struct Tok { i64 id; }\n"
+                "impl Drop for Tok { void drop(*self) { } }\n"
+                "void take(Tok t) { }\ni64 peek(&Tok t) { return t.id; }\n"
+                "i64 stops(bool flag) {\n Tok t = { .id = 1 };\n"
+                " if (flag) { take(t); abort(); }\n return peek(&t);\n}\n"
+                "i64 falls(bool flag) {\n Tok t = { .id = 1 };\n"
+                " if (flag) { take(t); }\n return peek(&t);\n}\n"
+                "i64 shadowed(bool flag, void() abort) {\n Tok t = { .id = 1 };\n"
+                " if (flag) { take(t); abort(); }\n return peek(&t);\n}\n"
+                "void quiet() { }\n"
+                "i64 main() { return stops(false) + falls(false) + shadowed(false, quiet); }\n"
+                "void abort() { while (true) { } }\n")
+        uri = self.open(text)
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
+        # A callback parameter named `abort` returns, so it ends no path.
+        self.assertEqual([item["range"]["start"]["line"] for item in diagnostics], [13, 18])
+
     def test_a_local_callable_is_checked_against_its_own_signature(self):
         # The parameter `f` shadows the function `f`, so its signature rules.
         text = ("void f(i64 a, i64 b) { }\n"
